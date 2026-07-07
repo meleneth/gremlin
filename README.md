@@ -107,7 +107,7 @@ In the TUI, Space marks/unmarks the selected file in a persisted default selecti
 
 `transfer list` shows recent dry-run plans. `transfer show PLAN_ID` prints the plan summary and capped file entries; use `--action copy`, `--action conflict`, or another action name to filter entries.
 
-`transfer run PLAN_ID` is the first conservative local copy runner. It only executes plan entries whose action is `copy`, creates parent directories, refuses overwrites, hashes the source stream while copying, compares that stream to the planned source content hash when one exists, records a `transfer_copy` job with per-file events, and writes the resulting content id onto the destination observation. It does not read the destination back after writing unless `--paranoid` is set.
+`transfer run PLAN_ID` is the first conservative local copy runner. It only executes plan entries whose action is `copy`, creates parent directories, refuses overwrites, hashes the source stream while copying, compares that stream to the planned source content hash when one exists, records a `transfer_copy` job with per-file events, and writes the resulting content id onto the destination observation. It does not read the destination back after writing unless `--paranoid` is set; paranoid mode fsyncs the file and parent directory before hashing the destination.
 
 `target inspect` classifies obvious target forms without touching the database:
 

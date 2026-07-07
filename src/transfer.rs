@@ -384,6 +384,7 @@ fn copy_one_entry(
     if let Ok(dest_meta) = std::fs::metadata(dest_path) {
         if dest_meta.is_file() && dest_meta.len() == entry.size_bytes {
             let verified_content_id = if paranoid {
+                sync_for_paranoid_readback(dest_path, None)?;
                 let readback_hash = hash_existing_file(dest_path)?;
                 verify_copy_hash(conn, entry, &readback_hash)?;
                 Some(db::ensure_content_object(
@@ -415,10 +416,7 @@ fn copy_one_entry(
         anyhow::bail!("destination exists and differs: {}", dest_path.display());
     }
 
-    if let Some(parent) = dest_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating destination directory {}", parent.display()))?;
-    }
+    let parent_created = ensure_dest_parent(dest_path)?;
     let copy_hash = copy_with_hash(source_path, dest_path)?;
     if copy_hash.bytes != entry.size_bytes {
         anyhow::bail!(
@@ -430,6 +428,7 @@ fn copy_one_entry(
     }
     verify_copy_hash(conn, entry, &copy_hash)?;
     if paranoid {
+        sync_for_paranoid_readback(dest_path, parent_created)?;
         let readback_hash = hash_existing_file(dest_path)?;
         if readback_hash.bytes != copy_hash.bytes
             || readback_hash.blake3 != copy_hash.blake3
@@ -460,6 +459,15 @@ fn copy_one_entry(
         },
     )?;
     Ok(CopyOutcome::Copied(copy_hash.bytes))
+}
+
+fn ensure_dest_parent(dest_path: &Path) -> anyhow::Result<Option<PathBuf>> {
+    let Some(parent) = dest_path.parent() else {
+        return Ok(None);
+    };
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("creating destination directory {}", parent.display()))?;
+    Ok(Some(parent.to_path_buf()))
 }
 
 fn insert_dest_observation(
@@ -500,6 +508,20 @@ fn hash_existing_file(path: &Path) -> anyhow::Result<CopyHashResult> {
     let mut file =
         std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     hash_stream_to_writer(&mut file, None, path)
+}
+
+fn sync_for_paranoid_readback(dest_path: &Path, parent: Option<PathBuf>) -> anyhow::Result<()> {
+    let file = std::fs::File::open(dest_path)
+        .with_context(|| format!("opening {}", dest_path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("syncing {}", dest_path.display()))?;
+    if let Some(parent) = parent {
+        let dir = std::fs::File::open(&parent)
+            .with_context(|| format!("opening directory {}", parent.display()))?;
+        dir.sync_all()
+            .with_context(|| format!("syncing directory {}", parent.display()))?;
+    }
+    Ok(())
 }
 
 fn hash_stream_to_writer(
@@ -932,5 +954,13 @@ mod tests {
             safe_join("/tmp/root", "dir/file.txt").unwrap(),
             std::path::Path::new("/tmp/root").join("dir/file.txt")
         );
+    }
+
+    #[test]
+    fn paranoid_syncs_file_and_parent_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, b"hello").unwrap();
+        sync_for_paranoid_readback(&path, Some(dir.path().to_path_buf())).unwrap();
     }
 }
