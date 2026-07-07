@@ -29,6 +29,9 @@ gremlin job create scan PATH --db ./gremlin.db
 gremlin job create hash PATH --db ./gremlin.db
 gremlin job show JOB_ID --db ./gremlin.db
 gremlin job run JOB_ID --db ./gremlin.db
+gremlin target inspect TARGET
+gremlin target add TARGET --db ./gremlin.db
+gremlin status TARGET --db ./gremlin.db
 gremlin tui --db ./gremlin.db
 ```
 
@@ -69,6 +72,17 @@ gremlin --machine-label laptop scan ~/archive
 `import-events` reads JSONL events, preserves imported evidence in `job_events`, and creates checksum collection entries for completed hash events.
 
 `job create` records an intended scan or hash job without executing file work. This is the same seam used by the TUI: UI actions enqueue jobs, while `job run` executes a queued job and emits evidence later.
+
+`target inspect` classifies obvious target forms without touching the database:
+
+```bash
+gremlin target inspect /archive/photos
+gremlin target inspect file:///archive/photos
+gremlin target inspect nas01:/mnt/archive
+gremlin target inspect https://example.invalid/listing.json
+```
+
+Use `--kind local-path|file-url|ssh|url` only when you want to force interpretation. `target add` creates or reuses the matching machine/root record, and `status TARGET` gives a fast projected summary when that root is already known.
 
 ## Development Notes
 

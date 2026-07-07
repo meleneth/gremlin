@@ -5,12 +5,14 @@ mod error;
 mod events;
 mod fswork;
 mod import;
+mod targets;
 mod tui;
 mod util;
 
 use anyhow::Context;
 use clap::Parser;
-use cli::{Cli, Commands, ConfigCommands, JobCommands, WorkerCommands};
+use cli::{Cli, Commands, ConfigCommands, JobCommands, TargetCommands, WorkerCommands};
+use targets::{ParsedTarget, TargetKind};
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -158,6 +160,49 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         },
+        Commands::Target { command } => match command {
+            TargetCommands::Inspect { target, kind } => {
+                let parsed = targets::parse_target(&target, kind)?;
+                println!("{}", serde_json::to_string_pretty(&parsed)?);
+            }
+            TargetCommands::Add {
+                target,
+                kind,
+                label,
+            } => {
+                let db = config_ctx.resolve_db(cli.db.clone())?;
+                let conn = db::open_existing(&db)?;
+                let parsed = targets::parse_target(&target, kind)?;
+                let (machine_id, root_path) =
+                    resolve_target_identity(&conn, &parsed, machine_label.as_deref())?;
+                let root_id = db::ensure_root(&conn, &machine_id, &root_path)?;
+                if let Some(label) = label {
+                    db::set_root_label(&conn, &root_id, &label)?;
+                }
+                println!(
+                    "target {:?}\tmachine={}\troot={}\tpath={}",
+                    parsed.kind, machine_id, root_id, root_path
+                );
+            }
+        },
+        Commands::Status { target, kind } => {
+            let db = config_ctx.resolve_db(cli.db.clone())?;
+            let conn = db::open_existing(&db)?;
+            let parsed = targets::parse_target(&target, kind)?;
+            let (machine_id, root_path) =
+                resolve_target_identity(&conn, &parsed, machine_label.as_deref())?;
+            match db::target_status(&conn, &machine_id, &root_path)? {
+                Some(status) => print_target_status(&parsed, status),
+                None => {
+                    println!("target:\t{}", parsed.original);
+                    println!("kind:\t{:?}", parsed.kind);
+                    println!("machine:\t{}", parsed.display_machine_label());
+                    println!("path:\t{}", root_path);
+                    println!("known:\tno");
+                    println!("next:\tgremlin target add {} --db <db>", parsed.original);
+                }
+            }
+        }
         Commands::Tui => {
             let db = config_ctx.resolve_db(cli.db.clone())?;
             let conn = db::open_existing(&db)?;
@@ -166,4 +211,59 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn resolve_target_identity(
+    conn: &rusqlite::Connection,
+    parsed: &ParsedTarget,
+    machine_label: Option<&str>,
+) -> anyhow::Result<(String, String)> {
+    match parsed.kind {
+        TargetKind::LocalPath | TargetKind::FileUrl => {
+            let local_path = parsed
+                .local_path()
+                .ok_or_else(|| anyhow::anyhow!("target is not local file-like"))?;
+            let path = util::absolute_path(&local_path)?;
+            let machine_id = db::ensure_local_machine_with_label(conn, machine_label)?;
+            Ok((machine_id, util::lossy(&path)))
+        }
+        TargetKind::Ssh => {
+            let label = parsed
+                .machine_hint
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("SSH target missing machine hint"))?;
+            let machine_id = db::ensure_machine_hint(conn, label, Some("ssh"))?;
+            Ok((machine_id, parsed.path.clone()))
+        }
+        TargetKind::Url => {
+            let label = parsed
+                .scheme
+                .as_deref()
+                .map(|scheme| format!("{scheme} target"))
+                .unwrap_or_else(|| "url target".to_string());
+            let machine_id = db::ensure_machine_hint(conn, &label, parsed.scheme.as_deref())?;
+            Ok((machine_id, parsed.path.clone()))
+        }
+    }
+}
+
+fn print_target_status(parsed: &ParsedTarget, status: db::TargetStatus) {
+    println!("target:\t{}", parsed.original);
+    println!("kind:\t{:?}", parsed.kind);
+    println!("known:\tyes");
+    println!("machine_id:\t{}", status.root.machine_id);
+    println!("root_id:\t{}", status.root.id);
+    println!("path:\t{}", status.root.path);
+    println!("files:\t{}", status.file_count);
+    println!("bytes:\t{}", status.total_bytes);
+    println!("content_objects:\t{}", status.content_count);
+    println!(
+        "latest_event:\t{}",
+        status.latest_event_at.unwrap_or_else(|| "-".to_string())
+    );
+    if let Some(job) = status.latest_job {
+        println!("latest_job:\t{}\t{}\t{}", job.id, job.kind, job.status);
+    } else {
+        println!("latest_job:\t-");
+    }
 }

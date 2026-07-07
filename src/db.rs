@@ -10,6 +10,7 @@ use crate::util::{absolute_path, local_hostname, local_machine_id, lossy, new_id
 #[derive(Debug, Clone)]
 pub struct RootRow {
     pub id: String,
+    pub machine_id: String,
     pub path: String,
     pub label: Option<String>,
 }
@@ -50,6 +51,16 @@ pub struct JobRow {
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
     pub params_json: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TargetStatus {
+    pub root: RootRow,
+    pub file_count: i64,
+    pub total_bytes: i64,
+    pub content_count: i64,
+    pub latest_job: Option<JobRow>,
+    pub latest_event_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -232,6 +243,33 @@ pub fn ensure_root(conn: &Connection, machine_id: &str, path: &str) -> rusqlite:
     conn.execute(
         "INSERT INTO roots (id, machine_id, path, label, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![id, machine_id, path, path, now_rfc3339()],
+    )?;
+    Ok(id)
+}
+
+pub fn set_root_label(conn: &Connection, root_id: &str, label: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE roots SET label = ?2 WHERE id = ?1",
+        params![root_id, label],
+    )?;
+    Ok(())
+}
+
+pub fn ensure_machine_hint(
+    conn: &Connection,
+    label: &str,
+    platform: Option<&str>,
+) -> rusqlite::Result<String> {
+    let digest = blake3::hash(format!("{label}:{}", platform.unwrap_or("unknown")).as_bytes());
+    let id = format!("machine_{}", &digest.to_hex()[..16]);
+    let now = now_rfc3339();
+    conn.execute(
+        r#"
+        INSERT INTO machines (id, label, hostname, platform, created_at, last_seen_at)
+        VALUES (?1, ?2, ?2, ?3, ?4, ?4)
+        ON CONFLICT(id) DO UPDATE SET last_seen_at = excluded.last_seen_at
+        "#,
+        params![id, label, platform, now],
     )?;
     Ok(id)
 }
@@ -506,15 +544,99 @@ pub fn recent_files(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<FileR
 }
 
 pub fn roots(conn: &Connection) -> rusqlite::Result<Vec<RootRow>> {
-    let mut stmt = conn.prepare("SELECT id, path, label FROM roots ORDER BY created_at DESC")?;
+    let mut stmt =
+        conn.prepare("SELECT id, machine_id, path, label FROM roots ORDER BY created_at DESC")?;
     let rows = stmt.query_map([], |row| {
         Ok(RootRow {
             id: row.get(0)?,
-            path: row.get(1)?,
-            label: row.get(2)?,
+            machine_id: row.get(1)?,
+            path: row.get(2)?,
+            label: row.get(3)?,
         })
     })?;
     rows.collect()
+}
+
+pub fn find_root_by_machine_path(
+    conn: &Connection,
+    machine_id: &str,
+    path: &str,
+) -> rusqlite::Result<Option<RootRow>> {
+    conn.query_row(
+        "SELECT id, machine_id, path, label FROM roots WHERE machine_id = ?1 AND path = ?2",
+        params![machine_id, path],
+        |row| {
+            Ok(RootRow {
+                id: row.get(0)?,
+                machine_id: row.get(1)?,
+                path: row.get(2)?,
+                label: row.get(3)?,
+            })
+        },
+    )
+    .optional()
+}
+
+pub fn target_status(
+    conn: &Connection,
+    machine_id: &str,
+    path: &str,
+) -> rusqlite::Result<Option<TargetStatus>> {
+    let Some(root) = find_root_by_machine_path(conn, machine_id, path)? else {
+        return Ok(None);
+    };
+    let (file_count, total_bytes): (i64, i64) = conn.query_row(
+        r#"
+        SELECT COUNT(*), COALESCE(SUM(size_bytes), 0)
+        FROM path_observations
+        WHERE machine_id = ?1 AND root_id = ?2
+        "#,
+        params![machine_id, root.id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let content_count: i64 = conn.query_row(
+        r#"
+        SELECT COUNT(DISTINCT content_id)
+        FROM path_observations
+        WHERE machine_id = ?1 AND root_id = ?2 AND content_id IS NOT NULL
+        "#,
+        params![machine_id, root.id],
+        |row| row.get(0),
+    )?;
+    let latest_job = conn
+        .query_row(
+            r#"
+            SELECT id, kind, status, machine_id, root_id, created_at, started_at, completed_at, params_json
+            FROM jobs
+            WHERE root_id = ?1
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+            params![root.id],
+            job_from_row,
+        )
+        .optional()?;
+    let latest_event_at = conn
+        .query_row(
+            r#"
+            SELECT MAX(e.created_at)
+            FROM job_events e
+            JOIN jobs j ON j.id = e.job_id
+            WHERE j.root_id = ?1
+            "#,
+            params![root.id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(Some(TargetStatus {
+        root,
+        file_count,
+        total_bytes,
+        content_count,
+        latest_job,
+        latest_event_at,
+    }))
 }
 
 pub fn recent_jobs_and_events(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<JobEventRow>> {

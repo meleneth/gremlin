@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::config::ConfigFormat;
+use crate::targets::TargetKind;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -50,6 +51,15 @@ pub enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
+    Target {
+        #[command(subcommand)]
+        command: TargetCommands,
+    },
+    Status {
+        target: String,
+        #[arg(long, value_enum)]
+        kind: Option<TargetKind>,
+    },
     Tui,
 }
 
@@ -81,6 +91,22 @@ pub enum ConfigCommands {
         format: ConfigFormat,
     },
     Path,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TargetCommands {
+    Inspect {
+        target: String,
+        #[arg(long, value_enum)]
+        kind: Option<TargetKind>,
+    },
+    Add {
+        target: String,
+        #[arg(long, value_enum)]
+        kind: Option<TargetKind>,
+        #[arg(long)]
+        label: Option<String>,
+    },
 }
 
 impl JobKind {
