@@ -50,7 +50,6 @@
 
 - Improve TUI transfer plan display beyond the latest summary line.
 - Add compare flow between two roots or checksum collections.
-- Add transfer plan job/events around plan creation if the evidence model wants planning history in `job_events`.
 - Add more transfer plan filters and output formats after the copy runner requirements settle.
 - Keep transfer execution separate from planning until integrity and resume semantics are solid.
 - Model copy chunks or per-file transfer checkpoints before implementing actual transfer execution.

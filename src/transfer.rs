@@ -1,10 +1,22 @@
 use rusqlite::Connection;
 
 use crate::db::{self, RootRow, TransferPlanActionSummary};
+use crate::events::{EventEnvelope, EventKind, EventPayload};
+use crate::util::now_rfc3339;
+
+struct JobEventInput<'a> {
+    event_kind: EventKind,
+    kind: &'a str,
+    path: Option<&'a str>,
+    message: &'a str,
+    files_seen: Option<u64>,
+    errors: u64,
+}
 
 #[derive(Debug, Clone)]
 pub struct TransferPlanResult {
     pub plan_id: String,
+    pub job_id: String,
     pub selection_set_id: String,
     pub marked_count: i64,
     pub marked_bytes: i64,
@@ -26,8 +38,134 @@ pub fn plan_selected_files(
         anyhow::bail!("source root has no marked files; mark files in the TUI with Space first");
     }
 
+    let job_id = db::create_job(
+        conn,
+        "transfer_plan",
+        Some(&source_root.machine_id),
+        Some(&source_root.id),
+        serde_json::json!({
+            "source_root_id": source_root.id,
+            "source_path": source_root.path,
+            "dest_root_id": dest_root.id,
+            "dest_path": dest_root.path,
+            "selection_set_id": selection.set_id,
+            "marked_count": selection.marked_count,
+            "marked_bytes": selection.marked_bytes,
+        }),
+    )?;
+    persist_job_event(
+        conn,
+        &job_id,
+        JobEventInput {
+            event_kind: EventKind::JobCreated,
+            kind: "transfer_plan",
+            path: Some(&source_root.path),
+            message: "transfer planning queued",
+            files_seen: Some(selected.len() as u64),
+            errors: 0,
+        },
+    )?;
+    db::start_job(conn, &job_id)?;
+    persist_job_event(
+        conn,
+        &job_id,
+        JobEventInput {
+            event_kind: EventKind::JobStarted,
+            kind: "transfer_plan",
+            path: Some(&source_root.path),
+            message: "transfer planning started",
+            files_seen: Some(selected.len() as u64),
+            errors: 0,
+        },
+    )?;
+
+    let plan_result =
+        build_transfer_plan(conn, source_root, dest_root, &selection, &selected, &job_id);
+
+    match plan_result {
+        Ok((plan_id, summary)) => {
+            db::update_job_progress(
+                conn,
+                &job_id,
+                db::JobProgressInput {
+                    phase: "planned",
+                    current_path: None,
+                    files_total: Some(selected.len() as u64),
+                    files_seen: selected.len() as u64,
+                    files_done: selected.len() as u64,
+                    files_skipped: 0,
+                    errors: 0,
+                },
+            )?;
+            let progress = EventEnvelope {
+                event_kind: EventKind::JobProgress,
+                job_id: Some(job_id.clone()),
+                sequence: None,
+                created_at: now_rfc3339(),
+                payload: EventPayload::JobProgress {
+                    phase: "planned".to_string(),
+                    current_path: None,
+                    files_total: Some(selected.len() as u64),
+                    files_seen: selected.len() as u64,
+                    files_done: selected.len() as u64,
+                    files_skipped: 0,
+                    errors: 0,
+                    message: Some(format!("transfer plan {plan_id} created")),
+                },
+            };
+            db::persist_event(conn, &progress)?;
+            db::complete_job(conn, &job_id, "completed")?;
+            persist_job_event(
+                conn,
+                &job_id,
+                JobEventInput {
+                    event_kind: EventKind::JobCompleted,
+                    kind: "transfer_plan",
+                    path: Some(&source_root.path),
+                    message: &format!("transfer plan {plan_id} created"),
+                    files_seen: Some(selected.len() as u64),
+                    errors: 0,
+                },
+            )?;
+            Ok(TransferPlanResult {
+                plan_id,
+                job_id,
+                selection_set_id: selection.set_id,
+                marked_count: selection.marked_count,
+                marked_bytes: selection.marked_bytes,
+                summary,
+            })
+        }
+        Err(err) => {
+            let _ = db::complete_job(conn, &job_id, "failed");
+            let _ = persist_job_event(
+                conn,
+                &job_id,
+                JobEventInput {
+                    event_kind: EventKind::JobFailed,
+                    kind: "transfer_plan",
+                    path: Some(&source_root.path),
+                    message: &err.to_string(),
+                    files_seen: Some(selected.len() as u64),
+                    errors: 1,
+                },
+            );
+            Err(err)
+        }
+    }
+}
+
+fn build_transfer_plan(
+    conn: &Connection,
+    source_root: &RootRow,
+    dest_root: &RootRow,
+    selection: &db::SelectionSummary,
+    selected: &std::collections::BTreeSet<String>,
+    job_id: &str,
+) -> anyhow::Result<(String, Vec<TransferPlanActionSummary>)> {
     let plan_id = db::create_transfer_plan(
         conn,
+        Some(job_id),
         &source_root.id,
         &dest_root.id,
         Some(&selection.set_id),
@@ -41,13 +179,13 @@ pub fn plan_selected_files(
     )?;
 
     for relative_path in selected {
-        let source = db::path_observation_for_root_path(conn, &source_root.id, &relative_path)?;
+        let source = db::path_observation_for_root_path(conn, &source_root.id, relative_path)?;
         let Some(source) = source else {
             db::insert_transfer_plan_entry(
                 conn,
                 db::TransferPlanEntryInput {
                     plan_id: &plan_id,
-                    relative_path: &relative_path,
+                    relative_path,
                     size_bytes: 0,
                     source_content_id: None,
                     dest_content_id: None,
@@ -59,7 +197,7 @@ pub fn plan_selected_files(
             continue;
         };
 
-        let dest = db::path_observation_for_root_path(conn, &dest_root.id, &relative_path)?;
+        let dest = db::path_observation_for_root_path(conn, &dest_root.id, relative_path)?;
         let (action, reason, dest_content_id) = match dest.as_ref() {
             None => ("copy", "destination path is not indexed", None),
             Some(dest) => {
@@ -104,13 +242,28 @@ pub fn plan_selected_files(
     }
 
     let summary = db::transfer_plan_action_summary(conn, &plan_id)?;
-    Ok(TransferPlanResult {
-        plan_id,
-        selection_set_id: selection.set_id,
-        marked_count: selection.marked_count,
-        marked_bytes: selection.marked_bytes,
-        summary,
-    })
+    Ok((plan_id, summary))
+}
+
+fn persist_job_event(
+    conn: &Connection,
+    job_id: &str,
+    input: JobEventInput<'_>,
+) -> rusqlite::Result<()> {
+    let envelope = EventEnvelope {
+        event_kind: input.event_kind,
+        job_id: Some(job_id.to_string()),
+        sequence: None,
+        created_at: now_rfc3339(),
+        payload: EventPayload::Job {
+            kind: input.kind.to_string(),
+            path: input.path.map(str::to_string),
+            message: Some(input.message.to_string()),
+            files_seen: input.files_seen,
+            errors: Some(input.errors),
+        },
+    };
+    db::persist_event(conn, &envelope)
 }
 
 #[cfg(test)]
@@ -178,6 +331,12 @@ mod tests {
 
         assert_eq!(entry.action, "copy");
         assert_eq!(entry.size_bytes, 10);
+        let job = db::job_by_id(&conn, &result.job_id).unwrap().unwrap();
+        assert_eq!(job.kind, "transfer_plan");
+        assert_eq!(job.status, "completed");
+        let events = db::events_for_job(&conn, &result.job_id).unwrap();
+        assert_eq!(events.first().unwrap().event_kind, "job_created");
+        assert_eq!(events.last().unwrap().event_kind, "job_completed");
     }
 
     #[test]

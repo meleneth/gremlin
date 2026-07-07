@@ -45,6 +45,7 @@ pub struct SelectionSummary {
 #[derive(Debug, Clone)]
 pub struct TransferPlanRow {
     pub id: String,
+    pub job_id: Option<String>,
     pub source_root_id: String,
     pub source_path: String,
     pub dest_root_id: String,
@@ -343,6 +344,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 
         CREATE TABLE IF NOT EXISTS transfer_plans (
             id TEXT PRIMARY KEY,
+            job_id TEXT,
             source_root_id TEXT NOT NULL REFERENCES roots(id),
             dest_root_id TEXT NOT NULL REFERENCES roots(id),
             selection_set_id TEXT REFERENCES selection_sets(id),
@@ -418,6 +420,12 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         "jobs",
         "cancel_requested",
         "ALTER TABLE jobs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "transfer_plans",
+        "job_id",
+        "ALTER TABLE transfer_plans ADD COLUMN job_id TEXT",
     )?;
     Ok(())
 }
@@ -929,6 +937,7 @@ pub fn selection_summary_for_root(
 
 pub fn create_transfer_plan(
     conn: &Connection,
+    job_id: Option<&str>,
     source_root_id: &str,
     dest_root_id: &str,
     selection_set_id: Option<&str>,
@@ -938,11 +947,12 @@ pub fn create_transfer_plan(
     conn.execute(
         r#"
         INSERT INTO transfer_plans
-            (id, source_root_id, dest_root_id, selection_set_id, status, created_at, params_json)
-        VALUES (?1, ?2, ?3, ?4, 'planned', ?5, ?6)
+            (id, job_id, source_root_id, dest_root_id, selection_set_id, status, created_at, params_json)
+        VALUES (?1, ?2, ?3, ?4, ?5, 'planned', ?6, ?7)
         "#,
         params![
             id,
+            job_id,
             source_root_id,
             dest_root_id,
             selection_set_id,
@@ -1069,6 +1079,7 @@ pub fn recent_transfer_plans(
         r#"
         SELECT
             p.id,
+            p.job_id,
             p.source_root_id,
             source.path,
             p.dest_root_id,
@@ -1100,6 +1111,7 @@ pub fn transfer_plan_by_id(
         r#"
         SELECT
             p.id,
+            p.job_id,
             p.source_root_id,
             source.path,
             p.dest_root_id,
@@ -1126,16 +1138,17 @@ pub fn transfer_plan_by_id(
 fn transfer_plan_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TransferPlanRow> {
     Ok(TransferPlanRow {
         id: row.get(0)?,
-        source_root_id: row.get(1)?,
-        source_path: row.get(2)?,
-        dest_root_id: row.get(3)?,
-        dest_path: row.get(4)?,
-        selection_set_id: row.get(5)?,
-        status: row.get(6)?,
-        created_at: row.get(7)?,
-        params_json: row.get(8)?,
-        entry_count: row.get(9)?,
-        total_bytes: row.get(10)?,
+        job_id: row.get(1)?,
+        source_root_id: row.get(2)?,
+        source_path: row.get(3)?,
+        dest_root_id: row.get(4)?,
+        dest_path: row.get(5)?,
+        selection_set_id: row.get(6)?,
+        status: row.get(7)?,
+        created_at: row.get(8)?,
+        params_json: row.get(9)?,
+        entry_count: row.get(10)?,
+        total_bytes: row.get(11)?,
     })
 }
 
@@ -1735,6 +1748,7 @@ mod tests {
         let set_id = ensure_default_selection_set(&conn, &source_id).unwrap();
         let plan_id = create_transfer_plan(
             &conn,
+            None,
             &source_id,
             &dest_id,
             Some(&set_id),

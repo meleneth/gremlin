@@ -446,6 +446,7 @@ fn print_transfer_plan(
     output: fswork::OutputOptions,
 ) -> anyhow::Result<()> {
     println!("transfer_plan:\t{}", result.plan_id);
+    println!("job:\t{}", result.job_id);
     println!("source_root:\t{}\t{}", source.id, source.path);
     println!("dest_root:\t{}\t{}", dest.id, dest.path);
     println!("selection_set:\t{}", result.selection_set_id);
@@ -495,6 +496,7 @@ fn print_transfer_plan_row(
         plan.selection_set_id.as_deref().unwrap_or("-"),
         plan.params_json.as_deref().unwrap_or("{}")
     );
+    println!("job:\t{}", plan.job_id.as_deref().unwrap_or("-"));
     for row in db::transfer_plan_action_summary(conn, &plan.id)? {
         println!(
             "{}:\t{}\t{}",

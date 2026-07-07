@@ -101,7 +101,7 @@ Roots maintain `current_size_bytes`, the projected total size of currently index
 
 In the TUI, Space marks/unmarks the selected file in a persisted default selection set for the current root. Press `t` on a source root, move to a destination root, and press Enter to create a dry-run transfer plan from those marks. Esc cancels the destination selection.
 
-`transfer plan SOURCE DEST` reads the source root's default TUI selection set, compares those marked paths against the destination root's current indexed observations, stores a durable transfer plan, and prints a dry-run summary. It never copies or overwrites files. Initial actions are `copy`, `skip`, `verify_needed`, `conflict`, and `unavailable`.
+`transfer plan SOURCE DEST` reads the source root's default TUI selection set, compares those marked paths against the destination root's current indexed observations, stores a durable transfer plan, records a `transfer_plan` job with append-only events, and prints a dry-run summary. It never copies or overwrites files. Initial actions are `copy`, `skip`, `verify_needed`, `conflict`, and `unavailable`.
 
 `transfer list` shows recent dry-run plans. `transfer show PLAN_ID` prints the plan summary and capped file entries; use `--action copy`, `--action conflict`, or another action name to filter entries.
 
@@ -125,7 +125,7 @@ Future seams deliberately left open:
 - SSH remote dispatch: run `gremlin worker hash ... --jsonl --out ...` remotely, then copy JSONL back for import.
 - Manifest imports: add SFV/CFV checksum manifests and PAR2 file-list extraction as checksum collection sources.
 - SMB path mapping: add machine/root mapping without changing content identity.
-- Transfer planning: persisted dry-run root-to-root plans and CLI inspection exist for TUI selections; next slices should add richer TUI plan browsing, checksum collection comparisons, and transfer jobs.
+- Transfer planning: persisted dry-run root-to-root plans, job events, and CLI inspection exist for TUI selections; next slices should add richer TUI plan browsing, checksum collection comparisons, and transfer jobs.
 - Seamless resume: make interrupted remote browsing, hashing, importing, and future copy jobs restart from durable job/event state instead of requiring manual cleanup.
 - Metadata extractors: add new job kinds and events rather than expanding scan/hash responsibilities.
 - Richer TUI job control: the TUI can start local jobs now; future slices should add progress, cancellation states, filtering, and async remote supervision without putting scan/hash/copy logic in TUI code.
