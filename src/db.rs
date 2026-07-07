@@ -13,6 +13,7 @@ pub struct RootRow {
     pub machine_id: String,
     pub path: String,
     pub label: Option<String>,
+    pub current_size_bytes: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -148,6 +149,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             path TEXT NOT NULL,
             label TEXT,
             created_at TEXT NOT NULL,
+            current_size_bytes INTEGER NOT NULL DEFAULT 0,
             UNIQUE(machine_id, path)
         );
 
@@ -223,7 +225,31 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             metadata_json TEXT
         );
         "#,
-    )
+    )?;
+    ensure_column(
+        conn,
+        "roots",
+        "current_size_bytes",
+        "ALTER TABLE roots ADD COLUMN current_size_bytes INTEGER NOT NULL DEFAULT 0",
+    )?;
+    Ok(())
+}
+
+fn ensure_column(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    alter_sql: &str,
+) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for row in rows {
+        if row? == column {
+            return Ok(());
+        }
+    }
+    conn.execute(alter_sql, [])?;
+    Ok(())
 }
 
 pub fn ensure_local_machine_with_label(
@@ -261,7 +287,7 @@ pub fn ensure_root(conn: &Connection, machine_id: &str, path: &str) -> rusqlite:
 
     let id = new_id("root");
     conn.execute(
-        "INSERT INTO roots (id, machine_id, path, label, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO roots (id, machine_id, path, label, created_at, current_size_bytes) VALUES (?1, ?2, ?3, ?4, ?5, 0)",
         params![id, machine_id, path, path, now_rfc3339()],
     )?;
     Ok(id)
@@ -273,6 +299,23 @@ pub fn set_root_label(conn: &Connection, root_id: &str, label: &str) -> rusqlite
         params![root_id, label],
     )?;
     Ok(())
+}
+
+pub fn refresh_root_current_size(conn: &Connection, root_id: &str) -> rusqlite::Result<i64> {
+    let current_size: i64 = conn.query_row(
+        r#"
+        SELECT COALESCE(SUM(size_bytes), 0)
+        FROM path_observations
+        WHERE root_id = ?1 AND status = 'present'
+        "#,
+        params![root_id],
+        |row| row.get(0),
+    )?;
+    conn.execute(
+        "UPDATE roots SET current_size_bytes = ?2 WHERE id = ?1",
+        params![root_id, current_size],
+    )?;
+    Ok(current_size)
 }
 
 pub fn ensure_machine_hint(
@@ -439,6 +482,7 @@ pub fn insert_path_observation(
             now_rfc3339()
         ],
     )?;
+    refresh_root_current_size(conn, input.root_id)?;
     Ok(())
 }
 
@@ -617,14 +661,16 @@ pub fn hash_baselines_for_root(
 }
 
 pub fn roots(conn: &Connection) -> rusqlite::Result<Vec<RootRow>> {
-    let mut stmt =
-        conn.prepare("SELECT id, machine_id, path, label FROM roots ORDER BY created_at DESC")?;
+    let mut stmt = conn.prepare(
+        "SELECT id, machine_id, path, label, current_size_bytes FROM roots ORDER BY created_at DESC",
+    )?;
     let rows = stmt.query_map([], |row| {
         Ok(RootRow {
             id: row.get(0)?,
             machine_id: row.get(1)?,
             path: row.get(2)?,
             label: row.get(3)?,
+            current_size_bytes: row.get(4)?,
         })
     })?;
     rows.collect()
@@ -636,7 +682,7 @@ pub fn find_root_by_machine_path(
     path: &str,
 ) -> rusqlite::Result<Option<RootRow>> {
     conn.query_row(
-        "SELECT id, machine_id, path, label FROM roots WHERE machine_id = ?1 AND path = ?2",
+        "SELECT id, machine_id, path, label, current_size_bytes FROM roots WHERE machine_id = ?1 AND path = ?2",
         params![machine_id, path],
         |row| {
             Ok(RootRow {
@@ -644,6 +690,7 @@ pub fn find_root_by_machine_path(
                 machine_id: row.get(1)?,
                 path: row.get(2)?,
                 label: row.get(3)?,
+                current_size_bytes: row.get(4)?,
             })
         },
     )
@@ -658,14 +705,14 @@ pub fn target_status(
     let Some(root) = find_root_by_machine_path(conn, machine_id, path)? else {
         return Ok(None);
     };
-    let (file_count, total_bytes): (i64, i64) = conn.query_row(
+    let file_count: i64 = conn.query_row(
         r#"
-        SELECT COUNT(*), COALESCE(SUM(size_bytes), 0)
+        SELECT COUNT(*)
         FROM path_observations
         WHERE machine_id = ?1 AND root_id = ?2
         "#,
         params![machine_id, root.id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| row.get(0),
     )?;
     let content_count: i64 = conn.query_row(
         r#"
@@ -702,6 +749,7 @@ pub fn target_status(
         )
         .optional()?
         .flatten();
+    let total_bytes = root.current_size_bytes;
     Ok(Some(TargetStatus {
         root,
         file_count,
@@ -849,6 +897,10 @@ mod tests {
         .unwrap();
         assert_eq!(table_count(&conn, "path_observations").unwrap(), 1);
         assert_eq!(recent_files(&conn, 1).unwrap()[0].size_bytes, 2);
+        let root = find_root_by_machine_path(&conn, &machine_id, "/tmp/root")
+            .unwrap()
+            .unwrap();
+        assert_eq!(root.current_size_bytes, 2);
     }
 
     #[test]

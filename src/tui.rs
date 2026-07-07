@@ -90,7 +90,10 @@ fn run_loop(
                     } else {
                         "  "
                     };
-                    ListItem::new(format!("{marker}{label}\n  {}\n  {}", root.path, root.id))
+                    ListItem::new(format!(
+                        "{marker}{label}\n  {} bytes  {}\n  {}",
+                        root.current_size_bytes, root.path, root.id
+                    ))
                 })
                 .collect::<Vec<_>>();
             let roots_title = if state.focus == 0 { "Roots *" } else { "Roots" };

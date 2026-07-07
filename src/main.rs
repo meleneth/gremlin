@@ -26,7 +26,11 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         None => {
             let Some(target) = cli.target.as_deref() else {
-                anyhow::bail!("missing command or target");
+                let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
+                let conn = db::open_or_create(&db)?;
+                db::init_schema(&conn)?;
+                tui::run_with_options(&conn, machine_label)?;
+                return Ok(());
             };
             run_default_target(
                 &config_ctx,

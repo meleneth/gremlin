@@ -81,6 +81,8 @@ gremlin --machine-label laptop scan ~/archive
 
 `scan` walks a directory tree and records stat-level path observations. It reports new, changed, and missing paths. Missing paths are report-only in v0; no deletion or missing projection is performed.
 
+Roots maintain `current_size_bytes`, the projected total size of currently indexed `present` file observations for that root.
+
 `hash` walks a directory tree, computes BLAKE3 and SHA-256 for files that look new or changed from stat data, stores content objects, updates path observations, and persists hash events. Use `--all` to hash every regular file.
 
 `verify` re-hashes current files and compares them to the latest stored per-path hash evidence. It reports `ok`, `changed`, `new`, `missing`, and `error`. By default it records evidence only; `--accept` promotes changed and new hashes into projected current truth.
