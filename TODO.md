@@ -21,8 +21,8 @@
 - Add a way to accept a previous verify job after review, not only `verify --accept`.
 - Add explicit hash baseline selection for verify.
 - Decide whether imported checksum collections can become verify baselines.
-- Add SFV/CFV checksum manifest import as checksum collections.
-- Add PAR2 file-list import, with parity verification deferred until the manifest path is solid.
+- Add CRC verification against imported SFV/CFV checksum manifest entries.
+- Add PAR2 parity repair/verification; file-list import exists.
 - Add richer changed reporting: size-only, mtime-only, hash mismatch.
 - Add a compact integrity summary per root.
 

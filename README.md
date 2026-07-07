@@ -92,7 +92,7 @@ Roots maintain `current_size_bytes`, the projected total size of currently index
 
 `import-events` reads JSONL events, preserves imported history in `job_events`, and creates checksum collection entries for completed hash events.
 
-`import-manifest` reads SFV/CFV-style CRC manifests into checksum collections. PAR2 file-list import is planned but not implemented yet.
+`import-manifest` reads SFV/CFV-style CRC manifests and PAR2 file-description packets into checksum collections. PAR2 parity repair/verification is not implemented yet.
 
 `job create` records an intended scan or hash job without executing file work. This is the same seam used by the TUI: UI actions create jobs, start them through the job runner, display projected progress, and can request cooperative cancellation between files.
 

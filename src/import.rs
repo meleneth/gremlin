@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 
 use anyhow::Context;
@@ -84,9 +84,7 @@ pub fn import_manifest_file(conn: &Connection, input: &Path) -> anyhow::Result<(
     db::init_schema(conn)?;
     let format = manifest_format(input)?;
     if format == "par2" {
-        anyhow::bail!(
-            "PAR2 file-list import needs a PAR2 parser/extractor; SFV/CFV import is supported now"
-        );
+        return import_par2_file_list(conn, input);
     }
 
     let file = File::open(input).with_context(|| format!("opening {}", input.display()))?;
@@ -202,10 +200,126 @@ pub fn import_manifest_file(conn: &Connection, input: &Path) -> anyhow::Result<(
     Ok(())
 }
 
+fn import_par2_file_list(conn: &Connection, input: &Path) -> anyhow::Result<()> {
+    let mut bytes = Vec::new();
+    File::open(input)
+        .with_context(|| format!("opening {}", input.display()))?
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("reading {}", input.display()))?;
+    let entries = parse_par2_file_descriptions(&bytes);
+    let source = input.display().to_string();
+    let job_id = db::create_job(
+        conn,
+        "import_manifest",
+        None,
+        None,
+        serde_json::json!({ "path": source, "format": "par2" }),
+    )?;
+    db::start_job(conn, &job_id)?;
+    let collection_id =
+        db::create_checksum_collection(conn, &source, "par2_manifest", Some(&job_id))?;
+    let mut sequence = db::next_sequence(conn, &job_id)?;
+    persist_import_job_event(
+        conn,
+        &job_id,
+        &mut sequence,
+        EventKind::JobStarted,
+        EventPayload::Job {
+            kind: "import_manifest".to_string(),
+            path: Some(source.clone()),
+            message: Some("par2".to_string()),
+            files_seen: None,
+            errors: None,
+        },
+    )?;
+
+    for (idx, entry) in entries.iter().enumerate() {
+        let base = basename(Path::new(&entry.relative_path))
+            .unwrap_or_else(|_| entry.relative_path.clone());
+        db::insert_checksum_entry(
+            conn,
+            db::ChecksumEntryInput {
+                collection_id: &collection_id,
+                relative_path: &entry.relative_path,
+                basename: &base,
+                size_bytes: entry.size_bytes,
+                modified_at: None,
+                blake3: None,
+                sha256: None,
+                metadata_json: serde_json::json!({
+                    "format": "par2",
+                    "parent_path": parent_path(&entry.relative_path),
+                    "file_id": entry.file_id,
+                    "md5": entry.md5,
+                    "md5_16k": entry.md5_16k
+                }),
+            },
+        )?;
+        db::update_job_progress(
+            conn,
+            &job_id,
+            db::JobProgressInput {
+                phase: "processing",
+                current_path: Some(&entry.relative_path),
+                files_total: Some(entries.len() as u64),
+                files_seen: idx as u64 + 1,
+                files_done: idx as u64 + 1,
+                files_skipped: 0,
+                errors: 0,
+            },
+        )?;
+    }
+
+    db::update_job_progress(
+        conn,
+        &job_id,
+        db::JobProgressInput {
+            phase: "finalizing",
+            current_path: None,
+            files_total: Some(entries.len() as u64),
+            files_seen: entries.len() as u64,
+            files_done: entries.len() as u64,
+            files_skipped: 0,
+            errors: 0,
+        },
+    )?;
+    persist_import_job_event(
+        conn,
+        &job_id,
+        &mut sequence,
+        EventKind::JobCompleted,
+        EventPayload::Job {
+            kind: "import_manifest".to_string(),
+            path: Some(source),
+            message: Some(format!(
+                "entries={} collection={collection_id}",
+                entries.len()
+            )),
+            files_seen: Some(entries.len() as u64),
+            errors: Some(0),
+        },
+    )?;
+    db::complete_job(conn, &job_id, "completed")?;
+    println!(
+        "par2 import job {job_id}: {} file entries, collection {collection_id}",
+        entries.len()
+    );
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SfvEntry {
     relative_path: String,
     crc32: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Par2FileEntry {
+    relative_path: String,
+    size_bytes: u64,
+    file_id: String,
+    md5: String,
+    md5_16k: String,
 }
 
 fn manifest_format(path: &Path) -> anyhow::Result<&'static str> {
@@ -245,6 +359,64 @@ fn parse_sfv_line(line: &str) -> Option<SfvEntry> {
 fn is_manifest_comment(line: &str) -> bool {
     let trimmed = line.trim_start();
     trimmed.starts_with(';') || trimmed.starts_with('#')
+}
+
+fn parse_par2_file_descriptions(bytes: &[u8]) -> Vec<Par2FileEntry> {
+    const MAGIC: &[u8; 8] = b"PAR2\0PKT";
+    const FILE_DESC: &[u8; 16] = b"PAR 2.0\0FileDesc";
+    let mut entries = Vec::new();
+    let mut offset = 0_usize;
+    while offset + 64 <= bytes.len() {
+        if &bytes[offset..offset + 8] != MAGIC {
+            offset += 1;
+            continue;
+        }
+        let mut len_bytes = [0_u8; 8];
+        len_bytes.copy_from_slice(&bytes[offset + 8..offset + 16]);
+        let packet_len = u64::from_le_bytes(len_bytes) as usize;
+        if packet_len < 64 || offset + packet_len > bytes.len() {
+            offset += 8;
+            continue;
+        }
+        let packet_type = &bytes[offset + 48..offset + 64];
+        if packet_type == FILE_DESC {
+            if let Some(entry) =
+                parse_par2_file_description_body(&bytes[offset + 64..offset + packet_len])
+            {
+                entries.push(entry);
+            }
+        }
+        offset += packet_len;
+    }
+    entries
+}
+
+fn parse_par2_file_description_body(body: &[u8]) -> Option<Par2FileEntry> {
+    if body.len() < 56 {
+        return None;
+    }
+    let mut size_bytes = [0_u8; 8];
+    size_bytes.copy_from_slice(&body[48..56]);
+    let name_bytes = body[56..]
+        .iter()
+        .copied()
+        .take_while(|byte| *byte != 0)
+        .collect::<Vec<_>>();
+    let relative_path = String::from_utf8_lossy(&name_bytes).to_string();
+    if relative_path.is_empty() {
+        return None;
+    }
+    Some(Par2FileEntry {
+        relative_path,
+        size_bytes: u64::from_le_bytes(size_bytes),
+        file_id: hex_bytes(&body[0..16]),
+        md5: hex_bytes(&body[16..32]),
+        md5_16k: hex_bytes(&body[32..48]),
+    })
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn persist_import_job_event(
@@ -331,5 +503,52 @@ mod tests {
         );
         assert_eq!(parse_sfv_line("; comment"), None);
         assert_eq!(parse_sfv_line("not a checksum"), None);
+    }
+
+    #[test]
+    fn parses_par2_file_description_packets() {
+        let packet = test_par2_file_description("folder/movie.mkv", 12345);
+        let entries = parse_par2_file_descriptions(&packet);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].relative_path, "folder/movie.mkv");
+        assert_eq!(entries[0].size_bytes, 12345);
+    }
+
+    #[test]
+    fn imports_par2_file_list_into_collection() {
+        let dir = tempfile::tempdir().unwrap();
+        let par2 = dir.path().join("sample.par2");
+        std::fs::write(&par2, test_par2_file_description("folder/movie.mkv", 12345)).unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        import_manifest_file(&conn, &par2).unwrap();
+        assert_eq!(db::table_count(&conn, "checksum_collections").unwrap(), 1);
+        assert_eq!(db::table_count(&conn, "checksum_entries").unwrap(), 1);
+        let job = db::recent_jobs(&conn, 1).unwrap().remove(0);
+        assert_eq!(job.kind, "import_manifest");
+        assert_eq!(job.files_done, 1);
+    }
+
+    fn test_par2_file_description(name: &str, size: u64) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend([0x11; 16]);
+        body.extend([0x22; 16]);
+        body.extend([0x33; 16]);
+        body.extend(size.to_le_bytes());
+        body.extend(name.as_bytes());
+        while body.len() % 4 != 0 {
+            body.push(0);
+        }
+
+        let packet_len = 64 + body.len();
+        let mut packet = Vec::new();
+        packet.extend(b"PAR2\0PKT");
+        packet.extend((packet_len as u64).to_le_bytes());
+        packet.extend([0x44; 16]);
+        packet.extend([0x55; 16]);
+        packet.extend(b"PAR 2.0\0FileDesc");
+        packet.extend(body);
+        packet
     }
 }
