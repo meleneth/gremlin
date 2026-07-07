@@ -6,6 +6,7 @@
 - Add `--json` output for `status`, `scan`, `hash`, and `verify`.
 - Add a command to preview hash candidates before running incremental hashing.
 - Add clearer first-run messaging around the default XDG database path.
+- Make the default `gremlin TARGET` flow explain what it knows, what it checked, and what actions are available next.
 
 ## TUI
 
@@ -39,13 +40,17 @@
 - Add SMB path mapping and target normalization.
 - Improve import reconciliation from checksum collections into projected state.
 - Add safer handling for partial imports and duplicate event streams.
+- Track resumable worker/import state so interrupted remote hash jobs can continue without starting over.
+- Design remote browse/status around cached directory observations so flaky remote access does not make the UI useless.
 
 ## Transfer Planning
 
 - Add compare flow between two roots or checksum collections.
 - Add transfer plan tables/events without executing transfers.
 - Add dry-run transfer summaries.
-- Keep transfer execution separate from planning until the evidence model is solid.
+- Keep transfer execution separate from planning until integrity and resume semantics are solid.
+- Model copy chunks or per-file transfer checkpoints before implementing actual transfer execution.
+- Verify destination hashes after copy and make resume skip already verified files.
 
 ## Metadata Extractors
 
@@ -58,3 +63,4 @@
 - Incremental hashing relies on size/mtime and can miss same-size timestamp-preserved edits; use `hash --all` for full rebuilds.
 - Verify reads bytes and can prove current content against stored hashes, but missing remains non-destructive.
 - Remote targets are registered and summarized only; no SSH execution exists yet.
+- Resume is not implemented yet; current jobs are durable records, but scan/hash execution still runs in one process.

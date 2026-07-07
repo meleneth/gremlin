@@ -1,6 +1,6 @@
 # Gremlin
 
-Gremlin is a local-first file database, checksum, audit, and transfer-planning tool. It tracks evidence about files while preserving separate ideas of content identity, filename identity, and location identity.
+Gremlin is a local-first file database, checksum, audit, and transfer-planning tool. Its main job is to make local and remote file browsing, mirroring, verification, and resume safer when networks, disks, or long copies fail. It tracks file history while preserving separate ideas of content identity, filename identity, and location identity.
 
 This project is heavily vibe-coded with Codex using GPT-5.
 
@@ -8,7 +8,7 @@ This first slice is intentionally small: a single Rust CLI crate, a local SQLite
 
 ## Architecture Rule
 
-The TUI never performs file work directly. File work is represented as commands and jobs. Jobs emit events. Events are persisted as evidence. The database projects current query state from those events and command results.
+The TUI never performs file work directly. File work is represented as commands and jobs. Jobs emit events. Events are persisted as durable history. The database projects current query state from those events and command results.
 
 ## Commands
 
@@ -85,13 +85,13 @@ Roots maintain `current_size_bytes`, the projected total size of currently index
 
 `hash` walks a directory tree, computes BLAKE3 and SHA-256 for files that look new or changed from stat data, stores content objects, updates path observations, and persists hash events. Use `--all` to hash every regular file.
 
-`verify` re-hashes current files and compares them to the latest stored per-path hash evidence. It reports `ok`, `changed`, `new`, `missing`, and `error`. By default it records evidence only; `--accept` promotes changed and new hashes into projected current truth.
+`verify` re-hashes current files and compares them to the latest stored per-path hashes. It reports `ok`, `changed`, `new`, `missing`, and `error`. By default it records history only; `--accept` promotes changed and new hashes into projected current truth.
 
 `worker hash --jsonl` does not require a database. It emits JSONL events suitable for future remote execution over SSH.
 
-`import-events` reads JSONL events, preserves imported evidence in `job_events`, and creates checksum collection entries for completed hash events.
+`import-events` reads JSONL events, preserves imported history in `job_events`, and creates checksum collection entries for completed hash events.
 
-`job create` records an intended scan or hash job without executing file work. This is the same seam used by the TUI: UI actions enqueue jobs, while `job run` executes a queued job and emits evidence later.
+`job create` records an intended scan or hash job without executing file work. This is the same seam used by the TUI: UI actions enqueue jobs, while `job run` executes a queued job and emits events later.
 
 `target inspect` classifies obvious target forms without touching the database:
 
@@ -113,6 +113,7 @@ Future seams deliberately left open:
 - SSH remote dispatch: run `gremlin worker hash ... --jsonl --out ...` remotely, then copy JSONL back for import.
 - SMB path mapping: add machine/root mapping without changing content identity.
 - Transfer planning: compare projected observations and checksum collections before adding transfer jobs.
+- Seamless resume: make interrupted remote browsing, hashing, importing, and future copy jobs restart from durable job/event state instead of requiring manual cleanup.
 - Metadata extractors: add new job kinds and events rather than expanding scan/hash responsibilities.
 - Richer TUI job control: the TUI can enqueue jobs now; future slices should add job execution, cancellation states, and filtering without making the TUI scan or hash files directly.
 
