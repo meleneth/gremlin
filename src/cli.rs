@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
+use crate::config::ConfigFormat;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "gremlin",
@@ -9,25 +11,26 @@ use clap::{Parser, Subcommand, ValueEnum};
     about = "Local-first file evidence database"
 )]
 pub struct Cli {
+    #[arg(long, global = true)]
+    pub db: Option<PathBuf>,
+    #[arg(long, global = true)]
+    pub config: Option<PathBuf>,
+    #[arg(long, global = true)]
+    pub no_config: bool,
+    #[arg(long, global = true)]
+    pub machine_label: Option<String>,
     #[command(subcommand)]
     pub command: Commands,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
-    Init {
-        #[arg(long)]
-        db: PathBuf,
-    },
+    Init,
     Scan {
         path: PathBuf,
-        #[arg(long)]
-        db: PathBuf,
     },
     Hash {
         path: PathBuf,
-        #[arg(long)]
-        db: PathBuf,
     },
     Worker {
         #[command(subcommand)]
@@ -35,50 +38,49 @@ pub enum Commands {
     },
     ImportEvents {
         input: PathBuf,
-        #[arg(long)]
-        db: PathBuf,
     },
-    Events {
-        #[arg(long)]
-        db: PathBuf,
-    },
-    Files {
-        #[arg(long)]
-        db: PathBuf,
-    },
-    Jobs {
-        #[arg(long)]
-        db: PathBuf,
-    },
+    Events,
+    Files,
+    Jobs,
     Job {
         #[command(subcommand)]
         command: JobCommands,
     },
-    Tui {
-        #[arg(long)]
-        db: PathBuf,
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
     },
+    Tui,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum JobCommands {
-    Create {
-        kind: JobKind,
-        path: PathBuf,
-        #[arg(long)]
-        db: PathBuf,
-    },
-    Show {
-        job_id: String,
-        #[arg(long)]
-        db: PathBuf,
-    },
+    Create { kind: JobKind, path: PathBuf },
+    Show { job_id: String },
+    Run { job_id: String },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum JobKind {
     Scan,
     Hash,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigCommands {
+    Init {
+        #[arg(long)]
+        path: Option<PathBuf>,
+        #[arg(long)]
+        default_db: Option<PathBuf>,
+        #[arg(long)]
+        machine_label: Option<String>,
+    },
+    Show {
+        #[arg(long, value_enum, default_value_t = ConfigFormat::Json)]
+        format: ConfigFormat,
+    },
+    Path,
 }
 
 impl JobKind {

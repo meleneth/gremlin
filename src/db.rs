@@ -195,22 +195,23 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-pub fn ensure_local_machine(conn: &Connection) -> rusqlite::Result<String> {
+pub fn ensure_local_machine_with_label(
+    conn: &Connection,
+    machine_label: Option<&str>,
+) -> rusqlite::Result<String> {
     let id = local_machine_id();
     let now = now_rfc3339();
+    let label = machine_label
+        .map(ToOwned::to_owned)
+        .or_else(local_hostname)
+        .unwrap_or_else(|| "local".to_string());
     conn.execute(
         r#"
         INSERT INTO machines (id, label, hostname, platform, created_at, last_seen_at)
         VALUES (?1, ?2, ?3, ?4, ?5, ?5)
         ON CONFLICT(id) DO UPDATE SET last_seen_at = excluded.last_seen_at
         "#,
-        params![
-            id,
-            local_hostname().unwrap_or_else(|| "local".to_string()),
-            local_hostname(),
-            std::env::consts::OS,
-            now
-        ],
+        params![id, label, local_hostname(), std::env::consts::OS, now],
     )?;
     Ok(id)
 }
@@ -261,9 +262,14 @@ pub fn create_job(
     Ok(id)
 }
 
-pub fn queue_file_job(conn: &Connection, kind: &str, path: &Path) -> anyhow::Result<String> {
+pub fn queue_file_job(
+    conn: &Connection,
+    kind: &str,
+    path: &Path,
+    machine_label: Option<&str>,
+) -> anyhow::Result<String> {
     let root_path = absolute_path(path)?;
-    let machine_id = ensure_local_machine(conn)?;
+    let machine_id = ensure_local_machine_with_label(conn, machine_label)?;
     let root_id = ensure_root(conn, &machine_id, &lossy(&root_path))?;
     let job_id = create_job(
         conn,
@@ -616,7 +622,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         configure(&conn).unwrap();
         init_schema(&conn).unwrap();
-        let machine_id = ensure_local_machine(&conn).unwrap();
+        let machine_id = ensure_local_machine_with_label(&conn, None).unwrap();
         let root_id = ensure_root(&conn, &machine_id, "/tmp/root").unwrap();
         insert_path_observation(
             &conn,
@@ -656,7 +662,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         configure(&conn).unwrap();
         init_schema(&conn).unwrap();
-        let job_id = queue_file_job(&conn, "scan", dir.path()).unwrap();
+        let job_id = queue_file_job(&conn, "scan", dir.path(), None).unwrap();
         let job = job_by_id(&conn, &job_id).unwrap().unwrap();
         assert_eq!(job.status, "created");
         assert_eq!(

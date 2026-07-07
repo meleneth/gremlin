@@ -34,11 +34,16 @@ pub struct HashResult {
     sha256: String,
 }
 
-pub fn scan_to_db(conn: &Connection, path: &Path, db_path: &Path) -> anyhow::Result<()> {
+pub fn scan_to_db(
+    conn: &Connection,
+    path: &Path,
+    db_path: &Path,
+    machine_label: Option<&str>,
+) -> anyhow::Result<()> {
     db::init_schema(conn)?;
     let root_path = absolute_path(path).with_context(|| format!("resolving {}", path.display()))?;
     let skip_paths = db_sidecar_paths(db_path)?;
-    let machine_id = db::ensure_local_machine(conn)?;
+    let machine_id = db::ensure_local_machine_with_label(conn, machine_label)?;
     let root_id = db::ensure_root(conn, &machine_id, &lossy(&root_path))?;
     let job_id = db::create_job(
         conn,
@@ -47,17 +52,99 @@ pub fn scan_to_db(conn: &Connection, path: &Path, db_path: &Path) -> anyhow::Res
         Some(&root_id),
         serde_json::json!({ "path": lossy(&root_path) }),
     )?;
-    db::start_job(conn, &job_id)?;
+    run_scan_job(
+        conn,
+        &root_path,
+        &skip_paths,
+        &machine_id,
+        &root_id,
+        &job_id,
+    )
+}
 
-    let mut sequence = 1;
+pub fn hash_to_db(
+    conn: &Connection,
+    path: &Path,
+    db_path: &Path,
+    machine_label: Option<&str>,
+) -> anyhow::Result<()> {
+    db::init_schema(conn)?;
+    let root_path = absolute_path(path).with_context(|| format!("resolving {}", path.display()))?;
+    let skip_paths = db_sidecar_paths(db_path)?;
+    let machine_id = db::ensure_local_machine_with_label(conn, machine_label)?;
+    let root_id = db::ensure_root(conn, &machine_id, &lossy(&root_path))?;
+    let job_id = db::create_job(
+        conn,
+        "hash",
+        Some(&machine_id),
+        Some(&root_id),
+        serde_json::json!({ "path": lossy(&root_path) }),
+    )?;
+    run_hash_job(
+        conn,
+        &root_path,
+        &skip_paths,
+        &machine_id,
+        &root_id,
+        &job_id,
+    )
+}
+
+pub fn run_queued_job(
+    conn: &Connection,
+    job_id: &str,
+    db_path: &Path,
+    machine_label: Option<&str>,
+) -> anyhow::Result<()> {
+    db::init_schema(conn)?;
+    let job =
+        db::job_by_id(conn, job_id)?.ok_or_else(|| anyhow::anyhow!("job not found: {job_id}"))?;
+    if job.status != "created" {
+        anyhow::bail!("job {job_id} is not runnable from status {}", job.status);
+    }
+    let params: serde_json::Value =
+        serde_json::from_str(job.params_json.as_deref().unwrap_or("{}"))?;
+    let path = params
+        .get("path")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| anyhow::anyhow!("job {job_id} has no params_json.path"))?;
+    let root_path = absolute_path(Path::new(path)).with_context(|| format!("resolving {path}"))?;
+    let skip_paths = db_sidecar_paths(db_path)?;
+    let machine_id = match job.machine_id {
+        Some(machine_id) => machine_id,
+        None => db::ensure_local_machine_with_label(conn, machine_label)?,
+    };
+    let root_id = match job.root_id {
+        Some(root_id) => root_id,
+        None => db::ensure_root(conn, &machine_id, &lossy(&root_path))?,
+    };
+
+    match job.kind.as_str() {
+        "scan" => run_scan_job(conn, &root_path, &skip_paths, &machine_id, &root_id, job_id),
+        "hash" => run_hash_job(conn, &root_path, &skip_paths, &machine_id, &root_id, job_id),
+        other => anyhow::bail!("unsupported queued job kind: {other}"),
+    }
+}
+
+fn run_scan_job(
+    conn: &Connection,
+    root_path: &Path,
+    skip_paths: &[PathBuf],
+    machine_id: &str,
+    root_id: &str,
+    job_id: &str,
+) -> anyhow::Result<()> {
+    db::start_job(conn, job_id)?;
+
+    let mut sequence = db::next_sequence(conn, job_id)?;
     persist_db_event(
         conn,
-        &job_id,
+        job_id,
         &mut sequence,
         EventKind::JobStarted,
         EventPayload::Job {
             kind: "scan".to_string(),
-            path: Some(lossy(&root_path)),
+            path: Some(lossy(root_path)),
             message: None,
             files_seen: None,
             errors: None,
@@ -66,29 +153,29 @@ pub fn scan_to_db(conn: &Connection, path: &Path, db_path: &Path) -> anyhow::Res
 
     let mut files_seen = 0_u64;
     let mut errors = 0_u64;
-    for entry in WalkDir::new(&root_path) {
+    for entry in WalkDir::new(root_path) {
         match entry {
             Ok(entry) if entry.file_type().is_dir() => {
                 let rel =
-                    relative_path(&root_path, entry.path()).unwrap_or_else(|_| ".".to_string());
+                    relative_path(root_path, entry.path()).unwrap_or_else(|_| ".".to_string());
                 persist_db_event(
                     conn,
-                    &job_id,
+                    job_id,
                     &mut sequence,
                     EventKind::DirectorySeen,
                     EventPayload::DirectorySeen { relative_path: rel },
                 )?;
             }
-            Ok(entry) if entry.file_type().is_file() => match file_meta(&root_path, entry.path()) {
+            Ok(entry) if entry.file_type().is_file() => match file_meta(root_path, entry.path()) {
                 Ok(meta) => {
-                    if should_skip(entry.path(), &skip_paths) {
+                    if should_skip(entry.path(), skip_paths) {
                         continue;
                     }
                     db::insert_path_observation(
                         conn,
                         db::PathObservationInput {
-                            machine_id: &machine_id,
-                            root_id: &root_id,
+                            machine_id,
+                            root_id,
                             relative_path: &meta.relative_path,
                             basename: &meta.basename,
                             parent_path: &meta.parent_path,
@@ -99,7 +186,7 @@ pub fn scan_to_db(conn: &Connection, path: &Path, db_path: &Path) -> anyhow::Res
                     )?;
                     persist_db_event(
                         conn,
-                        &job_id,
+                        job_id,
                         &mut sequence,
                         EventKind::FileSeen,
                         EventPayload::FileSeen {
@@ -116,7 +203,7 @@ pub fn scan_to_db(conn: &Connection, path: &Path, db_path: &Path) -> anyhow::Res
                     errors += 1;
                     persist_db_event(
                         conn,
-                        &job_id,
+                        job_id,
                         &mut sequence,
                         EventKind::JobFailed,
                         EventPayload::Job {
@@ -134,7 +221,7 @@ pub fn scan_to_db(conn: &Connection, path: &Path, db_path: &Path) -> anyhow::Res
                 errors += 1;
                 persist_db_event(
                     conn,
-                    &job_id,
+                    job_id,
                     &mut sequence,
                     EventKind::JobFailed,
                     EventPayload::Job {
@@ -156,46 +243,41 @@ pub fn scan_to_db(conn: &Connection, path: &Path, db_path: &Path) -> anyhow::Res
     };
     persist_db_event(
         conn,
-        &job_id,
+        job_id,
         &mut sequence,
         EventKind::JobCompleted,
         EventPayload::Job {
             kind: "scan".to_string(),
-            path: Some(lossy(&root_path)),
+            path: Some(lossy(root_path)),
             message: Some(status.to_string()),
             files_seen: Some(files_seen),
             errors: Some(errors),
         },
     )?;
-    db::complete_job(conn, &job_id, status)?;
+    db::complete_job(conn, job_id, status)?;
     println!("scan job {job_id}: {files_seen} files, {errors} errors");
     Ok(())
 }
 
-pub fn hash_to_db(conn: &Connection, path: &Path, db_path: &Path) -> anyhow::Result<()> {
-    db::init_schema(conn)?;
-    let root_path = absolute_path(path).with_context(|| format!("resolving {}", path.display()))?;
-    let skip_paths = db_sidecar_paths(db_path)?;
-    let machine_id = db::ensure_local_machine(conn)?;
-    let root_id = db::ensure_root(conn, &machine_id, &lossy(&root_path))?;
-    let job_id = db::create_job(
-        conn,
-        "hash",
-        Some(&machine_id),
-        Some(&root_id),
-        serde_json::json!({ "path": lossy(&root_path) }),
-    )?;
-    db::start_job(conn, &job_id)?;
+fn run_hash_job(
+    conn: &Connection,
+    root_path: &Path,
+    skip_paths: &[PathBuf],
+    machine_id: &str,
+    root_id: &str,
+    job_id: &str,
+) -> anyhow::Result<()> {
+    db::start_job(conn, job_id)?;
 
-    let mut sequence = 1;
+    let mut sequence = db::next_sequence(conn, job_id)?;
     persist_db_event(
         conn,
-        &job_id,
+        job_id,
         &mut sequence,
         EventKind::JobStarted,
         EventPayload::Job {
             kind: "hash".to_string(),
-            path: Some(lossy(&root_path)),
+            path: Some(lossy(root_path)),
             message: None,
             files_seen: None,
             errors: None,
@@ -204,24 +286,24 @@ pub fn hash_to_db(conn: &Connection, path: &Path, db_path: &Path) -> anyhow::Res
 
     let mut files_seen = 0_u64;
     let mut errors = 0_u64;
-    for entry in WalkDir::new(&root_path) {
+    for entry in WalkDir::new(root_path) {
         match entry {
             Ok(entry) if entry.file_type().is_file() => {
                 let path = entry.path();
-                if should_skip(path, &skip_paths) {
+                if should_skip(path, skip_paths) {
                     continue;
                 }
-                let rel = relative_path(&root_path, path).ok();
+                let rel = relative_path(root_path, path).ok();
                 if let Some(relative_path) = rel.clone() {
                     persist_db_event(
                         conn,
-                        &job_id,
+                        job_id,
                         &mut sequence,
                         EventKind::HashStarted,
                         EventPayload::HashStarted { relative_path },
                     )?;
                 }
-                match hash_file(&root_path, path) {
+                match hash_file(root_path, path) {
                     Ok(result) => {
                         let content_id = db::ensure_content_object(
                             conn,
@@ -232,8 +314,8 @@ pub fn hash_to_db(conn: &Connection, path: &Path, db_path: &Path) -> anyhow::Res
                         db::insert_path_observation(
                             conn,
                             db::PathObservationInput {
-                                machine_id: &machine_id,
-                                root_id: &root_id,
+                                machine_id,
+                                root_id,
                                 relative_path: &result.relative_path,
                                 basename: &result.basename,
                                 parent_path: &result.parent_path,
@@ -244,7 +326,7 @@ pub fn hash_to_db(conn: &Connection, path: &Path, db_path: &Path) -> anyhow::Res
                         )?;
                         persist_db_event(
                             conn,
-                            &job_id,
+                            job_id,
                             &mut sequence,
                             EventKind::HashCompleted,
                             EventPayload::HashCompleted {
@@ -263,7 +345,7 @@ pub fn hash_to_db(conn: &Connection, path: &Path, db_path: &Path) -> anyhow::Res
                         errors += 1;
                         persist_db_event(
                             conn,
-                            &job_id,
+                            job_id,
                             &mut sequence,
                             EventKind::HashFailed,
                             EventPayload::HashFailed {
@@ -280,7 +362,7 @@ pub fn hash_to_db(conn: &Connection, path: &Path, db_path: &Path) -> anyhow::Res
                 errors += 1;
                 persist_db_event(
                     conn,
-                    &job_id,
+                    job_id,
                     &mut sequence,
                     EventKind::HashFailed,
                     EventPayload::HashFailed {
@@ -303,18 +385,18 @@ pub fn hash_to_db(conn: &Connection, path: &Path, db_path: &Path) -> anyhow::Res
     };
     persist_db_event(
         conn,
-        &job_id,
+        job_id,
         &mut sequence,
         EventKind::JobCompleted,
         EventPayload::Job {
             kind: "hash".to_string(),
-            path: Some(lossy(&root_path)),
+            path: Some(lossy(root_path)),
             message: Some(status.to_string()),
             files_seen: Some(files_seen),
             errors: Some(errors),
         },
     )?;
-    db::complete_job(conn, &job_id, status)?;
+    db::complete_job(conn, job_id, status)?;
     println!("hash job {job_id}: {files_seen} files, {errors} errors");
     Ok(())
 }
@@ -539,5 +621,21 @@ mod tests {
         assert_eq!(result.size_bytes, 5);
         assert_eq!(result.blake3.len(), 64);
         assert_eq!(result.sha256.len(), 64);
+    }
+
+    #[test]
+    fn runs_queued_scan_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hello.txt");
+        std::fs::write(&file, b"hello").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        let job_id = db::queue_file_job(&conn, "scan", dir.path(), None).unwrap();
+
+        run_queued_job(&conn, &job_id, &dir.path().join("gremlin.db"), None).unwrap();
+
+        let job = db::job_by_id(&conn, &job_id).unwrap().unwrap();
+        assert_eq!(job.status, "completed");
+        assert_eq!(db::table_count(&conn, "path_observations").unwrap(), 1);
     }
 }

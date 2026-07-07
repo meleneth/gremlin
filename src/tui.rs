@@ -23,14 +23,14 @@ struct AppState {
     status: String,
 }
 
-pub fn run(conn: &Connection) -> anyhow::Result<()> {
+pub fn run_with_options(conn: &Connection, machine_label: Option<String>) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(conn, &mut terminal);
+    let result = run_loop(conn, &mut terminal, machine_label);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -41,6 +41,7 @@ pub fn run(conn: &Connection) -> anyhow::Result<()> {
 fn run_loop(
     conn: &Connection,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    machine_label: Option<String>,
 ) -> anyhow::Result<()> {
     let mut state = AppState {
         status: "s queues scan job, h queues hash job for selected root".to_string(),
@@ -160,10 +161,24 @@ fn run_loop(
                         }
                     }
                     KeyCode::Char('s') => {
-                        queue_selected_root(conn, &roots, state.selected_root, "scan", &mut state)?;
+                        queue_selected_root(
+                            conn,
+                            &roots,
+                            state.selected_root,
+                            "scan",
+                            machine_label.as_deref(),
+                            &mut state,
+                        )?;
                     }
                     KeyCode::Char('h') => {
-                        queue_selected_root(conn, &roots, state.selected_root, "hash", &mut state)?;
+                        queue_selected_root(
+                            conn,
+                            &roots,
+                            state.selected_root,
+                            "hash",
+                            machine_label.as_deref(),
+                            &mut state,
+                        )?;
                     }
                     _ => {}
                 }
@@ -178,13 +193,14 @@ fn queue_selected_root(
     roots: &[db::RootRow],
     selected_root: usize,
     kind: &str,
+    machine_label: Option<&str>,
     state: &mut AppState,
 ) -> anyhow::Result<()> {
     let Some(root) = roots.get(selected_root) else {
         state.status = "no root selected; run scan or create a job from the CLI first".to_string();
         return Ok(());
     };
-    let job_id = db::queue_file_job(conn, kind, std::path::Path::new(&root.path))?;
+    let job_id = db::queue_file_job(conn, kind, std::path::Path::new(&root.path), machine_label)?;
     state.status = format!("queued {kind} job {job_id}");
     Ok(())
 }

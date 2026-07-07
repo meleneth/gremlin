@@ -12,6 +12,7 @@ The TUI never performs file work directly. File work is represented as commands 
 
 ```bash
 gremlin init --db ./gremlin.db
+gremlin config init --default-db ./gremlin.db --machine-label workstation
 
 gremlin scan PATH --db ./gremlin.db
 gremlin hash PATH --db ./gremlin.db
@@ -27,7 +28,36 @@ gremlin jobs --db ./gremlin.db
 gremlin job create scan PATH --db ./gremlin.db
 gremlin job create hash PATH --db ./gremlin.db
 gremlin job show JOB_ID --db ./gremlin.db
+gremlin job run JOB_ID --db ./gremlin.db
 gremlin tui --db ./gremlin.db
+```
+
+`--db` is a global override and may appear before or after a subcommand. If it is omitted, Gremlin checks `GREMLIN_DB`, then `default_db` in the config file.
+
+Config is loaded from `--config PATH`, then `GREMLIN_CONFIG`, then the default XDG-style path:
+
+```text
+$XDG_CONFIG_HOME/gremlin/config.json
+~/.config/gremlin/config.json
+```
+
+Example config:
+
+```json
+{
+  "default_db": "./gremlin.db",
+  "machine_label": "workstation",
+  "jobs_limit": 200
+}
+```
+
+CLI overrides:
+
+```bash
+gremlin --db ./other.db files
+gremlin --config ./gremlin.config.json jobs
+gremlin --no-config --db ./scratch.db init
+gremlin --machine-label laptop scan ~/archive
 ```
 
 `scan` walks a directory tree and records stat-level path observations. It does not hash file contents.
@@ -38,7 +68,7 @@ gremlin tui --db ./gremlin.db
 
 `import-events` reads JSONL events, preserves imported evidence in `job_events`, and creates checksum collection entries for completed hash events.
 
-`job create` records an intended scan or hash job without executing file work. This is the same seam used by the TUI: UI actions enqueue jobs, while workers execute jobs and emit evidence later.
+`job create` records an intended scan or hash job without executing file work. This is the same seam used by the TUI: UI actions enqueue jobs, while `job run` executes a queued job and emits evidence later.
 
 ## Development Notes
 
