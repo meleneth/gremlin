@@ -10,10 +10,9 @@
 
 ## TUI
 
-- Add selectable job/event rows with payload detail.
-- Add root status summaries for latest scan/hash/verify jobs.
+- Add richer job/event payload detail beyond the current one-line preview.
 - Add root filtering/search once large root lists are realistic.
-- Add job execution controls outside the TUI file-work boundary, likely by queueing jobs and invoking a non-TUI runner.
+- Add job progress and cancellation states for TUI-started jobs.
 - Improve layout for narrow terminals and long paths.
 
 ## Scan, Hash, Verify
