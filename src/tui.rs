@@ -207,6 +207,9 @@ async fn run_loop(
                             &mut state,
                         )?;
                     }
+                    KeyCode::Char('c') => {
+                        request_selected_cancel(conn, events.get(state.event_offset), &mut state)?;
+                    }
                     _ => {}
                 }
             }
@@ -218,7 +221,7 @@ async fn run_loop(
 fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect) {
     let header = Paragraph::new(Line::from(vec![
         Span::styled("Gremlin", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw("  q quit | Tab focus | arrows move | v fields | s scan | h hash"),
+        Span::raw("  q quit | Tab focus | arrows | v fields | s scan | h hash | c cancel"),
     ]))
     .block(Block::default().borders(Borders::ALL));
     frame.render_widget(header, area);
@@ -274,11 +277,15 @@ fn root_job_label(root: &db::RootRow) -> String {
     match (
         root.latest_job_kind.as_deref(),
         root.latest_job_status.as_deref(),
+        root.latest_job_phase.as_deref(),
     ) {
-        (Some(kind), Some(status)) => {
+        (Some(kind), Some("running"), Some(phase)) => {
+            format!("{}/{}", compact_job_kind(kind), compact_phase(phase))
+        }
+        (Some(kind), Some(status), _) => {
             format!("{}/{}", compact_job_kind(kind), compact_status(status))
         }
-        (Some(kind), None) => kind.to_string(),
+        (Some(kind), None, _) => kind.to_string(),
         _ => "-".to_string(),
     }
 }
@@ -299,6 +306,17 @@ fn compact_status(status: &str) -> &str {
         "completed" => "done",
         "completed_with_errors" => "errs",
         "failed" => "fail",
+        other => other,
+    }
+}
+
+fn compact_phase(phase: &str) -> &str {
+    match phase {
+        "queued" => "new",
+        "preparing" => "prep",
+        "walking" => "walk",
+        "processing" => "work",
+        "finalizing" => "done",
         other => other,
     }
 }
@@ -529,6 +547,7 @@ mod tests {
             current_size_bytes: 0,
             latest_job_kind: None,
             latest_job_status: None,
+            latest_job_phase: None,
         };
         assert_eq!(root_display_name(&root), "photos");
     }
@@ -567,39 +586,49 @@ fn render_events(
 
 fn event_header() -> String {
     format!(
-        "{:<2} {:<18} {:<5} {:<9} {:<14} {:<8}",
-        "", "JOB", "KIND", "STATUS", "EVENT", "TIME"
+        "{:<2} {:<18} {:<5} {:<9} {:<10} {:>9}",
+        "", "JOB", "KIND", "STATUS", "PHASE", "DONE"
     )
 }
 
 fn event_row(marker: &str, row: &db::JobEventRow) -> String {
     format!(
-        "{:<2} {:<18} {:<5} {:<9} {:<14} {:<8}",
+        "{:<2} {:<18} {:<5} {:<9} {:<10} {:>9}",
         marker,
         short_id(&row.job_id),
         truncate(&row.job_kind, 5),
-        truncate(&row.status, 9),
-        truncate(&row.event_kind, 14),
-        event_time(&row.created_at)
+        truncate(&event_status(row), 9),
+        truncate(row.phase.as_deref().unwrap_or("-"), 10),
+        progress_count(row)
     )
 }
 
 fn event_summary(row: &db::JobEventRow) -> String {
     format!(
-        "{} {} #{} {} {}",
+        "{} {} #{} {} {} {}",
         row.job_kind,
-        row.status,
+        event_status(row),
         row.sequence,
         row.event_kind,
+        progress_count(row),
         truncate(&row.payload_json, 28)
     )
 }
 
-fn event_time(created_at: &str) -> &str {
-    created_at
-        .get(11..19)
-        .or_else(|| created_at.get(..created_at.len().min(8)))
-        .unwrap_or("-")
+fn event_status(row: &db::JobEventRow) -> String {
+    if row.cancel_requested && matches!(row.status.as_str(), "created" | "running") {
+        "canceling".to_string()
+    } else {
+        row.status.clone()
+    }
+}
+
+fn progress_count(row: &db::JobEventRow) -> String {
+    if row.files_skipped > 0 || row.errors > 0 {
+        format!("{}/{}/{}", row.files_done, row.files_skipped, row.errors)
+    } else {
+        format!("{}/{}", row.files_done, row.files_seen)
+    }
 }
 
 fn normalize_selection(state: &mut AppState, root_count: usize) {
@@ -672,6 +701,37 @@ fn queue_selected_root(
         machine_label.map(str::to_string),
         job_tx,
     );
+    Ok(())
+}
+
+fn request_selected_cancel(
+    conn: &Connection,
+    selected_event: Option<&db::JobEventRow>,
+    state: &mut AppState,
+) -> anyhow::Result<()> {
+    let Some(event) = selected_event else {
+        state.status = "No job selected to cancel".to_string();
+        return Ok(());
+    };
+    if db::request_job_cancel(conn, &event.job_id)? {
+        let envelope = crate::events::EventEnvelope {
+            event_kind: crate::events::EventKind::JobCancelRequested,
+            job_id: Some(event.job_id.clone()),
+            sequence: None,
+            created_at: crate::util::now_rfc3339(),
+            payload: crate::events::EventPayload::Job {
+                kind: event.job_kind.clone(),
+                path: event.current_path.clone(),
+                message: Some("cancel requested from tui".to_string()),
+                files_seen: Some(event.files_seen as u64),
+                errors: Some(event.errors as u64),
+            },
+        };
+        db::persist_event(conn, &envelope)?;
+        state.status = format!("cancel requested for {}", event.job_id);
+    } else {
+        state.status = format!("job {} is not cancelable", event.job_id);
+    }
     Ok(())
 }
 

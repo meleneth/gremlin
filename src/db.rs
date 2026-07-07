@@ -16,6 +16,7 @@ pub struct RootRow {
     pub current_size_bytes: i64,
     pub latest_job_kind: Option<String>,
     pub latest_job_status: Option<String>,
+    pub latest_job_phase: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -63,8 +64,14 @@ pub struct JobEventRow {
     pub job_id: String,
     pub job_kind: String,
     pub status: String,
+    pub phase: Option<String>,
+    pub current_path: Option<String>,
+    pub files_seen: i64,
+    pub files_done: i64,
+    pub files_skipped: i64,
+    pub errors: i64,
+    pub cancel_requested: bool,
     pub sequence: i64,
-    pub created_at: String,
     pub event_kind: String,
     pub payload_json: String,
 }
@@ -80,6 +87,14 @@ pub struct JobRow {
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
     pub params_json: Option<String>,
+    pub phase: Option<String>,
+    pub current_path: Option<String>,
+    pub files_total: i64,
+    pub files_seen: i64,
+    pub files_done: i64,
+    pub files_skipped: i64,
+    pub errors: i64,
+    pub cancel_requested: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +129,17 @@ pub struct ChecksumEntryInput<'a> {
     pub blake3: Option<&'a str>,
     pub sha256: Option<&'a str>,
     pub metadata_json: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct JobProgressInput<'a> {
+    pub phase: &'a str,
+    pub current_path: Option<&'a str>,
+    pub files_total: Option<u64>,
+    pub files_seen: u64,
+    pub files_done: u64,
+    pub files_skipped: u64,
+    pub errors: u64,
 }
 
 pub fn open_or_create(path: &Path) -> rusqlite::Result<Connection> {
@@ -200,6 +226,14 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             created_at TEXT NOT NULL,
             started_at TEXT,
             completed_at TEXT,
+            phase TEXT,
+            current_path TEXT,
+            files_total INTEGER NOT NULL DEFAULT 0,
+            files_seen INTEGER NOT NULL DEFAULT 0,
+            files_done INTEGER NOT NULL DEFAULT 0,
+            files_skipped INTEGER NOT NULL DEFAULT 0,
+            errors INTEGER NOT NULL DEFAULT 0,
+            cancel_requested INTEGER NOT NULL DEFAULT 0,
             params_json TEXT
         );
 
@@ -242,6 +276,54 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         "roots",
         "current_size_bytes",
         "ALTER TABLE roots ADD COLUMN current_size_bytes INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "jobs",
+        "phase",
+        "ALTER TABLE jobs ADD COLUMN phase TEXT",
+    )?;
+    ensure_column(
+        conn,
+        "jobs",
+        "current_path",
+        "ALTER TABLE jobs ADD COLUMN current_path TEXT",
+    )?;
+    ensure_column(
+        conn,
+        "jobs",
+        "files_total",
+        "ALTER TABLE jobs ADD COLUMN files_total INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "jobs",
+        "files_seen",
+        "ALTER TABLE jobs ADD COLUMN files_seen INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "jobs",
+        "files_done",
+        "ALTER TABLE jobs ADD COLUMN files_done INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "jobs",
+        "files_skipped",
+        "ALTER TABLE jobs ADD COLUMN files_skipped INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "jobs",
+        "errors",
+        "ALTER TABLE jobs ADD COLUMN errors INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(
+        conn,
+        "jobs",
+        "cancel_requested",
+        "ALTER TABLE jobs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0",
     )?;
     Ok(())
 }
@@ -359,8 +441,8 @@ pub fn create_job(
     let now = now_rfc3339();
     conn.execute(
         r#"
-        INSERT INTO jobs (id, kind, status, machine_id, root_id, created_at, params_json)
-        VALUES (?1, ?2, 'created', ?3, ?4, ?5, ?6)
+        INSERT INTO jobs (id, kind, status, machine_id, root_id, created_at, phase, params_json)
+        VALUES (?1, ?2, 'created', ?3, ?4, ?5, 'queued', ?6)
         "#,
         params![
             id,
@@ -409,7 +491,7 @@ pub fn queue_file_job(
 
 pub fn start_job(conn: &Connection, job_id: &str) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE jobs SET status = 'running', started_at = COALESCE(started_at, ?2) WHERE id = ?1",
+        "UPDATE jobs SET status = 'running', phase = 'preparing', started_at = COALESCE(started_at, ?2) WHERE id = ?1",
         params![job_id, now_rfc3339()],
     )?;
     Ok(())
@@ -417,10 +499,66 @@ pub fn start_job(conn: &Connection, job_id: &str) -> rusqlite::Result<()> {
 
 pub fn complete_job(conn: &Connection, job_id: &str, status: &str) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE jobs SET status = ?2, completed_at = ?3 WHERE id = ?1",
+        "UPDATE jobs SET status = ?2, phase = 'finalizing', current_path = NULL, completed_at = ?3 WHERE id = ?1",
         params![job_id, status, now_rfc3339()],
     )?;
     Ok(())
+}
+
+pub fn update_job_progress(
+    conn: &Connection,
+    job_id: &str,
+    progress: JobProgressInput<'_>,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        r#"
+        UPDATE jobs
+        SET phase = ?2,
+            current_path = ?3,
+            files_total = COALESCE(?4, files_total),
+            files_seen = ?5,
+            files_done = ?6,
+            files_skipped = ?7,
+            errors = ?8
+        WHERE id = ?1
+        "#,
+        params![
+            job_id,
+            progress.phase,
+            progress.current_path,
+            progress.files_total.map(|value| value as i64),
+            progress.files_seen as i64,
+            progress.files_done as i64,
+            progress.files_skipped as i64,
+            progress.errors as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn request_job_cancel(conn: &Connection, job_id: &str) -> rusqlite::Result<bool> {
+    let changed = conn.execute(
+        r#"
+        UPDATE jobs
+        SET cancel_requested = 1
+        WHERE id = ?1 AND status IN ('created', 'running')
+        "#,
+        params![job_id],
+    )?;
+    Ok(changed > 0)
+}
+
+pub fn job_cancel_requested(conn: &Connection, job_id: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT cancel_requested FROM jobs WHERE id = ?1",
+        params![job_id],
+        |row| {
+            let value: i64 = row.get(0)?;
+            Ok(value != 0)
+        },
+    )
+    .optional()
+    .map(|value| value.unwrap_or(false))
 }
 
 pub fn next_sequence(conn: &Connection, job_id: &str) -> rusqlite::Result<i64> {
@@ -736,7 +874,14 @@ pub fn roots(conn: &Connection) -> rusqlite::Result<Vec<RootRow>> {
                 WHERE j.root_id = r.id
                 ORDER BY j.created_at DESC
                 LIMIT 1
-            ) AS latest_job_status
+            ) AS latest_job_status,
+            (
+                SELECT j.phase
+                FROM jobs j
+                WHERE j.root_id = r.id
+                ORDER BY j.created_at DESC
+                LIMIT 1
+            ) AS latest_job_phase
         FROM roots r
         ORDER BY r.created_at DESC
         "#,
@@ -750,6 +895,7 @@ pub fn roots(conn: &Connection) -> rusqlite::Result<Vec<RootRow>> {
             current_size_bytes: row.get(4)?,
             latest_job_kind: row.get(5)?,
             latest_job_status: row.get(6)?,
+            latest_job_phase: row.get(7)?,
         })
     })?;
     rows.collect()
@@ -781,7 +927,14 @@ pub fn find_root_by_machine_path(
                 WHERE j.root_id = r.id
                 ORDER BY j.created_at DESC
                 LIMIT 1
-            ) AS latest_job_status
+            ) AS latest_job_status,
+            (
+                SELECT j.phase
+                FROM jobs j
+                WHERE j.root_id = r.id
+                ORDER BY j.created_at DESC
+                LIMIT 1
+            ) AS latest_job_phase
         FROM roots r
         WHERE r.machine_id = ?1 AND r.path = ?2
         "#,
@@ -795,6 +948,7 @@ pub fn find_root_by_machine_path(
                 current_size_bytes: row.get(4)?,
                 latest_job_kind: row.get(5)?,
                 latest_job_status: row.get(6)?,
+                latest_job_phase: row.get(7)?,
             })
         },
     )
@@ -830,7 +984,9 @@ pub fn target_status(
     let latest_job = conn
         .query_row(
             r#"
-            SELECT id, kind, status, machine_id, root_id, created_at, started_at, completed_at, params_json
+            SELECT id, kind, status, machine_id, root_id, created_at, started_at, completed_at,
+                   params_json, phase, current_path, files_total, files_seen, files_done,
+                   files_skipped, errors, cancel_requested
             FROM jobs
             WHERE root_id = ?1
             ORDER BY created_at DESC
@@ -867,7 +1023,9 @@ pub fn target_status(
 pub fn recent_jobs_and_events(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<JobEventRow>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT j.id, j.kind, j.status, e.sequence, e.created_at, e.event_kind, e.payload_json
+        SELECT j.id, j.kind, j.status, j.phase, j.current_path, j.files_seen,
+               j.files_done, j.files_skipped, j.errors, j.cancel_requested,
+               e.sequence, e.event_kind, e.payload_json
         FROM job_events e
         JOIN jobs j ON j.id = e.job_id
         ORDER BY e.created_at DESC, e.sequence DESC
@@ -879,10 +1037,16 @@ pub fn recent_jobs_and_events(conn: &Connection, limit: i64) -> rusqlite::Result
             job_id: row.get(0)?,
             job_kind: row.get(1)?,
             status: row.get(2)?,
-            sequence: row.get(3)?,
-            created_at: row.get(4)?,
-            event_kind: row.get(5)?,
-            payload_json: row.get(6)?,
+            phase: row.get(3)?,
+            current_path: row.get(4)?,
+            files_seen: row.get(5)?,
+            files_done: row.get(6)?,
+            files_skipped: row.get(7)?,
+            errors: row.get(8)?,
+            cancel_requested: row.get::<_, i64>(9)? != 0,
+            sequence: row.get(10)?,
+            event_kind: row.get(11)?,
+            payload_json: row.get(12)?,
         })
     })?;
     rows.collect()
@@ -895,7 +1059,9 @@ pub fn recent_jobs_and_events_for_root(
 ) -> rusqlite::Result<Vec<JobEventRow>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT j.id, j.kind, j.status, e.sequence, e.created_at, e.event_kind, e.payload_json
+        SELECT j.id, j.kind, j.status, j.phase, j.current_path, j.files_seen,
+               j.files_done, j.files_skipped, j.errors, j.cancel_requested,
+               e.sequence, e.event_kind, e.payload_json
         FROM job_events e
         JOIN jobs j ON j.id = e.job_id
         WHERE j.root_id = ?1
@@ -908,10 +1074,16 @@ pub fn recent_jobs_and_events_for_root(
             job_id: row.get(0)?,
             job_kind: row.get(1)?,
             status: row.get(2)?,
-            sequence: row.get(3)?,
-            created_at: row.get(4)?,
-            event_kind: row.get(5)?,
-            payload_json: row.get(6)?,
+            phase: row.get(3)?,
+            current_path: row.get(4)?,
+            files_seen: row.get(5)?,
+            files_done: row.get(6)?,
+            files_skipped: row.get(7)?,
+            errors: row.get(8)?,
+            cancel_requested: row.get::<_, i64>(9)? != 0,
+            sequence: row.get(10)?,
+            event_kind: row.get(11)?,
+            payload_json: row.get(12)?,
         })
     })?;
     rows.collect()
@@ -920,7 +1092,9 @@ pub fn recent_jobs_and_events_for_root(
 pub fn recent_jobs(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<JobRow>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT id, kind, status, machine_id, root_id, created_at, started_at, completed_at, params_json
+        SELECT id, kind, status, machine_id, root_id, created_at, started_at, completed_at,
+               params_json, phase, current_path, files_total, files_seen, files_done,
+               files_skipped, errors, cancel_requested
         FROM jobs
         ORDER BY created_at DESC
         LIMIT ?1
@@ -933,7 +1107,9 @@ pub fn recent_jobs(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<JobRow
 pub fn job_by_id(conn: &Connection, job_id: &str) -> rusqlite::Result<Option<JobRow>> {
     conn.query_row(
         r#"
-        SELECT id, kind, status, machine_id, root_id, created_at, started_at, completed_at, params_json
+        SELECT id, kind, status, machine_id, root_id, created_at, started_at, completed_at,
+               params_json, phase, current_path, files_total, files_seen, files_done,
+               files_skipped, errors, cancel_requested
         FROM jobs
         WHERE id = ?1
         "#,
@@ -975,6 +1151,14 @@ fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
         started_at: row.get(6)?,
         completed_at: row.get(7)?,
         params_json: row.get(8)?,
+        phase: row.get(9)?,
+        current_path: row.get(10)?,
+        files_total: row.get(11)?,
+        files_seen: row.get(12)?,
+        files_done: row.get(13)?,
+        files_skipped: row.get(14)?,
+        errors: row.get(15)?,
+        cancel_requested: row.get::<_, i64>(16)? != 0,
     })
 }
 
@@ -994,6 +1178,36 @@ mod tests {
         configure(&conn).unwrap();
         init_schema(&conn).unwrap();
         assert_eq!(table_count(&conn, "machines").unwrap(), 0);
+    }
+
+    #[test]
+    fn updates_job_progress_projection() {
+        let conn = Connection::open_in_memory().unwrap();
+        configure(&conn).unwrap();
+        init_schema(&conn).unwrap();
+        let job_id = create_job(&conn, "scan", None, None, serde_json::json!({})).unwrap();
+        update_job_progress(
+            &conn,
+            &job_id,
+            JobProgressInput {
+                phase: "processing",
+                current_path: Some("a.txt"),
+                files_total: Some(3),
+                files_seen: 2,
+                files_done: 1,
+                files_skipped: 0,
+                errors: 1,
+            },
+        )
+        .unwrap();
+
+        let job = job_by_id(&conn, &job_id).unwrap().unwrap();
+        assert_eq!(job.phase.as_deref(), Some("processing"));
+        assert_eq!(job.current_path.as_deref(), Some("a.txt"));
+        assert_eq!(job.files_total, 3);
+        assert_eq!(job.files_seen, 2);
+        assert_eq!(job.files_done, 1);
+        assert_eq!(job.errors, 1);
     }
 
     #[test]

@@ -21,6 +21,8 @@
 - Add a way to accept a previous verify job after review, not only `verify --accept`.
 - Add explicit hash baseline selection for verify.
 - Decide whether imported checksum collections can become verify baselines.
+- Add SFV/CFV checksum manifest import as checksum collections.
+- Add PAR2 file-list import, with parity verification deferred until the manifest path is solid.
 - Add richer changed reporting: size-only, mtime-only, hash mismatch.
 - Add a compact integrity summary per root.
 
@@ -37,6 +39,7 @@
 - Build remote dispatch and progress streaming on Tokio rather than adding a separate sync orchestration path.
 - Implement SSH dispatch for `worker hash --jsonl`.
 - Add remote job metadata so imported events can be tied back to remote machines/roots cleanly.
+- Treat SFV, CFV, PAR2, and worker JSONL as manifest/checksum collection sources.
 - Add SMB path mapping and target normalization.
 - Improve import reconciliation from checksum collections into projected state.
 - Add safer handling for partial imports and duplicate event streams.

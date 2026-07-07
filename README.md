@@ -91,7 +91,7 @@ Roots maintain `current_size_bytes`, the projected total size of currently index
 
 `import-events` reads JSONL events, preserves imported history in `job_events`, and creates checksum collection entries for completed hash events.
 
-`job create` records an intended scan or hash job without executing file work. This is the same seam used by the TUI: UI actions enqueue jobs, while `job run` executes a queued job and emits events later.
+`job create` records an intended scan or hash job without executing file work. This is the same seam used by the TUI: UI actions create jobs, start them through the job runner, display projected progress, and can request cooperative cancellation between files.
 
 `target inspect` classifies obvious target forms without touching the database:
 
@@ -111,6 +111,7 @@ Most scan/hash/verify commands print a compact summary plus capped highlights. U
 Future seams deliberately left open:
 
 - SSH remote dispatch: run `gremlin worker hash ... --jsonl --out ...` remotely, then copy JSONL back for import.
+- Manifest imports: add SFV/CFV checksum manifests and PAR2 file-list extraction as checksum collection sources.
 - SMB path mapping: add machine/root mapping without changing content identity.
 - Transfer planning: compare projected observations and checksum collections before adding transfer jobs.
 - Seamless resume: make interrupted remote browsing, hashing, importing, and future copy jobs restart from durable job/event state instead of requiring manual cleanup.

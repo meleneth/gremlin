@@ -140,6 +140,31 @@ struct FileMeta {
 }
 
 #[derive(Debug, Clone)]
+struct JobProgress {
+    phase: &'static str,
+    current_path: Option<String>,
+    files_total: Option<u64>,
+    files_seen: u64,
+    files_done: u64,
+    files_skipped: u64,
+    errors: u64,
+}
+
+impl JobProgress {
+    fn new(phase: &'static str) -> Self {
+        Self {
+            phase,
+            current_path: None,
+            files_total: None,
+            files_seen: 0,
+            files_done: 0,
+            files_skipped: 0,
+            errors: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct HashResult {
     relative_path: String,
     basename: String,
@@ -333,6 +358,7 @@ fn run_scan_job(
     let mut seen = BTreeSet::new();
     let mut deltas = Vec::new();
     let mut sequence = db::next_sequence(conn, job_id)?;
+    let mut progress = JobProgress::new("walking");
     persist_db_event(
         conn,
         job_id,
@@ -350,6 +376,9 @@ fn run_scan_job(
     let mut files_seen = 0_u64;
     let mut errors = 0_u64;
     for entry in WalkDir::new(root_path) {
+        if complete_if_canceled(conn, job_id, &mut sequence, "scan", root_path, &progress)? {
+            return Ok(scan_summary(job_id, files_seen, errors, deltas));
+        }
         match entry {
             Ok(entry) if entry.file_type().is_dir() => {
                 let rel =
@@ -368,6 +397,7 @@ fn run_scan_job(
                 }
                 match file_meta(root_path, entry.path()) {
                     Ok(meta) => {
+                        progress.current_path = Some(meta.relative_path.clone());
                         let delta = classify_scan_delta(&meta, previous.get(&meta.relative_path));
                         seen.insert(meta.relative_path.clone());
                         db::insert_path_observation(
@@ -398,20 +428,31 @@ fn run_scan_job(
                         )?;
                         deltas.push(delta);
                         files_seen += 1;
+                        progress.files_seen = files_seen;
+                        progress.files_done = files_seen;
+                        persist_progress(conn, job_id, &mut sequence, &progress, None)?;
                     }
                     Err(err) => {
                         errors += 1;
+                        progress.errors = errors;
                         persist_job_error(conn, job_id, &mut sequence, "scan", entry.path(), err)?;
+                        persist_progress(conn, job_id, &mut sequence, &progress, None)?;
                     }
                 }
             }
             Ok(_) => {}
             Err(err) => {
                 errors += 1;
+                progress.errors = errors;
                 persist_walk_error(conn, job_id, &mut sequence, "scan", err)?;
+                persist_progress(conn, job_id, &mut sequence, &progress, None)?;
             }
         }
     }
+
+    progress.phase = "finalizing";
+    progress.current_path = None;
+    persist_progress(conn, job_id, &mut sequence, &progress, None)?;
 
     for old in previous.values() {
         if !seen.contains(&old.relative_path) {
@@ -460,6 +501,7 @@ fn run_hash_job(
     db::start_job(conn, job_id)?;
     let previous = previous_observations(conn, machine_id, root_id)?;
     let mut sequence = db::next_sequence(conn, job_id)?;
+    let mut progress = JobProgress::new("walking");
     persist_db_event(
         conn,
         job_id,
@@ -479,6 +521,15 @@ fn run_hash_job(
     let mut errors = 0_u64;
     let mut hashed_paths = Vec::new();
     for entry in WalkDir::new(root_path) {
+        if complete_if_canceled(conn, job_id, &mut sequence, "hash", root_path, &progress)? {
+            return Ok(HashSummary {
+                job_id: job_id.to_string(),
+                files_hashed,
+                skipped_unchanged,
+                errors,
+                hashed_paths,
+            });
+        }
         match entry {
             Ok(entry) if entry.file_type().is_file() => {
                 let path = entry.path();
@@ -487,12 +538,20 @@ fn run_hash_job(
                 }
                 let Ok(meta) = file_meta(root_path, path) else {
                     errors += 1;
+                    progress.errors = errors;
+                    persist_progress(conn, job_id, &mut sequence, &progress, None)?;
                     continue;
                 };
+                progress.current_path = Some(meta.relative_path.clone());
+                progress.files_seen += 1;
                 if !hash_all && !needs_hash(&meta, previous.get(&meta.relative_path)) {
                     skipped_unchanged += 1;
+                    progress.files_skipped = skipped_unchanged;
+                    persist_progress(conn, job_id, &mut sequence, &progress, None)?;
                     continue;
                 }
+                progress.phase = "processing";
+                persist_progress(conn, job_id, &mut sequence, &progress, None)?;
                 persist_db_event(
                     conn,
                     job_id,
@@ -508,9 +567,12 @@ fn run_hash_job(
                         persist_hash_completed(conn, job_id, &mut sequence, &result)?;
                         hashed_paths.push(result.relative_path);
                         files_hashed += 1;
+                        progress.files_done = files_hashed;
+                        persist_progress(conn, job_id, &mut sequence, &progress, None)?;
                     }
                     Err(err) => {
                         errors += 1;
+                        progress.errors = errors;
                         persist_db_event(
                             conn,
                             job_id,
@@ -522,16 +584,24 @@ fn run_hash_job(
                                 error: err.to_string(),
                             },
                         )?;
+                        persist_progress(conn, job_id, &mut sequence, &progress, None)?;
                     }
                 }
+                progress.phase = "walking";
             }
             Ok(_) => {}
             Err(err) => {
                 errors += 1;
+                progress.errors = errors;
                 persist_walk_hash_error(conn, job_id, &mut sequence, err)?;
+                persist_progress(conn, job_id, &mut sequence, &progress, None)?;
             }
         }
     }
+
+    progress.phase = "finalizing";
+    progress.current_path = None;
+    persist_progress(conn, job_id, &mut sequence, &progress, None)?;
 
     let status = if errors == 0 {
         "completed"
@@ -575,6 +645,7 @@ fn run_verify_job(
     let mut seen = BTreeSet::new();
     let mut findings = Vec::new();
     let mut sequence = db::next_sequence(conn, job_id)?;
+    let mut progress = JobProgress::new("walking");
     persist_db_event(
         conn,
         job_id,
@@ -590,12 +661,20 @@ fn run_verify_job(
     )?;
 
     for entry in WalkDir::new(root_path) {
+        if complete_if_canceled(conn, job_id, &mut sequence, "verify", root_path, &progress)? {
+            return Ok(verify_summary(job_id, findings));
+        }
         match entry {
             Ok(entry) if entry.file_type().is_file() => {
                 let path = entry.path();
                 if should_skip(path, skip_paths) {
                     continue;
                 }
+                let current_path = relative_path(root_path, path).unwrap_or_else(|_| lossy(path));
+                progress.current_path = Some(current_path);
+                progress.files_seen += 1;
+                progress.phase = "processing";
+                persist_progress(conn, job_id, &mut sequence, &progress, None)?;
                 match hash_file(root_path, path) {
                     Ok(result) => {
                         seen.insert(result.relative_path.clone());
@@ -608,6 +687,8 @@ fn run_verify_job(
                             persist_verify_finding(conn, job_id, &mut sequence, &finding)?;
                         }
                         findings.push(finding);
+                        progress.files_done += 1;
+                        persist_progress(conn, job_id, &mut sequence, &progress, None)?;
                     }
                     Err(err) => {
                         let rel = relative_path(root_path, path).unwrap_or_else(|_| lossy(path));
@@ -627,8 +708,11 @@ fn run_verify_job(
                         };
                         persist_verify_finding(conn, job_id, &mut sequence, &finding)?;
                         findings.push(finding);
+                        progress.errors += 1;
+                        persist_progress(conn, job_id, &mut sequence, &progress, None)?;
                     }
                 }
+                progress.phase = "walking";
             }
             Ok(_) => {}
             Err(err) => {
@@ -651,6 +735,8 @@ fn run_verify_job(
                 };
                 persist_verify_finding(conn, job_id, &mut sequence, &finding)?;
                 findings.push(finding);
+                progress.errors += 1;
+                persist_progress(conn, job_id, &mut sequence, &progress, None)?;
             }
         }
     }
@@ -672,6 +758,8 @@ fn run_verify_job(
             };
             persist_verify_finding(conn, job_id, &mut sequence, &finding)?;
             findings.push(finding);
+            progress.files_done += 1;
+            persist_progress(conn, job_id, &mut sequence, &progress, None)?;
         }
     }
     let mut summary = verify_summary(job_id, findings);
@@ -684,6 +772,10 @@ fn run_verify_job(
     } else {
         "completed_with_errors"
     };
+    progress.phase = "finalizing";
+    progress.current_path = None;
+    progress.errors = errors;
+    persist_progress(conn, job_id, &mut sequence, &progress, None)?;
     persist_db_event(
         conn,
         job_id,
@@ -1117,6 +1209,79 @@ fn persist_walk_hash_error(
     )
 }
 
+fn persist_progress(
+    conn: &Connection,
+    job_id: &str,
+    sequence: &mut i64,
+    progress: &JobProgress,
+    message: Option<String>,
+) -> rusqlite::Result<()> {
+    db::update_job_progress(
+        conn,
+        job_id,
+        db::JobProgressInput {
+            phase: progress.phase,
+            current_path: progress.current_path.as_deref(),
+            files_total: progress.files_total,
+            files_seen: progress.files_seen,
+            files_done: progress.files_done,
+            files_skipped: progress.files_skipped,
+            errors: progress.errors,
+        },
+    )?;
+    persist_db_event(
+        conn,
+        job_id,
+        sequence,
+        EventKind::JobProgress,
+        EventPayload::JobProgress {
+            phase: progress.phase.to_string(),
+            current_path: progress.current_path.clone(),
+            files_total: progress.files_total,
+            files_seen: progress.files_seen,
+            files_done: progress.files_done,
+            files_skipped: progress.files_skipped,
+            errors: progress.errors,
+            message,
+        },
+    )
+}
+
+fn complete_if_canceled(
+    conn: &Connection,
+    job_id: &str,
+    sequence: &mut i64,
+    kind: &str,
+    root_path: &Path,
+    progress: &JobProgress,
+) -> rusqlite::Result<bool> {
+    if !db::job_cancel_requested(conn, job_id)? {
+        return Ok(false);
+    }
+    persist_progress(
+        conn,
+        job_id,
+        sequence,
+        progress,
+        Some("cancel requested".to_string()),
+    )?;
+    persist_db_event(
+        conn,
+        job_id,
+        sequence,
+        EventKind::JobCanceled,
+        EventPayload::Job {
+            kind: kind.to_string(),
+            path: Some(lossy(root_path)),
+            message: Some("canceled between files".to_string()),
+            files_seen: Some(progress.files_seen),
+            errors: Some(progress.errors),
+        },
+    )?;
+    db::complete_job(conn, job_id, "canceled")?;
+    Ok(true)
+}
+
 fn file_meta(root: &Path, path: &Path) -> anyhow::Result<FileMeta> {
     let metadata = path
         .metadata()
@@ -1314,6 +1479,34 @@ mod tests {
         let job = db::job_by_id(&conn, &job_id).unwrap().unwrap();
         assert_eq!(job.status, "completed");
         assert_eq!(db::table_count(&conn, "path_observations").unwrap(), 1);
+    }
+
+    #[test]
+    fn canceled_queued_scan_stops_before_file_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hello.txt");
+        std::fs::write(&file, b"hello").unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        let job_id = db::queue_file_job(&conn, "scan", dir.path(), None).unwrap();
+        assert!(db::request_job_cancel(&conn, &job_id).unwrap());
+
+        run_queued_job(
+            &conn,
+            &job_id,
+            &dir.path().join("gremlin.db"),
+            None,
+            OutputOptions::default(),
+        )
+        .unwrap();
+
+        let job = db::job_by_id(&conn, &job_id).unwrap().unwrap();
+        assert_eq!(job.status, "canceled");
+        assert_eq!(db::table_count(&conn, "path_observations").unwrap(), 0);
+        assert!(db::events_for_job(&conn, &job_id)
+            .unwrap()
+            .iter()
+            .any(|event| event.event_kind == "job_canceled"));
     }
 
     #[test]

@@ -14,6 +14,9 @@ pub struct EventEnvelope {
 pub enum EventKind {
     JobCreated,
     JobStarted,
+    JobProgress,
+    JobCancelRequested,
+    JobCanceled,
     JobCompleted,
     JobFailed,
     DirectorySeen,
@@ -31,6 +34,9 @@ impl EventKind {
         match self {
             Self::JobCreated => "job_created",
             Self::JobStarted => "job_started",
+            Self::JobProgress => "job_progress",
+            Self::JobCancelRequested => "job_cancel_requested",
+            Self::JobCanceled => "job_canceled",
             Self::JobCompleted => "job_completed",
             Self::JobFailed => "job_failed",
             Self::DirectorySeen => "directory_seen",
@@ -54,6 +60,16 @@ pub enum EventPayload {
         message: Option<String>,
         files_seen: Option<u64>,
         errors: Option<u64>,
+    },
+    JobProgress {
+        phase: String,
+        current_path: Option<String>,
+        files_total: Option<u64>,
+        files_seen: u64,
+        files_done: u64,
+        files_skipped: u64,
+        errors: u64,
+        message: Option<String>,
     },
     DirectorySeen {
         relative_path: String,

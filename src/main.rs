@@ -124,10 +124,15 @@ async fn main() -> anyhow::Result<()> {
             let conn = db::open_existing(&db)?;
             for row in db::recent_jobs(&conn, config_ctx.jobs_limit())? {
                 println!(
-                    "{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}/{}\tskipped={}\terrors={}\t{}\t{}",
                     row.id,
                     row.kind,
                     row.status,
+                    row.phase.unwrap_or_else(|| "-".to_string()),
+                    row.files_done,
+                    row.files_seen,
+                    row.files_skipped,
+                    row.errors,
                     row.created_at,
                     row.params_json.unwrap_or_else(|| "{}".to_string())
                 );
@@ -164,6 +169,17 @@ async fn main() -> anyhow::Result<()> {
                     "completed:\t{}",
                     job.completed_at.unwrap_or_else(|| "-".to_string())
                 );
+                println!("phase:\t{}", job.phase.unwrap_or_else(|| "-".to_string()));
+                println!(
+                    "progress:\tseen={} done={} skipped={} errors={} total={} current={}",
+                    job.files_seen,
+                    job.files_done,
+                    job.files_skipped,
+                    job.errors,
+                    job.files_total,
+                    job.current_path.unwrap_or_else(|| "-".to_string())
+                );
+                println!("cancel_requested:\t{}", job.cancel_requested);
                 println!(
                     "params:\t{}",
                     job.params_json.unwrap_or_else(|| "{}".to_string())
