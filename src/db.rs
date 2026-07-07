@@ -26,6 +26,12 @@ pub struct FileRow {
 }
 
 #[derive(Debug, Clone)]
+pub struct RootSummary {
+    pub file_count: i64,
+    pub content_count: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct PathObservationRow {
     pub relative_path: String,
     pub size_bytes: u64,
@@ -608,6 +614,49 @@ pub fn recent_files(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<FileR
     rows.collect()
 }
 
+pub fn recent_files_for_root(
+    conn: &Connection,
+    root_id: &str,
+    limit: i64,
+) -> rusqlite::Result<Vec<FileRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT relative_path, size_bytes, modified_at, content_id, status
+        FROM path_observations
+        WHERE root_id = ?1
+        ORDER BY last_seen_at DESC
+        LIMIT ?2
+        "#,
+    )?;
+    let rows = stmt.query_map(params![root_id, limit], |row| {
+        Ok(FileRow {
+            relative_path: row.get(0)?,
+            size_bytes: row.get(1)?,
+            modified_at: row.get(2)?,
+            content_id: row.get(3)?,
+            status: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn root_summary(conn: &Connection, root_id: &str) -> rusqlite::Result<RootSummary> {
+    let file_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM path_observations WHERE root_id = ?1",
+        params![root_id],
+        |row| row.get(0),
+    )?;
+    let content_count: i64 = conn.query_row(
+        "SELECT COUNT(DISTINCT content_id) FROM path_observations WHERE root_id = ?1 AND content_id IS NOT NULL",
+        params![root_id],
+        |row| row.get(0),
+    )?;
+    Ok(RootSummary {
+        file_count,
+        content_count,
+    })
+}
+
 pub fn path_observations_for_root(
     conn: &Connection,
     machine_id: &str,
@@ -771,6 +820,32 @@ pub fn recent_jobs_and_events(conn: &Connection, limit: i64) -> rusqlite::Result
         "#,
     )?;
     let rows = stmt.query_map(params![limit], |row| {
+        Ok(JobEventRow {
+            job_id: row.get(0)?,
+            status: row.get(1)?,
+            created_at: row.get(2)?,
+            event_kind: row.get(3)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn recent_jobs_and_events_for_root(
+    conn: &Connection,
+    root_id: &str,
+    limit: i64,
+) -> rusqlite::Result<Vec<JobEventRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT j.id, j.status, e.created_at, e.event_kind
+        FROM job_events e
+        JOIN jobs j ON j.id = e.job_id
+        WHERE j.root_id = ?1
+        ORDER BY e.created_at DESC, e.sequence DESC
+        LIMIT ?2
+        "#,
+    )?;
+    let rows = stmt.query_map(params![root_id, limit], |row| {
         Ok(JobEventRow {
             job_id: row.get(0)?,
             status: row.get(1)?,
