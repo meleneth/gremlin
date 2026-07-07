@@ -9,7 +9,6 @@
 
 ## TUI
 
-- Add selectable file rows with a detail pane.
 - Add selectable job/event rows with payload detail.
 - Add root status summaries for latest scan/hash/verify jobs.
 - Add root filtering/search once large root lists are realistic.

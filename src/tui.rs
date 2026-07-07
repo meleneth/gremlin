@@ -98,25 +98,27 @@ fn run_loop(
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(3),
-                    Constraint::Min(12),
-                    Constraint::Length(5),
-                    Constraint::Length(8),
+                    Constraint::Min(8),
+                    Constraint::Length(7),
+                    Constraint::Length(6),
                 ])
                 .split(area);
             let middle = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
                 .split(vertical[1]);
-            let right = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(7), Constraint::Min(5)])
-                .split(middle[1]);
 
             render_header(frame, vertical[0]);
             render_roots(frame, middle[0], &roots, &state);
-            render_root_summary(frame, right[0], selected, summary.as_ref());
-            render_files(frame, right[1], &files, &state);
-            render_status(frame, vertical[2], &state);
+            render_files(frame, middle[1], &files, &state);
+            render_detail_panel(
+                frame,
+                vertical[2],
+                selected,
+                summary.as_ref(),
+                files.get(state.file_offset),
+                &state,
+            );
             render_events(frame, vertical[3], &events, &state);
         })?;
 
@@ -203,28 +205,48 @@ fn render_roots(
     );
 }
 
-fn render_root_summary(
+fn render_detail_panel(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     selected: Option<&db::RootRow>,
     summary: Option<&db::RootSummary>,
+    selected_file: Option<&db::FileRow>,
+    state: &AppState,
 ) {
-    let text = match (selected, summary) {
+    let root_text = match (selected, summary) {
         (Some(root), Some(summary)) => format!(
-            "root: {}\npath: {}\nfiles: {}  hashed: {}\ncurrent size: {}\nmachine: {}",
+            "root: {} | files: {} | hashed: {} | size: {}\npath: {}",
             root.id,
-            root.path,
             summary.file_count,
             summary.content_count,
             human_size(root.current_size_bytes as u64),
-            root.machine_id
+            root.path
         ),
         _ => "No root selected".to_string(),
     };
+    let file_text = if let Some(file) = selected_file {
+        format!(
+            "file: {} | {} ({} bytes) | {} | {}\nmodified: {} | content: {}",
+            file.relative_path,
+            human_size(file.size_bytes as u64),
+            file.size_bytes,
+            file.status,
+            if file.content_id.is_some() {
+                "hashed"
+            } else {
+                "stat"
+            },
+            file.modified_at.as_deref().unwrap_or("-"),
+            file.content_id.as_deref().unwrap_or("-")
+        )
+    } else {
+        "file: -".to_string()
+    };
+    let text = format!("{}\n{}\n{}", root_text, file_text, state.status);
     frame.render_widget(
         Paragraph::new(text).block(
             Block::default()
-                .title("Selected Root")
+                .title("Details / Actions")
                 .borders(Borders::ALL),
         ),
         area,
@@ -237,19 +259,20 @@ fn render_files(
     files: &[db::FileRow],
     state: &AppState,
 ) {
-    let visible = files.iter().skip(state.file_offset);
+    let visible = files.iter().enumerate().skip(state.file_offset);
     let items = if files.is_empty() {
         vec![ListItem::new("No indexed files for this root")]
     } else {
         visible
-            .map(|file| {
+            .map(|(idx, file)| {
                 let hash = if file.content_id.is_some() {
                     "hashed"
                 } else {
                     "stat"
                 };
+                let marker = if idx == state.file_offset { "> " } else { "  " };
                 ListItem::new(format!(
-                    "{}  {}  {}  {}\n  {}",
+                    "{marker}{}  {}  {}  {}\n  {}",
                     file.relative_path,
                     human_size(file.size_bytes as u64),
                     file.status,
@@ -297,14 +320,6 @@ mod tests {
         assert_eq!(human_size(1024), "1.00 KiB");
         assert_eq!(human_size(12 * 1024), "12.0 KiB");
     }
-}
-
-fn render_status(frame: &mut ratatui::Frame<'_>, area: Rect, state: &AppState) {
-    frame.render_widget(
-        Paragraph::new(state.status.as_str())
-            .block(Block::default().title("Actions").borders(Borders::ALL)),
-        area,
-    );
 }
 
 fn render_events(
