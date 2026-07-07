@@ -256,6 +256,13 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Some(Commands::Transfer { command }) => match command {
+            TransferCommands::List => {
+                let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
+                let conn = db::open_existing(&db)?;
+                for plan in db::recent_transfer_plans(&conn, output.limit as i64)? {
+                    print_transfer_plan_row(&conn, &plan)?;
+                }
+            }
             TransferCommands::Plan {
                 source,
                 dest,
@@ -270,6 +277,19 @@ async fn main() -> anyhow::Result<()> {
                     resolve_registered_root(&conn, &dest, dest_kind, machine_label.as_deref())?;
                 let result = transfer::plan_selected_files(&conn, &source_root, &dest_root)?;
                 print_transfer_plan(&conn, &source_root, &dest_root, result, output)?;
+            }
+            TransferCommands::Show { plan_id, action } => {
+                let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
+                let conn = db::open_existing(&db)?;
+                let Some(plan) = db::transfer_plan_by_id(&conn, &plan_id)? else {
+                    anyhow::bail!("transfer plan not found: {plan_id}");
+                };
+                print_transfer_plan_row(&conn, &plan)?;
+                let entries =
+                    db::transfer_plan_entries_filtered(&conn, &plan.id, action.as_deref())?;
+                for entry in entries.into_iter().take(output.limit) {
+                    print_transfer_entry(&entry);
+                }
             }
         },
         Some(Commands::Status { target, kind }) => {
@@ -447,18 +467,54 @@ fn print_transfer_plan(
             .into_iter()
             .take(output.limit)
         {
-            println!(
-                "entry:\t{}\t{}\t{}\t{}\tsource={}\tdest={}\tmetadata={}",
-                entry.action,
-                util::human_size(entry.size_bytes),
-                entry.reason,
-                entry.relative_path,
-                entry.source_content_id.unwrap_or_else(|| "-".to_string()),
-                entry.dest_content_id.unwrap_or_else(|| "-".to_string()),
-                entry.metadata_json
-            );
+            print_transfer_entry(&entry);
         }
     }
     println!("note:\tplanning only; no files were copied");
     Ok(())
+}
+
+fn print_transfer_plan_row(
+    conn: &rusqlite::Connection,
+    plan: &db::TransferPlanRow,
+) -> anyhow::Result<()> {
+    println!(
+        "plan:\t{}\t{}\t{}\t{} files\t{}\t{} -> {}",
+        plan.id,
+        plan.status,
+        plan.created_at,
+        plan.entry_count,
+        util::human_size(plan.total_bytes as u64),
+        plan.source_path,
+        plan.dest_path
+    );
+    println!(
+        "roots:\tsource={}\tdest={}\tselection={}\tparams={}",
+        plan.source_root_id,
+        plan.dest_root_id,
+        plan.selection_set_id.as_deref().unwrap_or("-"),
+        plan.params_json.as_deref().unwrap_or("{}")
+    );
+    for row in db::transfer_plan_action_summary(conn, &plan.id)? {
+        println!(
+            "{}:\t{}\t{}",
+            row.action,
+            row.files,
+            util::human_size(row.bytes as u64)
+        );
+    }
+    Ok(())
+}
+
+fn print_transfer_entry(entry: &db::TransferPlanEntryRow) {
+    println!(
+        "entry:\t{}\t{}\t{}\t{}\tsource={}\tdest={}\tmetadata={}",
+        entry.action,
+        util::human_size(entry.size_bytes),
+        entry.reason,
+        entry.relative_path,
+        entry.source_content_id.as_deref().unwrap_or("-"),
+        entry.dest_content_id.as_deref().unwrap_or("-"),
+        entry.metadata_json
+    );
 }

@@ -43,6 +43,21 @@ pub struct SelectionSummary {
 }
 
 #[derive(Debug, Clone)]
+pub struct TransferPlanRow {
+    pub id: String,
+    pub source_root_id: String,
+    pub source_path: String,
+    pub dest_root_id: String,
+    pub dest_path: String,
+    pub selection_set_id: Option<String>,
+    pub status: String,
+    pub created_at: String,
+    pub params_json: Option<String>,
+    pub entry_count: i64,
+    pub total_bytes: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct TransferPlanEntryInput<'a> {
     pub plan_id: &'a str,
     pub relative_path: &'a str,
@@ -975,6 +990,28 @@ pub fn transfer_plan_entries(
     conn: &Connection,
     plan_id: &str,
 ) -> rusqlite::Result<Vec<TransferPlanEntryRow>> {
+    transfer_plan_entries_filtered(conn, plan_id, None)
+}
+
+pub fn transfer_plan_entries_filtered(
+    conn: &Connection,
+    plan_id: &str,
+    action: Option<&str>,
+) -> rusqlite::Result<Vec<TransferPlanEntryRow>> {
+    if let Some(action) = action {
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT relative_path, size_bytes, source_content_id, dest_content_id,
+                   action, reason, metadata_json
+            FROM transfer_plan_entries
+            WHERE plan_id = ?1 AND action = ?2
+            ORDER BY relative_path ASC
+            "#,
+        )?;
+        let rows = stmt.query_map(params![plan_id, action], transfer_plan_entry_from_row)?;
+        return rows.collect();
+    }
+
     let mut stmt = conn.prepare(
         r#"
         SELECT relative_path, size_bytes, source_content_id, dest_content_id,
@@ -984,19 +1021,21 @@ pub fn transfer_plan_entries(
         ORDER BY relative_path ASC
         "#,
     )?;
-    let rows = stmt.query_map(params![plan_id], |row| {
-        let size: i64 = row.get(1)?;
-        Ok(TransferPlanEntryRow {
-            relative_path: row.get(0)?,
-            size_bytes: size as u64,
-            source_content_id: row.get(2)?,
-            dest_content_id: row.get(3)?,
-            action: row.get(4)?,
-            reason: row.get(5)?,
-            metadata_json: row.get(6)?,
-        })
-    })?;
+    let rows = stmt.query_map(params![plan_id], transfer_plan_entry_from_row)?;
     rows.collect()
+}
+
+fn transfer_plan_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TransferPlanEntryRow> {
+    let size: i64 = row.get(1)?;
+    Ok(TransferPlanEntryRow {
+        relative_path: row.get(0)?,
+        size_bytes: size as u64,
+        source_content_id: row.get(2)?,
+        dest_content_id: row.get(3)?,
+        action: row.get(4)?,
+        reason: row.get(5)?,
+        metadata_json: row.get(6)?,
+    })
 }
 
 pub fn transfer_plan_action_summary(
@@ -1020,6 +1059,84 @@ pub fn transfer_plan_action_summary(
         })
     })?;
     rows.collect()
+}
+
+pub fn recent_transfer_plans(
+    conn: &Connection,
+    limit: i64,
+) -> rusqlite::Result<Vec<TransferPlanRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT
+            p.id,
+            p.source_root_id,
+            source.path,
+            p.dest_root_id,
+            dest.path,
+            p.selection_set_id,
+            p.status,
+            p.created_at,
+            p.params_json,
+            COUNT(e.id),
+            COALESCE(SUM(e.size_bytes), 0)
+        FROM transfer_plans p
+        JOIN roots source ON source.id = p.source_root_id
+        JOIN roots dest ON dest.id = p.dest_root_id
+        LEFT JOIN transfer_plan_entries e ON e.plan_id = p.id
+        GROUP BY p.id
+        ORDER BY p.created_at DESC
+        LIMIT ?1
+        "#,
+    )?;
+    let rows = stmt.query_map(params![limit], transfer_plan_from_row)?;
+    rows.collect()
+}
+
+pub fn transfer_plan_by_id(
+    conn: &Connection,
+    plan_id: &str,
+) -> rusqlite::Result<Option<TransferPlanRow>> {
+    conn.query_row(
+        r#"
+        SELECT
+            p.id,
+            p.source_root_id,
+            source.path,
+            p.dest_root_id,
+            dest.path,
+            p.selection_set_id,
+            p.status,
+            p.created_at,
+            p.params_json,
+            COUNT(e.id),
+            COALESCE(SUM(e.size_bytes), 0)
+        FROM transfer_plans p
+        JOIN roots source ON source.id = p.source_root_id
+        JOIN roots dest ON dest.id = p.dest_root_id
+        LEFT JOIN transfer_plan_entries e ON e.plan_id = p.id
+        WHERE p.id = ?1
+        GROUP BY p.id
+        "#,
+        params![plan_id],
+        transfer_plan_from_row,
+    )
+    .optional()
+}
+
+fn transfer_plan_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TransferPlanRow> {
+    Ok(TransferPlanRow {
+        id: row.get(0)?,
+        source_root_id: row.get(1)?,
+        source_path: row.get(2)?,
+        dest_root_id: row.get(3)?,
+        dest_path: row.get(4)?,
+        selection_set_id: row.get(5)?,
+        status: row.get(6)?,
+        created_at: row.get(7)?,
+        params_json: row.get(8)?,
+        entry_count: row.get(9)?,
+        total_bytes: row.get(10)?,
+    })
 }
 
 pub fn ensure_import_job(conn: &Connection, source: &str) -> rusqlite::Result<String> {
@@ -1605,6 +1722,63 @@ mod tests {
         let summary = selection_summary_for_root(&conn, &root_id).unwrap();
         assert_eq!(summary.marked_count, 0);
         assert_eq!(summary.marked_bytes, 0);
+    }
+
+    #[test]
+    fn stores_and_filters_transfer_plans() {
+        let conn = Connection::open_in_memory().unwrap();
+        configure(&conn).unwrap();
+        init_schema(&conn).unwrap();
+        let machine_id = ensure_local_machine_with_label(&conn, None).unwrap();
+        let source_id = ensure_root(&conn, &machine_id, "/tmp/source").unwrap();
+        let dest_id = ensure_root(&conn, &machine_id, "/tmp/dest").unwrap();
+        let set_id = ensure_default_selection_set(&conn, &source_id).unwrap();
+        let plan_id = create_transfer_plan(
+            &conn,
+            &source_id,
+            &dest_id,
+            Some(&set_id),
+            serde_json::json!({ "test": true }),
+        )
+        .unwrap();
+        insert_transfer_plan_entry(
+            &conn,
+            TransferPlanEntryInput {
+                plan_id: &plan_id,
+                relative_path: "a.txt",
+                size_bytes: 10,
+                source_content_id: None,
+                dest_content_id: None,
+                action: "copy",
+                reason: "missing",
+                metadata_json: serde_json::json!({}),
+            },
+        )
+        .unwrap();
+        insert_transfer_plan_entry(
+            &conn,
+            TransferPlanEntryInput {
+                plan_id: &plan_id,
+                relative_path: "b.txt",
+                size_bytes: 20,
+                source_content_id: None,
+                dest_content_id: None,
+                action: "conflict",
+                reason: "different",
+                metadata_json: serde_json::json!({}),
+            },
+        )
+        .unwrap();
+
+        let plans = recent_transfer_plans(&conn, 10).unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].entry_count, 2);
+        assert_eq!(plans[0].total_bytes, 30);
+        let plan = transfer_plan_by_id(&conn, &plan_id).unwrap().unwrap();
+        assert_eq!(plan.source_path, "/tmp/source");
+        let copy_entries = transfer_plan_entries_filtered(&conn, &plan_id, Some("copy")).unwrap();
+        assert_eq!(copy_entries.len(), 1);
+        assert_eq!(copy_entries[0].relative_path, "a.txt");
     }
 
     #[test]

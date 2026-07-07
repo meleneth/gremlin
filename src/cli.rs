@@ -140,6 +140,12 @@ pub enum TransferCommands {
         #[arg(long, value_enum)]
         dest_kind: Option<TargetKind>,
     },
+    List,
+    Show {
+        plan_id: String,
+        #[arg(long)]
+        action: Option<String>,
+    },
 }
 
 impl JobKind {
