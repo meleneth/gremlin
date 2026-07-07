@@ -9,7 +9,7 @@ mod util;
 
 use anyhow::Context;
 use clap::Parser;
-use cli::{Cli, Commands, WorkerCommands};
+use cli::{Cli, Commands, JobCommands, WorkerCommands};
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -62,6 +62,59 @@ fn main() -> anyhow::Result<()> {
                 );
             }
         }
+        Commands::Jobs { db } => {
+            let conn = db::open_existing(&db)?;
+            for row in db::recent_jobs(&conn, 200)? {
+                println!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    row.id,
+                    row.kind,
+                    row.status,
+                    row.created_at,
+                    row.params_json.unwrap_or_else(|| "{}".to_string())
+                );
+            }
+        }
+        Commands::Job { command } => match command {
+            JobCommands::Create { kind, path, db } => {
+                let conn = db::open_existing(&db)?;
+                let job_id = db::queue_file_job(&conn, kind.as_str(), &path)?;
+                println!("queued {} job {job_id}", kind.as_str());
+            }
+            JobCommands::Show { job_id, db } => {
+                let conn = db::open_existing(&db)?;
+                let Some(job) = db::job_by_id(&conn, &job_id)? else {
+                    anyhow::bail!("job not found: {job_id}");
+                };
+                println!("id:\t{}", job.id);
+                println!("kind:\t{}", job.kind);
+                println!("status:\t{}", job.status);
+                println!(
+                    "machine:\t{}",
+                    job.machine_id.unwrap_or_else(|| "-".to_string())
+                );
+                println!("root:\t{}", job.root_id.unwrap_or_else(|| "-".to_string()));
+                println!("created:\t{}", job.created_at);
+                println!(
+                    "started:\t{}",
+                    job.started_at.unwrap_or_else(|| "-".to_string())
+                );
+                println!(
+                    "completed:\t{}",
+                    job.completed_at.unwrap_or_else(|| "-".to_string())
+                );
+                println!(
+                    "params:\t{}",
+                    job.params_json.unwrap_or_else(|| "{}".to_string())
+                );
+                for event in db::events_for_job(&conn, &job_id)? {
+                    println!(
+                        "event:\t#{}\t{}\t{}\t{}",
+                        event.sequence, event.created_at, event.event_kind, event.payload_json
+                    );
+                }
+            }
+        },
         Commands::Tui { db } => {
             let conn = db::open_existing(&db)?;
             tui::run(&conn)?;

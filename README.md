@@ -23,6 +23,10 @@ gremlin import-events checksums.jsonl --db ./gremlin.db
 
 gremlin events --db ./gremlin.db
 gremlin files --db ./gremlin.db
+gremlin jobs --db ./gremlin.db
+gremlin job create scan PATH --db ./gremlin.db
+gremlin job create hash PATH --db ./gremlin.db
+gremlin job show JOB_ID --db ./gremlin.db
 gremlin tui --db ./gremlin.db
 ```
 
@@ -34,6 +38,8 @@ gremlin tui --db ./gremlin.db
 
 `import-events` reads JSONL events, preserves imported evidence in `job_events`, and creates checksum collection entries for completed hash events.
 
+`job create` records an intended scan or hash job without executing file work. This is the same seam used by the TUI: UI actions enqueue jobs, while workers execute jobs and emit evidence later.
+
 ## Development Notes
 
 Future seams deliberately left open:
@@ -42,7 +48,7 @@ Future seams deliberately left open:
 - SMB path mapping: add machine/root mapping without changing content identity.
 - Transfer planning: compare projected observations and checksum collections before adding transfer jobs.
 - Metadata extractors: add new job kinds and events rather than expanding scan/hash responsibilities.
-- Richer TUI job control: the TUI should create jobs or commands, never scan or hash files directly.
+- Richer TUI job control: the TUI can enqueue jobs now; future slices should add job execution, cancellation states, and filtering without making the TUI scan or hash files directly.
 
 ## Known v0 Limits
 

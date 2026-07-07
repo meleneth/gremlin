@@ -4,8 +4,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 
 use crate::error::GremlinError;
-use crate::events::EventEnvelope;
-use crate::util::{local_hostname, local_machine_id, new_id, now_rfc3339};
+use crate::events::{EventEnvelope, EventKind, EventPayload};
+use crate::util::{absolute_path, local_hostname, local_machine_id, lossy, new_id, now_rfc3339};
 
 #[derive(Debug, Clone)]
 pub struct RootRow {
@@ -37,6 +37,19 @@ pub struct JobEventRow {
     pub status: String,
     pub created_at: String,
     pub event_kind: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct JobRow {
+    pub id: String,
+    pub kind: String,
+    pub status: String,
+    pub machine_id: Option<String>,
+    pub root_id: Option<String>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub params_json: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -246,6 +259,34 @@ pub fn create_job(
         ],
     )?;
     Ok(id)
+}
+
+pub fn queue_file_job(conn: &Connection, kind: &str, path: &Path) -> anyhow::Result<String> {
+    let root_path = absolute_path(path)?;
+    let machine_id = ensure_local_machine(conn)?;
+    let root_id = ensure_root(conn, &machine_id, &lossy(&root_path))?;
+    let job_id = create_job(
+        conn,
+        kind,
+        Some(&machine_id),
+        Some(&root_id),
+        serde_json::json!({ "path": lossy(&root_path) }),
+    )?;
+    let event = EventEnvelope {
+        event_kind: EventKind::JobCreated,
+        job_id: Some(job_id.clone()),
+        sequence: Some(1),
+        created_at: now_rfc3339(),
+        payload: EventPayload::Job {
+            kind: kind.to_string(),
+            path: Some(lossy(&root_path)),
+            message: Some("queued".to_string()),
+            files_seen: None,
+            errors: None,
+        },
+    };
+    persist_event(conn, &event)?;
+    Ok(job_id)
 }
 
 pub fn start_job(conn: &Connection, job_id: &str) -> rusqlite::Result<()> {
@@ -491,6 +532,67 @@ pub fn recent_jobs_and_events(conn: &Connection, limit: i64) -> rusqlite::Result
     rows.collect()
 }
 
+pub fn recent_jobs(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<JobRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, kind, status, machine_id, root_id, created_at, started_at, completed_at, params_json
+        FROM jobs
+        ORDER BY created_at DESC
+        LIMIT ?1
+        "#,
+    )?;
+    let rows = stmt.query_map(params![limit], job_from_row)?;
+    rows.collect()
+}
+
+pub fn job_by_id(conn: &Connection, job_id: &str) -> rusqlite::Result<Option<JobRow>> {
+    conn.query_row(
+        r#"
+        SELECT id, kind, status, machine_id, root_id, created_at, started_at, completed_at, params_json
+        FROM jobs
+        WHERE id = ?1
+        "#,
+        params![job_id],
+        job_from_row,
+    )
+    .optional()
+}
+
+pub fn events_for_job(conn: &Connection, job_id: &str) -> rusqlite::Result<Vec<EventRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT job_id, sequence, event_kind, created_at, payload_json
+        FROM job_events
+        WHERE job_id = ?1
+        ORDER BY sequence ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(params![job_id], |row| {
+        Ok(EventRow {
+            job_id: row.get(0)?,
+            sequence: row.get(1)?,
+            event_kind: row.get(2)?,
+            created_at: row.get(3)?,
+            payload_json: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+fn job_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
+    Ok(JobRow {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        status: row.get(2)?,
+        machine_id: row.get(3)?,
+        root_id: row.get(4)?,
+        created_at: row.get(5)?,
+        started_at: row.get(6)?,
+        completed_at: row.get(7)?,
+        params_json: row.get(8)?,
+    })
+}
+
 #[cfg(test)]
 pub fn table_count(conn: &Connection, table: &str) -> rusqlite::Result<i64> {
     let sql = format!("SELECT COUNT(*) FROM {table}");
@@ -546,5 +648,20 @@ mod tests {
         .unwrap();
         assert_eq!(table_count(&conn, "path_observations").unwrap(), 1);
         assert_eq!(recent_files(&conn, 1).unwrap()[0].size_bytes, 2);
+    }
+
+    #[test]
+    fn queues_file_job_with_created_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        configure(&conn).unwrap();
+        init_schema(&conn).unwrap();
+        let job_id = queue_file_job(&conn, "scan", dir.path()).unwrap();
+        let job = job_by_id(&conn, &job_id).unwrap().unwrap();
+        assert_eq!(job.status, "created");
+        assert_eq!(
+            events_for_job(&conn, &job_id).unwrap()[0].event_kind,
+            "job_created"
+        );
     }
 }

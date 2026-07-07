@@ -16,6 +16,13 @@ use rusqlite::Connection;
 
 use crate::db;
 
+#[derive(Debug, Default)]
+struct AppState {
+    focus: usize,
+    selected_root: usize,
+    status: String,
+}
+
 pub fn run(conn: &Connection) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -35,11 +42,17 @@ fn run_loop(
     conn: &Connection,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> anyhow::Result<()> {
-    let mut focus = 0_usize;
+    let mut state = AppState {
+        status: "s queues scan job, h queues hash job for selected root".to_string(),
+        ..AppState::default()
+    };
     loop {
         let roots = db::roots(conn)?;
         let files = db::recent_files(conn, 50)?;
         let events = db::recent_jobs_and_events(conn, 50)?;
+        if !roots.is_empty() && state.selected_root >= roots.len() {
+            state.selected_root = roots.len() - 1;
+        }
 
         terminal.draw(|frame| {
             let area = frame.size();
@@ -48,6 +61,7 @@ fn run_loop(
                 .constraints([
                     Constraint::Length(3),
                     Constraint::Min(8),
+                    Constraint::Length(3),
                     Constraint::Length(8),
                 ])
                 .split(area);
@@ -58,19 +72,27 @@ fn run_loop(
 
             let header = Paragraph::new(Line::from(vec![
                 Span::styled("Gremlin", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw("  local file evidence database  |  q quit  Tab focus"),
+                Span::raw(
+                    "  local file evidence database  |  q quit  Tab focus  s scan job  h hash job",
+                ),
             ]))
             .block(Block::default().borders(Borders::ALL));
             frame.render_widget(header, vertical[0]);
 
             let root_items = roots
                 .iter()
-                .map(|root| {
+                .enumerate()
+                .map(|(idx, root)| {
                     let label = root.label.as_deref().unwrap_or(&root.path);
-                    ListItem::new(format!("{label}\n{}\n{}", root.path, root.id))
+                    let marker = if idx == state.selected_root {
+                        "> "
+                    } else {
+                        "  "
+                    };
+                    ListItem::new(format!("{marker}{label}\n  {}\n  {}", root.path, root.id))
                 })
                 .collect::<Vec<_>>();
-            let roots_title = if focus == 0 { "Roots *" } else { "Roots" };
+            let roots_title = if state.focus == 0 { "Roots *" } else { "Roots" };
             frame.render_widget(
                 List::new(root_items)
                     .block(Block::default().title(roots_title).borders(Borders::ALL)),
@@ -86,7 +108,7 @@ fn run_loop(
                     ))
                 })
                 .collect::<Vec<_>>();
-            let files_title = if focus == 1 {
+            let files_title = if state.focus == 1 {
                 "Recent Files *"
             } else {
                 "Recent Files"
@@ -106,7 +128,11 @@ fn run_loop(
                     ))
                 })
                 .collect::<Vec<_>>();
-            let events_title = if focus == 2 {
+            let status = Paragraph::new(state.status.as_str())
+                .block(Block::default().title("Job Control").borders(Borders::ALL));
+            frame.render_widget(status, vertical[2]);
+
+            let events_title = if state.focus == 2 {
                 "Recent Jobs/Events *"
             } else {
                 "Recent Jobs/Events"
@@ -114,7 +140,7 @@ fn run_loop(
             frame.render_widget(
                 List::new(event_items)
                     .block(Block::default().title(events_title).borders(Borders::ALL)),
-                vertical[2],
+                vertical[3],
             );
         })?;
 
@@ -122,11 +148,43 @@ fn run_loop(
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') => break,
-                    KeyCode::Tab => focus = (focus + 1) % 3,
+                    KeyCode::Tab => state.focus = (state.focus + 1) % 3,
+                    KeyCode::Down => {
+                        if state.focus == 0 && state.selected_root + 1 < roots.len() {
+                            state.selected_root += 1;
+                        }
+                    }
+                    KeyCode::Up => {
+                        if state.focus == 0 && state.selected_root > 0 {
+                            state.selected_root -= 1;
+                        }
+                    }
+                    KeyCode::Char('s') => {
+                        queue_selected_root(conn, &roots, state.selected_root, "scan", &mut state)?;
+                    }
+                    KeyCode::Char('h') => {
+                        queue_selected_root(conn, &roots, state.selected_root, "hash", &mut state)?;
+                    }
                     _ => {}
                 }
             }
         }
     }
+    Ok(())
+}
+
+fn queue_selected_root(
+    conn: &Connection,
+    roots: &[db::RootRow],
+    selected_root: usize,
+    kind: &str,
+    state: &mut AppState,
+) -> anyhow::Result<()> {
+    let Some(root) = roots.get(selected_root) else {
+        state.status = "no root selected; run scan or create a job from the CLI first".to_string();
+        return Ok(());
+    };
+    let job_id = db::queue_file_job(conn, kind, std::path::Path::new(&root.path))?;
+    state.status = format!("queued {kind} job {job_id}");
     Ok(())
 }

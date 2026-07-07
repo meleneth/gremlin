@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -46,10 +46,48 @@ pub enum Commands {
         #[arg(long)]
         db: PathBuf,
     },
+    Jobs {
+        #[arg(long)]
+        db: PathBuf,
+    },
+    Job {
+        #[command(subcommand)]
+        command: JobCommands,
+    },
     Tui {
         #[arg(long)]
         db: PathBuf,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum JobCommands {
+    Create {
+        kind: JobKind,
+        path: PathBuf,
+        #[arg(long)]
+        db: PathBuf,
+    },
+    Show {
+        job_id: String,
+        #[arg(long)]
+        db: PathBuf,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum JobKind {
+    Scan,
+    Hash,
+}
+
+impl JobKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Scan => "scan",
+            Self::Hash => "hash",
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]

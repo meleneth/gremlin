@@ -12,6 +12,7 @@ pub struct EventEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum EventKind {
+    JobCreated,
     JobStarted,
     JobCompleted,
     JobFailed,
@@ -25,6 +26,7 @@ pub enum EventKind {
 impl EventKind {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::JobCreated => "job_created",
             Self::JobStarted => "job_started",
             Self::JobCompleted => "job_completed",
             Self::JobFailed => "job_failed",
