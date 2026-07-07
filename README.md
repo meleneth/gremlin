@@ -11,11 +11,16 @@ The TUI never performs file work directly. File work is represented as commands 
 ## Commands
 
 ```bash
+gremlin /archive/photos
+
 gremlin init --db ./gremlin.db
 gremlin config init --default-db ./gremlin.db --machine-label workstation
 
 gremlin scan PATH --db ./gremlin.db
 gremlin hash PATH --db ./gremlin.db
+gremlin hash PATH --all --db ./gremlin.db
+gremlin verify PATH --db ./gremlin.db
+gremlin verify PATH --accept --db ./gremlin.db
 
 gremlin worker hash PATH --jsonl
 gremlin worker hash PATH --jsonl --out checksums.jsonl
@@ -36,6 +41,13 @@ gremlin tui --db ./gremlin.db
 ```
 
 `--db` is a global override and may appear before or after a subcommand. If it is omitted, Gremlin checks `GREMLIN_DB`, then `default_db` in the config file.
+
+For the smooth target flow, Gremlin can also auto-create a default database at:
+
+```text
+$XDG_DATA_HOME/gremlin/gremlin.db
+~/.local/share/gremlin/gremlin.db
+```
 
 Config is loaded from `--config PATH`, then `GREMLIN_CONFIG`, then the default XDG-style path:
 
@@ -63,9 +75,13 @@ gremlin --no-config --db ./scratch.db init
 gremlin --machine-label laptop scan ~/archive
 ```
 
-`scan` walks a directory tree and records stat-level path observations. It does not hash file contents.
+`gremlin TARGET` classifies a target. For local directories it creates/reuses the database and root, runs a lightweight stat scan, and prints status plus new/changed/missing highlights. For SSH-like and URL targets it registers metadata and prints status/hints without attempting remote execution.
 
-`hash` walks a directory tree, computes BLAKE3 and SHA-256, stores content objects, updates path observations, and persists hash events.
+`scan` walks a directory tree and records stat-level path observations. It reports new, changed, and missing paths. Missing paths are report-only in v0; no deletion or missing projection is performed.
+
+`hash` walks a directory tree, computes BLAKE3 and SHA-256 for files that look new or changed from stat data, stores content objects, updates path observations, and persists hash events. Use `--all` to hash every regular file.
+
+`verify` re-hashes current files and compares them to the latest stored per-path hash evidence. It reports `ok`, `changed`, `new`, `missing`, and `error`. By default it records evidence only; `--accept` promotes changed and new hashes into projected current truth.
 
 `worker hash --jsonl` does not require a database. It emits JSONL events suitable for future remote execution over SSH.
 
@@ -83,6 +99,8 @@ gremlin target inspect https://example.invalid/listing.json
 ```
 
 Use `--kind local-path|file-url|ssh|url` only when you want to force interpretation. `target add` creates or reuses the matching machine/root record, and `status TARGET` gives a fast projected summary when that root is already known.
+
+Most scan/hash/verify commands print a compact summary plus capped highlights. Use `--details` and `--limit N` to control result detail.
 
 ## Development Notes
 

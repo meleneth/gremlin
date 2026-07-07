@@ -12,6 +12,7 @@ use crate::targets::TargetKind;
     about = "Local-first file evidence database"
 )]
 pub struct Cli {
+    pub target: Option<String>,
     #[arg(long, global = true)]
     pub db: Option<PathBuf>,
     #[arg(long, global = true)]
@@ -20,8 +21,12 @@ pub struct Cli {
     pub no_config: bool,
     #[arg(long, global = true)]
     pub machine_label: Option<String>,
+    #[arg(long, global = true)]
+    pub details: bool,
+    #[arg(long, global = true, default_value_t = 20)]
+    pub limit: usize,
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -32,6 +37,15 @@ pub enum Commands {
     },
     Hash {
         path: PathBuf,
+        #[arg(long)]
+        all: bool,
+    },
+    Verify {
+        target: String,
+        #[arg(long)]
+        accept: bool,
+        #[arg(long, value_enum)]
+        kind: Option<TargetKind>,
     },
     Worker {
         #[command(subcommand)]

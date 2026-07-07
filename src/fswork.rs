@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -13,6 +14,119 @@ use crate::util::{
     absolute_path, basename, lossy, new_id, now_rfc3339, parent_path, relative_path,
     system_time_rfc3339,
 };
+
+#[derive(Debug, Clone, Copy)]
+pub struct OutputOptions {
+    pub details: bool,
+    pub limit: usize,
+}
+
+impl Default for OutputOptions {
+    fn default() -> Self {
+        Self {
+            details: false,
+            limit: 20,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeltaKind {
+    New,
+    Changed,
+    Unchanged,
+    Missing,
+}
+
+impl DeltaKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Changed => "changed",
+            Self::Unchanged => "unchanged",
+            Self::Missing => "missing",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanDelta {
+    pub kind: DeltaKind,
+    pub relative_path: String,
+    pub size_bytes: Option<u64>,
+    pub modified_at: Option<String>,
+    pub previous_size_bytes: Option<u64>,
+    pub previous_modified_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ScanSummary {
+    pub job_id: String,
+    pub files_seen: u64,
+    pub errors: u64,
+    pub new_count: usize,
+    pub changed_count: usize,
+    pub unchanged_count: usize,
+    pub missing_count: usize,
+    pub deltas: Vec<ScanDelta>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HashSummary {
+    pub job_id: String,
+    pub files_hashed: u64,
+    pub skipped_unchanged: u64,
+    pub errors: u64,
+    pub hashed_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifyKind {
+    Ok,
+    Changed,
+    New,
+    Missing,
+    Error,
+}
+
+impl VerifyKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Changed => "changed",
+            Self::New => "new",
+            Self::Missing => "missing",
+            Self::Error => "error",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct VerifyFinding {
+    pub kind: VerifyKind,
+    pub relative_path: String,
+    pub basename: String,
+    pub parent_path: String,
+    pub size_bytes: u64,
+    pub modified_at: Option<String>,
+    pub expected_blake3: Option<String>,
+    pub expected_sha256: Option<String>,
+    pub actual_blake3: Option<String>,
+    pub actual_sha256: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct VerifySummary {
+    pub job_id: String,
+    pub ok: usize,
+    pub changed: usize,
+    pub new: usize,
+    pub missing: usize,
+    pub errors: usize,
+    pub accepted: usize,
+    pub findings: Vec<VerifyFinding>,
+}
 
 #[derive(Debug, Clone)]
 struct FileMeta {
@@ -39,7 +153,8 @@ pub fn scan_to_db(
     path: &Path,
     db_path: &Path,
     machine_label: Option<&str>,
-) -> anyhow::Result<()> {
+    options: OutputOptions,
+) -> anyhow::Result<ScanSummary> {
     db::init_schema(conn)?;
     let root_path = absolute_path(path).with_context(|| format!("resolving {}", path.display()))?;
     let skip_paths = db_sidecar_paths(db_path)?;
@@ -52,14 +167,16 @@ pub fn scan_to_db(
         Some(&root_id),
         serde_json::json!({ "path": lossy(&root_path) }),
     )?;
-    run_scan_job(
+    let summary = run_scan_job(
         conn,
         &root_path,
         &skip_paths,
         &machine_id,
         &root_id,
         &job_id,
-    )
+    )?;
+    print_scan_summary(&summary, options);
+    Ok(summary)
 }
 
 pub fn hash_to_db(
@@ -67,7 +184,9 @@ pub fn hash_to_db(
     path: &Path,
     db_path: &Path,
     machine_label: Option<&str>,
-) -> anyhow::Result<()> {
+    hash_all: bool,
+    options: OutputOptions,
+) -> anyhow::Result<HashSummary> {
     db::init_schema(conn)?;
     let root_path = absolute_path(path).with_context(|| format!("resolving {}", path.display()))?;
     let skip_paths = db_sidecar_paths(db_path)?;
@@ -78,16 +197,52 @@ pub fn hash_to_db(
         "hash",
         Some(&machine_id),
         Some(&root_id),
-        serde_json::json!({ "path": lossy(&root_path) }),
+        serde_json::json!({ "path": lossy(&root_path), "all": hash_all }),
     )?;
-    run_hash_job(
+    let summary = run_hash_job(
         conn,
         &root_path,
         &skip_paths,
         &machine_id,
         &root_id,
         &job_id,
-    )
+        hash_all,
+    )?;
+    print_hash_summary(&summary, options);
+    Ok(summary)
+}
+
+pub fn verify_to_db(
+    conn: &Connection,
+    path: &Path,
+    db_path: &Path,
+    machine_label: Option<&str>,
+    accept: bool,
+    options: OutputOptions,
+) -> anyhow::Result<VerifySummary> {
+    db::init_schema(conn)?;
+    let root_path = absolute_path(path).with_context(|| format!("resolving {}", path.display()))?;
+    let skip_paths = db_sidecar_paths(db_path)?;
+    let machine_id = db::ensure_local_machine_with_label(conn, machine_label)?;
+    let root_id = db::ensure_root(conn, &machine_id, &lossy(&root_path))?;
+    let job_id = db::create_job(
+        conn,
+        "verify",
+        Some(&machine_id),
+        Some(&root_id),
+        serde_json::json!({ "path": lossy(&root_path), "accept": accept }),
+    )?;
+    let summary = run_verify_job(
+        conn,
+        &root_path,
+        &skip_paths,
+        &machine_id,
+        &root_id,
+        &job_id,
+        accept,
+    )?;
+    print_verify_summary(&summary, options);
+    Ok(summary)
 }
 
 pub fn run_queued_job(
@@ -95,6 +250,7 @@ pub fn run_queued_job(
     job_id: &str,
     db_path: &Path,
     machine_label: Option<&str>,
+    options: OutputOptions,
 ) -> anyhow::Result<()> {
     db::init_schema(conn)?;
     let job =
@@ -120,10 +276,46 @@ pub fn run_queued_job(
     };
 
     match job.kind.as_str() {
-        "scan" => run_scan_job(conn, &root_path, &skip_paths, &machine_id, &root_id, job_id),
-        "hash" => run_hash_job(conn, &root_path, &skip_paths, &machine_id, &root_id, job_id),
+        "scan" => {
+            let summary =
+                run_scan_job(conn, &root_path, &skip_paths, &machine_id, &root_id, job_id)?;
+            print_scan_summary(&summary, options);
+        }
+        "hash" => {
+            let hash_all = params
+                .get("all")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let summary = run_hash_job(
+                conn,
+                &root_path,
+                &skip_paths,
+                &machine_id,
+                &root_id,
+                job_id,
+                hash_all,
+            )?;
+            print_hash_summary(&summary, options);
+        }
+        "verify" => {
+            let accept = params
+                .get("accept")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let summary = run_verify_job(
+                conn,
+                &root_path,
+                &skip_paths,
+                &machine_id,
+                &root_id,
+                job_id,
+                accept,
+            )?;
+            print_verify_summary(&summary, options);
+        }
         other => anyhow::bail!("unsupported queued job kind: {other}"),
     }
+    Ok(())
 }
 
 fn run_scan_job(
@@ -133,9 +325,11 @@ fn run_scan_job(
     machine_id: &str,
     root_id: &str,
     job_id: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ScanSummary> {
     db::start_job(conn, job_id)?;
-
+    let previous = previous_observations(conn, machine_id, root_id)?;
+    let mut seen = BTreeSet::new();
+    let mut deltas = Vec::new();
     let mut sequence = db::next_sequence(conn, job_id)?;
     persist_db_event(
         conn,
@@ -166,73 +360,67 @@ fn run_scan_job(
                     EventPayload::DirectorySeen { relative_path: rel },
                 )?;
             }
-            Ok(entry) if entry.file_type().is_file() => match file_meta(root_path, entry.path()) {
-                Ok(meta) => {
-                    if should_skip(entry.path(), skip_paths) {
-                        continue;
+            Ok(entry) if entry.file_type().is_file() => {
+                if should_skip(entry.path(), skip_paths) {
+                    continue;
+                }
+                match file_meta(root_path, entry.path()) {
+                    Ok(meta) => {
+                        let delta = classify_scan_delta(&meta, previous.get(&meta.relative_path));
+                        seen.insert(meta.relative_path.clone());
+                        db::insert_path_observation(
+                            conn,
+                            db::PathObservationInput {
+                                machine_id,
+                                root_id,
+                                relative_path: &meta.relative_path,
+                                basename: &meta.basename,
+                                parent_path: &meta.parent_path,
+                                size_bytes: meta.size_bytes,
+                                modified_at: meta.modified_at.as_deref(),
+                                content_id: None,
+                            },
+                        )?;
+                        persist_db_event(
+                            conn,
+                            job_id,
+                            &mut sequence,
+                            EventKind::FileSeen,
+                            EventPayload::FileSeen {
+                                relative_path: meta.relative_path,
+                                basename: meta.basename,
+                                parent_path: meta.parent_path,
+                                size_bytes: meta.size_bytes,
+                                modified_at: meta.modified_at,
+                            },
+                        )?;
+                        deltas.push(delta);
+                        files_seen += 1;
                     }
-                    db::insert_path_observation(
-                        conn,
-                        db::PathObservationInput {
-                            machine_id,
-                            root_id,
-                            relative_path: &meta.relative_path,
-                            basename: &meta.basename,
-                            parent_path: &meta.parent_path,
-                            size_bytes: meta.size_bytes,
-                            modified_at: meta.modified_at.as_deref(),
-                            content_id: None,
-                        },
-                    )?;
-                    persist_db_event(
-                        conn,
-                        job_id,
-                        &mut sequence,
-                        EventKind::FileSeen,
-                        EventPayload::FileSeen {
-                            relative_path: meta.relative_path,
-                            basename: meta.basename,
-                            parent_path: meta.parent_path,
-                            size_bytes: meta.size_bytes,
-                            modified_at: meta.modified_at,
-                        },
-                    )?;
-                    files_seen += 1;
+                    Err(err) => {
+                        errors += 1;
+                        persist_job_error(conn, job_id, &mut sequence, "scan", entry.path(), err)?;
+                    }
                 }
-                Err(err) => {
-                    errors += 1;
-                    persist_db_event(
-                        conn,
-                        job_id,
-                        &mut sequence,
-                        EventKind::JobFailed,
-                        EventPayload::Job {
-                            kind: "scan".to_string(),
-                            path: Some(lossy(entry.path())),
-                            message: Some(err.to_string()),
-                            files_seen: None,
-                            errors: Some(errors),
-                        },
-                    )?;
-                }
-            },
+            }
             Ok(_) => {}
             Err(err) => {
                 errors += 1;
-                persist_db_event(
-                    conn,
-                    job_id,
-                    &mut sequence,
-                    EventKind::JobFailed,
-                    EventPayload::Job {
-                        kind: "scan".to_string(),
-                        path: err.path().map(lossy),
-                        message: Some(err.to_string()),
-                        files_seen: None,
-                        errors: Some(errors),
-                    },
-                )?;
+                persist_walk_error(conn, job_id, &mut sequence, "scan", err)?;
             }
+        }
+    }
+
+    for old in previous.values() {
+        if !seen.contains(&old.relative_path) {
+            deltas.push(ScanDelta {
+                kind: DeltaKind::Missing,
+                relative_path: old.relative_path.clone(),
+                size_bytes: None,
+                modified_at: None,
+                previous_size_bytes: Some(old.size_bytes),
+                previous_modified_at: old.modified_at.clone(),
+            });
         }
     }
 
@@ -255,8 +443,7 @@ fn run_scan_job(
         },
     )?;
     db::complete_job(conn, job_id, status)?;
-    println!("scan job {job_id}: {files_seen} files, {errors} errors");
-    Ok(())
+    Ok(scan_summary(job_id, files_seen, errors, deltas))
 }
 
 fn run_hash_job(
@@ -266,9 +453,10 @@ fn run_hash_job(
     machine_id: &str,
     root_id: &str,
     job_id: &str,
-) -> anyhow::Result<()> {
+    hash_all: bool,
+) -> anyhow::Result<HashSummary> {
     db::start_job(conn, job_id)?;
-
+    let previous = previous_observations(conn, machine_id, root_id)?;
     let mut sequence = db::next_sequence(conn, job_id)?;
     persist_db_event(
         conn,
@@ -284,8 +472,10 @@ fn run_hash_job(
         },
     )?;
 
-    let mut files_seen = 0_u64;
+    let mut files_hashed = 0_u64;
+    let mut skipped_unchanged = 0_u64;
     let mut errors = 0_u64;
+    let mut hashed_paths = Vec::new();
     for entry in WalkDir::new(root_path) {
         match entry {
             Ok(entry) if entry.file_type().is_file() => {
@@ -293,53 +483,29 @@ fn run_hash_job(
                 if should_skip(path, skip_paths) {
                     continue;
                 }
-                let rel = relative_path(root_path, path).ok();
-                if let Some(relative_path) = rel.clone() {
-                    persist_db_event(
-                        conn,
-                        job_id,
-                        &mut sequence,
-                        EventKind::HashStarted,
-                        EventPayload::HashStarted { relative_path },
-                    )?;
+                let Ok(meta) = file_meta(root_path, path) else {
+                    errors += 1;
+                    continue;
+                };
+                if !hash_all && !needs_hash(&meta, previous.get(&meta.relative_path)) {
+                    skipped_unchanged += 1;
+                    continue;
                 }
+                persist_db_event(
+                    conn,
+                    job_id,
+                    &mut sequence,
+                    EventKind::HashStarted,
+                    EventPayload::HashStarted {
+                        relative_path: meta.relative_path.clone(),
+                    },
+                )?;
                 match hash_file(root_path, path) {
                     Ok(result) => {
-                        let content_id = db::ensure_content_object(
-                            conn,
-                            result.size_bytes,
-                            &result.blake3,
-                            &result.sha256,
-                        )?;
-                        db::insert_path_observation(
-                            conn,
-                            db::PathObservationInput {
-                                machine_id,
-                                root_id,
-                                relative_path: &result.relative_path,
-                                basename: &result.basename,
-                                parent_path: &result.parent_path,
-                                size_bytes: result.size_bytes,
-                                modified_at: result.modified_at.as_deref(),
-                                content_id: Some(&content_id),
-                            },
-                        )?;
-                        persist_db_event(
-                            conn,
-                            job_id,
-                            &mut sequence,
-                            EventKind::HashCompleted,
-                            EventPayload::HashCompleted {
-                                relative_path: result.relative_path,
-                                basename: result.basename,
-                                parent_path: result.parent_path,
-                                size_bytes: result.size_bytes,
-                                modified_at: result.modified_at,
-                                blake3: result.blake3,
-                                sha256: result.sha256,
-                            },
-                        )?;
-                        files_seen += 1;
+                        accept_hash_result(conn, machine_id, root_id, &result)?;
+                        persist_hash_completed(conn, job_id, &mut sequence, &result)?;
+                        hashed_paths.push(result.relative_path);
+                        files_hashed += 1;
                     }
                     Err(err) => {
                         errors += 1;
@@ -349,7 +515,7 @@ fn run_hash_job(
                             &mut sequence,
                             EventKind::HashFailed,
                             EventPayload::HashFailed {
-                                relative_path: rel,
+                                relative_path: Some(meta.relative_path),
                                 path: lossy(path),
                                 error: err.to_string(),
                             },
@@ -360,20 +526,7 @@ fn run_hash_job(
             Ok(_) => {}
             Err(err) => {
                 errors += 1;
-                persist_db_event(
-                    conn,
-                    job_id,
-                    &mut sequence,
-                    EventKind::HashFailed,
-                    EventPayload::HashFailed {
-                        relative_path: None,
-                        path: err
-                            .path()
-                            .map(lossy)
-                            .unwrap_or_else(|| "<unknown>".to_string()),
-                        error: err.to_string(),
-                    },
-                )?;
+                persist_walk_hash_error(conn, job_id, &mut sequence, err)?;
             }
         }
     }
@@ -392,13 +545,166 @@ fn run_hash_job(
             kind: "hash".to_string(),
             path: Some(lossy(root_path)),
             message: Some(status.to_string()),
-            files_seen: Some(files_seen),
+            files_seen: Some(files_hashed),
             errors: Some(errors),
         },
     )?;
     db::complete_job(conn, job_id, status)?;
-    println!("hash job {job_id}: {files_seen} files, {errors} errors");
-    Ok(())
+    Ok(HashSummary {
+        job_id: job_id.to_string(),
+        files_hashed,
+        skipped_unchanged,
+        errors,
+        hashed_paths,
+    })
+}
+
+fn run_verify_job(
+    conn: &Connection,
+    root_path: &Path,
+    skip_paths: &[PathBuf],
+    machine_id: &str,
+    root_id: &str,
+    job_id: &str,
+    accept: bool,
+) -> anyhow::Result<VerifySummary> {
+    db::start_job(conn, job_id)?;
+    let baselines = hash_baselines(conn, machine_id, root_id)?;
+    let mut seen = BTreeSet::new();
+    let mut findings = Vec::new();
+    let mut sequence = db::next_sequence(conn, job_id)?;
+    persist_db_event(
+        conn,
+        job_id,
+        &mut sequence,
+        EventKind::VerifyStarted,
+        EventPayload::Job {
+            kind: "verify".to_string(),
+            path: Some(lossy(root_path)),
+            message: None,
+            files_seen: None,
+            errors: None,
+        },
+    )?;
+
+    for entry in WalkDir::new(root_path) {
+        match entry {
+            Ok(entry) if entry.file_type().is_file() => {
+                let path = entry.path();
+                if should_skip(path, skip_paths) {
+                    continue;
+                }
+                match hash_file(root_path, path) {
+                    Ok(result) => {
+                        seen.insert(result.relative_path.clone());
+                        let finding =
+                            classify_verify_result(&result, baselines.get(&result.relative_path));
+                        if accept && matches!(finding.kind, VerifyKind::Changed | VerifyKind::New) {
+                            accept_hash_result(conn, machine_id, root_id, &result)?;
+                        }
+                        if finding.kind != VerifyKind::Ok {
+                            persist_verify_finding(conn, job_id, &mut sequence, &finding)?;
+                        }
+                        findings.push(finding);
+                    }
+                    Err(err) => {
+                        let rel = relative_path(root_path, path).unwrap_or_else(|_| lossy(path));
+                        let base = basename(path).unwrap_or_else(|_| rel.clone());
+                        let finding = VerifyFinding {
+                            kind: VerifyKind::Error,
+                            relative_path: rel.clone(),
+                            basename: base,
+                            parent_path: parent_path(&rel),
+                            size_bytes: 0,
+                            modified_at: None,
+                            expected_blake3: baselines.get(&rel).map(|row| row.blake3.clone()),
+                            expected_sha256: baselines.get(&rel).map(|row| row.sha256.clone()),
+                            actual_blake3: None,
+                            actual_sha256: None,
+                            error: Some(err.to_string()),
+                        };
+                        persist_verify_finding(conn, job_id, &mut sequence, &finding)?;
+                        findings.push(finding);
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(err) => {
+                let path = err
+                    .path()
+                    .map(lossy)
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                let finding = VerifyFinding {
+                    kind: VerifyKind::Error,
+                    relative_path: path.clone(),
+                    basename: path.clone(),
+                    parent_path: ".".to_string(),
+                    size_bytes: 0,
+                    modified_at: None,
+                    expected_blake3: None,
+                    expected_sha256: None,
+                    actual_blake3: None,
+                    actual_sha256: None,
+                    error: Some(err.to_string()),
+                };
+                persist_verify_finding(conn, job_id, &mut sequence, &finding)?;
+                findings.push(finding);
+            }
+        }
+    }
+    for baseline in baselines.values() {
+        if !seen.contains(&baseline.relative_path) {
+            let finding = VerifyFinding {
+                kind: VerifyKind::Missing,
+                relative_path: baseline.relative_path.clone(),
+                basename: basename(Path::new(&baseline.relative_path))
+                    .unwrap_or_else(|_| baseline.relative_path.clone()),
+                parent_path: parent_path(&baseline.relative_path),
+                size_bytes: baseline.size_bytes,
+                modified_at: None,
+                expected_blake3: Some(baseline.blake3.clone()),
+                expected_sha256: Some(baseline.sha256.clone()),
+                actual_blake3: None,
+                actual_sha256: None,
+                error: None,
+            };
+            persist_verify_finding(conn, job_id, &mut sequence, &finding)?;
+            findings.push(finding);
+        }
+    }
+    let mut summary = verify_summary(job_id, findings);
+    if accept {
+        summary.accepted = summary.changed + summary.new;
+    }
+    let errors = summary.errors as u64;
+    let status = if errors == 0 {
+        "completed"
+    } else {
+        "completed_with_errors"
+    };
+    persist_db_event(
+        conn,
+        job_id,
+        &mut sequence,
+        EventKind::VerifyCompleted,
+        EventPayload::Job {
+            kind: "verify".to_string(),
+            path: Some(lossy(root_path)),
+            message: Some(format!(
+                "ok={} changed={} new={} missing={} errors={} accepted={}",
+                summary.ok,
+                summary.changed,
+                summary.new,
+                summary.missing,
+                summary.errors,
+                summary.accepted
+            )),
+            files_seen: Some((summary.ok + summary.changed + summary.new) as u64),
+            errors: Some(errors),
+        },
+    )?;
+    db::complete_job(conn, job_id, status)?;
+    Ok(summary)
 }
 
 pub fn worker_hash_jsonl(path: &Path, out: Option<&Path>) -> anyhow::Result<()> {
@@ -539,6 +845,276 @@ pub fn hash_file(root: &Path, path: &Path) -> anyhow::Result<HashResult> {
     })
 }
 
+fn previous_observations(
+    conn: &Connection,
+    machine_id: &str,
+    root_id: &str,
+) -> anyhow::Result<BTreeMap<String, db::PathObservationRow>> {
+    Ok(db::path_observations_for_root(conn, machine_id, root_id)?
+        .into_iter()
+        .map(|row| (row.relative_path.clone(), row))
+        .collect())
+}
+
+fn hash_baselines(
+    conn: &Connection,
+    machine_id: &str,
+    root_id: &str,
+) -> anyhow::Result<BTreeMap<String, db::HashBaselineRow>> {
+    Ok(db::hash_baselines_for_root(conn, machine_id, root_id)?
+        .into_iter()
+        .map(|row| (row.relative_path.clone(), row))
+        .collect())
+}
+
+fn classify_scan_delta(meta: &FileMeta, previous: Option<&db::PathObservationRow>) -> ScanDelta {
+    let Some(previous) = previous else {
+        return ScanDelta {
+            kind: DeltaKind::New,
+            relative_path: meta.relative_path.clone(),
+            size_bytes: Some(meta.size_bytes),
+            modified_at: meta.modified_at.clone(),
+            previous_size_bytes: None,
+            previous_modified_at: None,
+        };
+    };
+    let changed =
+        previous.size_bytes != meta.size_bytes || previous.modified_at != meta.modified_at;
+    ScanDelta {
+        kind: if changed {
+            DeltaKind::Changed
+        } else {
+            DeltaKind::Unchanged
+        },
+        relative_path: meta.relative_path.clone(),
+        size_bytes: Some(meta.size_bytes),
+        modified_at: meta.modified_at.clone(),
+        previous_size_bytes: Some(previous.size_bytes),
+        previous_modified_at: previous.modified_at.clone(),
+    }
+}
+
+fn needs_hash(meta: &FileMeta, previous: Option<&db::PathObservationRow>) -> bool {
+    match previous {
+        None => true,
+        Some(previous) => {
+            previous.content_id.is_none()
+                || previous.size_bytes != meta.size_bytes
+                || previous.modified_at != meta.modified_at
+        }
+    }
+}
+
+fn classify_verify_result(
+    result: &HashResult,
+    baseline: Option<&db::HashBaselineRow>,
+) -> VerifyFinding {
+    let (kind, expected_blake3, expected_sha256) = match baseline {
+        None => (VerifyKind::New, None, None),
+        Some(baseline) if baseline.blake3 == result.blake3 && baseline.sha256 == result.sha256 => (
+            VerifyKind::Ok,
+            Some(baseline.blake3.clone()),
+            Some(baseline.sha256.clone()),
+        ),
+        Some(baseline) => (
+            VerifyKind::Changed,
+            Some(baseline.blake3.clone()),
+            Some(baseline.sha256.clone()),
+        ),
+    };
+    VerifyFinding {
+        kind,
+        relative_path: result.relative_path.clone(),
+        basename: result.basename.clone(),
+        parent_path: result.parent_path.clone(),
+        size_bytes: result.size_bytes,
+        modified_at: result.modified_at.clone(),
+        expected_blake3,
+        expected_sha256,
+        actual_blake3: Some(result.blake3.clone()),
+        actual_sha256: Some(result.sha256.clone()),
+        error: None,
+    }
+}
+
+fn scan_summary(job_id: &str, files_seen: u64, errors: u64, deltas: Vec<ScanDelta>) -> ScanSummary {
+    let mut summary = ScanSummary {
+        job_id: job_id.to_string(),
+        files_seen,
+        errors,
+        deltas,
+        ..ScanSummary::default()
+    };
+    for delta in &summary.deltas {
+        match delta.kind {
+            DeltaKind::New => summary.new_count += 1,
+            DeltaKind::Changed => summary.changed_count += 1,
+            DeltaKind::Unchanged => summary.unchanged_count += 1,
+            DeltaKind::Missing => summary.missing_count += 1,
+        }
+    }
+    summary
+}
+
+fn verify_summary(job_id: &str, findings: Vec<VerifyFinding>) -> VerifySummary {
+    let mut summary = VerifySummary {
+        job_id: job_id.to_string(),
+        findings,
+        ..VerifySummary::default()
+    };
+    for finding in &summary.findings {
+        match finding.kind {
+            VerifyKind::Ok => summary.ok += 1,
+            VerifyKind::Changed => summary.changed += 1,
+            VerifyKind::New => summary.new += 1,
+            VerifyKind::Missing => summary.missing += 1,
+            VerifyKind::Error => summary.errors += 1,
+        }
+    }
+    summary
+}
+
+fn accept_hash_result(
+    conn: &Connection,
+    machine_id: &str,
+    root_id: &str,
+    result: &HashResult,
+) -> anyhow::Result<()> {
+    let content_id =
+        db::ensure_content_object(conn, result.size_bytes, &result.blake3, &result.sha256)?;
+    db::insert_path_observation(
+        conn,
+        db::PathObservationInput {
+            machine_id,
+            root_id,
+            relative_path: &result.relative_path,
+            basename: &result.basename,
+            parent_path: &result.parent_path,
+            size_bytes: result.size_bytes,
+            modified_at: result.modified_at.as_deref(),
+            content_id: Some(&content_id),
+        },
+    )?;
+    Ok(())
+}
+
+fn persist_hash_completed(
+    conn: &Connection,
+    job_id: &str,
+    sequence: &mut i64,
+    result: &HashResult,
+) -> rusqlite::Result<()> {
+    persist_db_event(
+        conn,
+        job_id,
+        sequence,
+        EventKind::HashCompleted,
+        EventPayload::HashCompleted {
+            relative_path: result.relative_path.clone(),
+            basename: result.basename.clone(),
+            parent_path: result.parent_path.clone(),
+            size_bytes: result.size_bytes,
+            modified_at: result.modified_at.clone(),
+            blake3: result.blake3.clone(),
+            sha256: result.sha256.clone(),
+        },
+    )
+}
+
+fn persist_verify_finding(
+    conn: &Connection,
+    job_id: &str,
+    sequence: &mut i64,
+    finding: &VerifyFinding,
+) -> rusqlite::Result<()> {
+    persist_db_event(
+        conn,
+        job_id,
+        sequence,
+        EventKind::VerifyFinding,
+        EventPayload::VerifyFinding {
+            result: finding.kind.as_str().to_string(),
+            relative_path: finding.relative_path.clone(),
+            basename: finding.basename.clone(),
+            parent_path: finding.parent_path.clone(),
+            size_bytes: finding.size_bytes,
+            modified_at: finding.modified_at.clone(),
+            expected_blake3: finding.expected_blake3.clone(),
+            expected_sha256: finding.expected_sha256.clone(),
+            actual_blake3: finding.actual_blake3.clone(),
+            actual_sha256: finding.actual_sha256.clone(),
+            error: finding.error.clone(),
+        },
+    )
+}
+
+fn persist_job_error(
+    conn: &Connection,
+    job_id: &str,
+    sequence: &mut i64,
+    kind: &str,
+    path: &Path,
+    err: anyhow::Error,
+) -> rusqlite::Result<()> {
+    persist_db_event(
+        conn,
+        job_id,
+        sequence,
+        EventKind::JobFailed,
+        EventPayload::Job {
+            kind: kind.to_string(),
+            path: Some(lossy(path)),
+            message: Some(err.to_string()),
+            files_seen: None,
+            errors: None,
+        },
+    )
+}
+
+fn persist_walk_error(
+    conn: &Connection,
+    job_id: &str,
+    sequence: &mut i64,
+    kind: &str,
+    err: walkdir::Error,
+) -> rusqlite::Result<()> {
+    persist_db_event(
+        conn,
+        job_id,
+        sequence,
+        EventKind::JobFailed,
+        EventPayload::Job {
+            kind: kind.to_string(),
+            path: err.path().map(lossy),
+            message: Some(err.to_string()),
+            files_seen: None,
+            errors: None,
+        },
+    )
+}
+
+fn persist_walk_hash_error(
+    conn: &Connection,
+    job_id: &str,
+    sequence: &mut i64,
+    err: walkdir::Error,
+) -> rusqlite::Result<()> {
+    persist_db_event(
+        conn,
+        job_id,
+        sequence,
+        EventKind::HashFailed,
+        EventPayload::HashFailed {
+            relative_path: None,
+            path: err
+                .path()
+                .map(lossy)
+                .unwrap_or_else(|| "<unknown>".to_string()),
+            error: err.to_string(),
+        },
+    )
+}
+
 fn file_meta(root: &Path, path: &Path) -> anyhow::Result<FileMeta> {
     let metadata = path
         .metadata()
@@ -607,6 +1183,89 @@ fn write_jsonl_event(
     Ok(())
 }
 
+fn print_scan_summary(summary: &ScanSummary, options: OutputOptions) {
+    println!(
+        "scan job {}: {} files, {} new, {} changed, {} missing, {} errors",
+        summary.job_id,
+        summary.files_seen,
+        summary.new_count,
+        summary.changed_count,
+        summary.missing_count,
+        summary.errors
+    );
+    print_scan_deltas(&summary.deltas, options);
+}
+
+fn print_hash_summary(summary: &HashSummary, options: OutputOptions) {
+    println!(
+        "hash job {}: {} hashed, {} skipped unchanged, {} errors",
+        summary.job_id, summary.files_hashed, summary.skipped_unchanged, summary.errors
+    );
+    let limit = if options.details {
+        summary.hashed_paths.len()
+    } else {
+        options.limit
+    };
+    for path in summary.hashed_paths.iter().take(limit) {
+        println!("hashed\t{path}");
+    }
+}
+
+fn print_verify_summary(summary: &VerifySummary, options: OutputOptions) {
+    println!(
+        "verify job {}: {} ok, {} changed, {} new, {} missing, {} errors, {} accepted",
+        summary.job_id,
+        summary.ok,
+        summary.changed,
+        summary.new,
+        summary.missing,
+        summary.errors,
+        summary.accepted
+    );
+    let notable = summary
+        .findings
+        .iter()
+        .filter(|finding| finding.kind != VerifyKind::Ok)
+        .collect::<Vec<_>>();
+    let limit = if options.details {
+        notable.len()
+    } else {
+        options.limit
+    };
+    for finding in notable.into_iter().take(limit) {
+        println!("{}\t{}", finding.kind.as_str(), finding.relative_path);
+    }
+}
+
+fn print_scan_deltas(deltas: &[ScanDelta], options: OutputOptions) {
+    let notable = deltas
+        .iter()
+        .filter(|delta| delta.kind != DeltaKind::Unchanged)
+        .collect::<Vec<_>>();
+    let limit = if options.details {
+        notable.len()
+    } else {
+        options.limit
+    };
+    for delta in notable.into_iter().take(limit) {
+        println!(
+            "{}\t{}\t{}\t{}\tprev:{}\tprev_mtime:{}",
+            delta.kind.as_str(),
+            delta.relative_path,
+            delta
+                .size_bytes
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            delta.modified_at.as_deref().unwrap_or("-"),
+            delta
+                .previous_size_bytes
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            delta.previous_modified_at.as_deref().unwrap_or("-")
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,10 +1291,137 @@ mod tests {
         db::init_schema(&conn).unwrap();
         let job_id = db::queue_file_job(&conn, "scan", dir.path(), None).unwrap();
 
-        run_queued_job(&conn, &job_id, &dir.path().join("gremlin.db"), None).unwrap();
+        run_queued_job(
+            &conn,
+            &job_id,
+            &dir.path().join("gremlin.db"),
+            None,
+            OutputOptions::default(),
+        )
+        .unwrap();
 
         let job = db::job_by_id(&conn, &job_id).unwrap().unwrap();
         assert_eq!(job.status, "completed");
         assert_eq!(db::table_count(&conn, "path_observations").unwrap(), 1);
+    }
+
+    #[test]
+    fn scan_reports_new_changed_and_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hello.txt");
+        std::fs::write(&file, b"hello").unwrap();
+        let db_path = dir.path().join("gremlin.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+        db::init_schema(&conn).unwrap();
+        let first =
+            scan_to_db(&conn, dir.path(), &db_path, None, OutputOptions::default()).unwrap();
+        assert_eq!(first.new_count, 1);
+
+        std::fs::write(&file, b"hello world").unwrap();
+        let changed =
+            scan_to_db(&conn, dir.path(), &db_path, None, OutputOptions::default()).unwrap();
+        assert_eq!(changed.changed_count, 1);
+
+        std::fs::remove_file(&file).unwrap();
+        let missing =
+            scan_to_db(&conn, dir.path(), &db_path, None, OutputOptions::default()).unwrap();
+        assert_eq!(missing.missing_count, 1);
+        assert_eq!(db::table_count(&conn, "path_observations").unwrap(), 1);
+    }
+
+    #[test]
+    fn verify_accepts_changed_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hello.txt");
+        std::fs::write(&file, b"hello").unwrap();
+        let db_path = dir.path().join("gremlin.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+        db::init_schema(&conn).unwrap();
+        hash_to_db(
+            &conn,
+            dir.path(),
+            &db_path,
+            None,
+            true,
+            OutputOptions::default(),
+        )
+        .unwrap();
+
+        std::fs::write(&file, b"changed").unwrap();
+        let verify = verify_to_db(
+            &conn,
+            dir.path(),
+            &db_path,
+            None,
+            false,
+            OutputOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(verify.changed, 1);
+        let accepted = verify_to_db(
+            &conn,
+            dir.path(),
+            &db_path,
+            None,
+            true,
+            OutputOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(accepted.accepted, 1);
+        let clean = verify_to_db(
+            &conn,
+            dir.path(),
+            &db_path,
+            None,
+            false,
+            OutputOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(clean.ok, 1);
+        assert_eq!(clean.changed, 0);
+    }
+
+    #[test]
+    fn hash_defaults_to_new_or_changed_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hello.txt");
+        std::fs::write(&file, b"hello").unwrap();
+        let db_path = dir.path().join("gremlin.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+        db::init_schema(&conn).unwrap();
+
+        let first = hash_to_db(
+            &conn,
+            dir.path(),
+            &db_path,
+            None,
+            false,
+            OutputOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(first.files_hashed, 1);
+        let second = hash_to_db(
+            &conn,
+            dir.path(),
+            &db_path,
+            None,
+            false,
+            OutputOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(second.files_hashed, 0);
+        assert_eq!(second.skipped_unchanged, 1);
+
+        std::fs::write(&file, b"changed").unwrap();
+        let changed = hash_to_db(
+            &conn,
+            dir.path(),
+            &db_path,
+            None,
+            false,
+            OutputOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(changed.files_hashed, 1);
     }
 }

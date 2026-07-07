@@ -40,6 +40,14 @@ impl ConfigContext {
         );
     }
 
+    pub fn resolve_db_or_default(&self, cli_db: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+        match self.resolve_db(cli_db) {
+            Ok(path) => Ok(path),
+            Err(_) => default_db_path()
+                .ok_or_else(|| anyhow::anyhow!("could not determine default database path")),
+        }
+    }
+
     pub fn jobs_limit(&self) -> i64 {
         self.config.jobs_limit.unwrap_or(200)
     }
@@ -113,6 +121,19 @@ pub fn default_config_path() -> Option<PathBuf> {
             .join(".config")
             .join("gremlin")
             .join("config.json")
+    })
+}
+
+pub fn default_db_path() -> Option<PathBuf> {
+    if let Ok(base) = std::env::var("XDG_DATA_HOME") {
+        return Some(PathBuf::from(base).join("gremlin").join("gremlin.db"));
+    }
+    std::env::var("HOME").ok().map(|home| {
+        PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("gremlin")
+            .join("gremlin.db")
     })
 }
 

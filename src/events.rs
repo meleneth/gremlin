@@ -21,6 +21,9 @@ pub enum EventKind {
     HashStarted,
     HashCompleted,
     HashFailed,
+    VerifyStarted,
+    VerifyFinding,
+    VerifyCompleted,
 }
 
 impl EventKind {
@@ -35,6 +38,9 @@ impl EventKind {
             Self::HashStarted => "hash_started",
             Self::HashCompleted => "hash_completed",
             Self::HashFailed => "hash_failed",
+            Self::VerifyStarted => "verify_started",
+            Self::VerifyFinding => "verify_finding",
+            Self::VerifyCompleted => "verify_completed",
         }
     }
 }
@@ -75,6 +81,19 @@ pub enum EventPayload {
         relative_path: Option<String>,
         path: String,
         error: String,
+    },
+    VerifyFinding {
+        result: String,
+        relative_path: String,
+        basename: String,
+        parent_path: String,
+        size_bytes: u64,
+        modified_at: Option<String>,
+        expected_blake3: Option<String>,
+        expected_sha256: Option<String>,
+        actual_blake3: Option<String>,
+        actual_sha256: Option<String>,
+        error: Option<String>,
     },
 }
 

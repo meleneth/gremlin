@@ -19,8 +19,25 @@ pub struct RootRow {
 pub struct FileRow {
     pub relative_path: String,
     pub size_bytes: i64,
+    pub modified_at: Option<String>,
     pub content_id: Option<String>,
     pub status: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PathObservationRow {
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub modified_at: Option<String>,
+    pub content_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HashBaselineRow {
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub blake3: String,
+    pub sha256: String,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +105,9 @@ pub struct ChecksumEntryInput<'a> {
 }
 
 pub fn open_or_create(path: &Path) -> rusqlite::Result<Connection> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let conn = Connection::open(path)?;
     configure(&conn)?;
     Ok(conn)
@@ -526,7 +546,7 @@ pub fn recent_events(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Even
 pub fn recent_files(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<FileRow>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT relative_path, size_bytes, content_id, status
+        SELECT relative_path, size_bytes, modified_at, content_id, status
         FROM path_observations
         ORDER BY last_seen_at DESC
         LIMIT ?1
@@ -536,8 +556,61 @@ pub fn recent_files(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<FileR
         Ok(FileRow {
             relative_path: row.get(0)?,
             size_bytes: row.get(1)?,
-            content_id: row.get(2)?,
-            status: row.get(3)?,
+            modified_at: row.get(2)?,
+            content_id: row.get(3)?,
+            status: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn path_observations_for_root(
+    conn: &Connection,
+    machine_id: &str,
+    root_id: &str,
+) -> rusqlite::Result<Vec<PathObservationRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT relative_path, size_bytes, modified_at, content_id
+        FROM path_observations
+        WHERE machine_id = ?1 AND root_id = ?2
+        "#,
+    )?;
+    let rows = stmt.query_map(params![machine_id, root_id], |row| {
+        let size: i64 = row.get(1)?;
+        Ok(PathObservationRow {
+            relative_path: row.get(0)?,
+            size_bytes: size as u64,
+            modified_at: row.get(2)?,
+            content_id: row.get(3)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn hash_baselines_for_root(
+    conn: &Connection,
+    machine_id: &str,
+    root_id: &str,
+) -> rusqlite::Result<Vec<HashBaselineRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT p.relative_path, c.size_bytes, c.blake3, c.sha256
+        FROM path_observations p
+        JOIN content_objects c ON c.id = p.content_id
+        WHERE p.machine_id = ?1
+          AND p.root_id = ?2
+          AND c.blake3 IS NOT NULL
+          AND c.sha256 IS NOT NULL
+        "#,
+    )?;
+    let rows = stmt.query_map(params![machine_id, root_id], |row| {
+        let size: i64 = row.get(1)?;
+        Ok(HashBaselineRow {
+            relative_path: row.get(0)?,
+            size_bytes: size as u64,
+            blake3: row.get(2)?,
+            sha256: row.get(3)?,
         })
     })?;
     rows.collect()
