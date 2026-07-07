@@ -257,16 +257,50 @@ fn render_roots(
 }
 
 fn root_header() -> String {
-    format!("{:<2} {:<18} {:>9}", "", "ROOT", "SIZE")
+    format!("{:<2} {:<8} {:>5} {:<6}", "", "ROOT", "SIZE", "JOB")
 }
 
 fn root_row(marker: &str, root: &db::RootRow) -> String {
     format!(
-        "{:<2} {:<18} {:>9}",
+        "{:<2} {:<8} {:>5} {:<6}",
         marker,
-        truncate(&root_display_name(root), 18),
-        human_size(root.current_size_bytes as u64)
+        truncate(&root_display_name(root), 8),
+        human_size(root.current_size_bytes as u64),
+        truncate(&root_job_label(root), 6)
     )
+}
+
+fn root_job_label(root: &db::RootRow) -> String {
+    match (
+        root.latest_job_kind.as_deref(),
+        root.latest_job_status.as_deref(),
+    ) {
+        (Some(kind), Some(status)) => {
+            format!("{}/{}", compact_job_kind(kind), compact_status(status))
+        }
+        (Some(kind), None) => kind.to_string(),
+        _ => "-".to_string(),
+    }
+}
+
+fn compact_job_kind(kind: &str) -> &str {
+    match kind {
+        "scan" => "s",
+        "hash" => "h",
+        "verify" => "v",
+        other => other,
+    }
+}
+
+fn compact_status(status: &str) -> &str {
+    match status {
+        "created" => "new",
+        "running" => "run",
+        "completed" => "done",
+        "completed_with_errors" => "errs",
+        "failed" => "fail",
+        other => other,
+    }
 }
 
 fn root_display_name(root: &db::RootRow) -> String {
@@ -493,6 +527,8 @@ mod tests {
             path: "/tmp/archive/photos".to_string(),
             label: Some("/tmp/archive/photos".to_string()),
             current_size_bytes: 0,
+            latest_job_kind: None,
+            latest_job_status: None,
         };
         assert_eq!(root_display_name(&root), "photos");
     }

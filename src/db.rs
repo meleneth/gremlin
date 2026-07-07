@@ -14,6 +14,8 @@ pub struct RootRow {
     pub path: String,
     pub label: Option<String>,
     pub current_size_bytes: i64,
+    pub latest_job_kind: Option<String>,
+    pub latest_job_status: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -714,7 +716,30 @@ pub fn hash_baselines_for_root(
 
 pub fn roots(conn: &Connection) -> rusqlite::Result<Vec<RootRow>> {
     let mut stmt = conn.prepare(
-        "SELECT id, machine_id, path, label, current_size_bytes FROM roots ORDER BY created_at DESC",
+        r#"
+        SELECT
+            r.id,
+            r.machine_id,
+            r.path,
+            r.label,
+            r.current_size_bytes,
+            (
+                SELECT j.kind
+                FROM jobs j
+                WHERE j.root_id = r.id
+                ORDER BY j.created_at DESC
+                LIMIT 1
+            ) AS latest_job_kind,
+            (
+                SELECT j.status
+                FROM jobs j
+                WHERE j.root_id = r.id
+                ORDER BY j.created_at DESC
+                LIMIT 1
+            ) AS latest_job_status
+        FROM roots r
+        ORDER BY r.created_at DESC
+        "#,
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(RootRow {
@@ -723,6 +748,8 @@ pub fn roots(conn: &Connection) -> rusqlite::Result<Vec<RootRow>> {
             path: row.get(2)?,
             label: row.get(3)?,
             current_size_bytes: row.get(4)?,
+            latest_job_kind: row.get(5)?,
+            latest_job_status: row.get(6)?,
         })
     })?;
     rows.collect()
@@ -734,7 +761,30 @@ pub fn find_root_by_machine_path(
     path: &str,
 ) -> rusqlite::Result<Option<RootRow>> {
     conn.query_row(
-        "SELECT id, machine_id, path, label, current_size_bytes FROM roots WHERE machine_id = ?1 AND path = ?2",
+        r#"
+        SELECT
+            r.id,
+            r.machine_id,
+            r.path,
+            r.label,
+            r.current_size_bytes,
+            (
+                SELECT j.kind
+                FROM jobs j
+                WHERE j.root_id = r.id
+                ORDER BY j.created_at DESC
+                LIMIT 1
+            ) AS latest_job_kind,
+            (
+                SELECT j.status
+                FROM jobs j
+                WHERE j.root_id = r.id
+                ORDER BY j.created_at DESC
+                LIMIT 1
+            ) AS latest_job_status
+        FROM roots r
+        WHERE r.machine_id = ?1 AND r.path = ?2
+        "#,
         params![machine_id, path],
         |row| {
             Ok(RootRow {
@@ -743,6 +793,8 @@ pub fn find_root_by_machine_path(
                 path: row.get(2)?,
                 label: row.get(3)?,
                 current_size_bytes: row.get(4)?,
+                latest_job_kind: row.get(5)?,
+                latest_job_status: row.get(6)?,
             })
         },
     )
