@@ -48,6 +48,7 @@
 
 ## Transfer Planning
 
+- Build transfer planning from persisted TUI selection sets.
 - Add compare flow between two roots or checksum collections.
 - Add transfer plan tables/events without executing transfers.
 - Add dry-run transfer summaries.

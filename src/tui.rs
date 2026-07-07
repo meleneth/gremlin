@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -28,6 +29,14 @@ struct AppState {
     file_offset: usize,
     event_offset: usize,
     status: String,
+}
+
+struct InfoBarData<'a> {
+    root: Option<&'a db::RootRow>,
+    file: Option<&'a db::FileRow>,
+    selection: Option<&'a db::SelectionSummary>,
+    event: Option<&'a db::JobEventRow>,
+    root_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -134,6 +143,14 @@ async fn run_loop(
             Some(root) => Some(db::root_summary(conn, &root.id)?),
             None => None,
         };
+        let selection_summary = match selected {
+            Some(root) => Some(db::selection_summary_for_root(conn, &root.id)?),
+            None => None,
+        };
+        let selected_paths = match selected {
+            Some(root) => db::selected_paths_for_root(conn, &root.id)?,
+            None => BTreeSet::new(),
+        };
 
         terminal.draw(|frame| {
             let area = frame.size();
@@ -142,7 +159,7 @@ async fn run_loop(
                 .constraints([
                     Constraint::Length(3),
                     Constraint::Min(5),
-                    Constraint::Length(8),
+                    Constraint::Length(9),
                     Constraint::Length(3),
                     Constraint::Length(5),
                 ])
@@ -154,21 +171,26 @@ async fn run_loop(
 
             render_header(frame, vertical[0]);
             render_roots(frame, middle[0], &roots, &state);
-            render_files(frame, middle[1], &files, &state);
+            render_files(frame, middle[1], &files, &selected_paths, &state);
             render_detail_panel(
                 frame,
                 vertical[2],
                 selected,
                 summary.as_ref(),
+                selection_summary.as_ref(),
                 files.get(state.file_offset),
+                &selected_paths,
             );
             render_info_bar(
                 frame,
                 vertical[3],
-                selected,
-                files.get(state.file_offset),
-                events.get(state.event_offset),
-                roots.len(),
+                InfoBarData {
+                    root: selected,
+                    file: files.get(state.file_offset),
+                    selection: selection_summary.as_ref(),
+                    event: events.get(state.event_offset),
+                    root_count: roots.len(),
+                },
                 &state,
             );
             render_events(frame, vertical[4], &events, &state);
@@ -210,6 +232,14 @@ async fn run_loop(
                     KeyCode::Char('c') => {
                         request_selected_cancel(conn, events.get(state.event_offset), &mut state)?;
                     }
+                    KeyCode::Char(' ') => {
+                        toggle_selected_file_mark(
+                            conn,
+                            selected,
+                            files.get(state.file_offset),
+                            &mut state,
+                        )?;
+                    }
                     _ => {}
                 }
             }
@@ -221,7 +251,7 @@ async fn run_loop(
 fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect) {
     let header = Paragraph::new(Line::from(vec![
         Span::styled("Gremlin", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw("  q quit | Tab focus | arrows | v fields | s scan | h hash | c cancel"),
+        Span::raw("  q quit | Tab focus | arrows | Space mark | s scan | h hash | c cancel"),
     ]))
     .block(Block::default().borders(Borders::ALL));
     frame.render_widget(header, area);
@@ -343,27 +373,39 @@ fn render_detail_panel(
     area: Rect,
     selected: Option<&db::RootRow>,
     summary: Option<&db::RootSummary>,
+    selection: Option<&db::SelectionSummary>,
     selected_file: Option<&db::FileRow>,
+    selected_paths: &BTreeSet<String>,
 ) {
     let root_lines = match (selected, summary) {
         (Some(root), Some(summary)) => format!(
-            "Root: {}\nPath: {}\nMachine: {} | Files: {} | Hashed: {} | Current size: {}",
-            root.label.as_deref().unwrap_or(&root.id),
+            "Root: {}\nPath: {}\nFiles: {} | Hashed: {} | Current: {} | Marked: {} ({})\nMachine: {} | Set: {}",
+            root_display_name(root),
             root.path,
-            short_id(&root.machine_id),
             summary.file_count,
             summary.content_count,
-            human_size(root.current_size_bytes as u64)
+            human_size(root.current_size_bytes as u64),
+            selection.map(|value| value.marked_count).unwrap_or(0),
+            human_size(selection.map(|value| value.marked_bytes).unwrap_or(0) as u64),
+            short_id(&root.machine_id),
+            selection
+                .map(|value| short_id(&value.set_id))
+                .unwrap_or("-")
         ),
         _ => "Root: -\nPath: -\nMachine: - | Files: - | Hashed: - | Current size: -".to_string(),
     };
     let file_lines = if let Some(file) = selected_file {
         format!(
-            "File: {}\nSize: {} ({} bytes) | Status: {} | Modified: {}\nContent: {} | Metadata: not extracted yet",
+            "File: {}\nSize: {} ({} bytes) | Status: {} | Marked: {}\nModified: {} | Content: {} | Metadata: not extracted yet",
             file.relative_path,
             human_size(file.size_bytes as u64),
             file.size_bytes,
             file.status,
+            if selected_paths.contains(&file.relative_path) {
+                "yes"
+            } else {
+                "no"
+            },
             file.modified_at.as_deref().unwrap_or("-"),
             file.content_id.as_deref().map(short_id).unwrap_or("stat-only")
         )
@@ -381,25 +423,24 @@ fn render_detail_panel(
 fn render_info_bar(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
-    selected: Option<&db::RootRow>,
-    selected_file: Option<&db::FileRow>,
-    selected_event: Option<&db::JobEventRow>,
-    root_count: usize,
+    data: InfoBarData<'_>,
     state: &AppState,
 ) {
-    let root_name = selected.map(root_display_name);
+    let root_name = data.root.map(root_display_name);
     let root = root_name.as_deref().unwrap_or("-");
-    let file = selected_file
+    let file = data
+        .file
         .map(|file| file.relative_path.as_str())
         .unwrap_or("-");
-    let event = selected_event
+    let event = data
+        .event
         .map(event_summary)
         .unwrap_or_else(|| "event -".to_string());
     let text = format!(
-        "focus {:?} | roots {} | fields {} | root {} | file {} | {} | {}",
+        "focus {:?} | roots {} | marked {} | root {} | file {} | {} | {}",
         state.focus,
-        root_count,
-        state.file_view.label(),
+        data.root_count,
+        data.selection.map(|value| value.marked_count).unwrap_or(0),
         truncate(root, 24),
         truncate(file, 20),
         truncate(&event, 24),
@@ -415,6 +456,7 @@ fn render_files(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     files: &[db::FileRow],
+    selected_paths: &BTreeSet<String>,
     state: &AppState,
 ) {
     let visible = files.iter().enumerate().skip(state.file_offset);
@@ -424,7 +466,8 @@ fn render_files(
         let mut rows = vec![ListItem::new(file_header(state.file_view))];
         rows.extend(visible.map(|(idx, file)| {
             let marker = if idx == state.file_offset { "> " } else { "  " };
-            ListItem::new(file_row(marker, file, state.file_view))
+            let selected = selected_paths.contains(&file.relative_path);
+            ListItem::new(file_row(marker, selected, file, state.file_view))
         }));
         rows
     };
@@ -440,44 +483,55 @@ fn render_files(
 
 fn file_header(view: FileView) -> String {
     match view {
-        FileView::Basic => format!("{:<2} {:<26} {:>9} {:<8}", "", "PATH", "SIZE", "STATE"),
-        FileView::Meta => format!("{:<2} {:<20} {:>9} {:<18}", "", "PATH", "SIZE", "MODIFIED"),
-        FileView::Hash => format!("{:<2} {:<28} {:<18}", "", "PATH", "CONTENT"),
+        FileView::Basic => format!(
+            "{:<2} {:<1} {:<24} {:>9} {:<8}",
+            "", "M", "PATH", "SIZE", "STATE"
+        ),
+        FileView::Meta => format!(
+            "{:<2} {:<1} {:<18} {:>9} {:<18}",
+            "", "M", "PATH", "SIZE", "MODIFIED"
+        ),
+        FileView::Hash => format!("{:<2} {:<1} {:<26} {:<18}", "", "M", "PATH", "CONTENT"),
         FileView::All => format!(
-            "{:<2} {:<16} {:>8} {:<6} {:<8} {:<10}",
-            "", "PATH", "SIZE", "STATE", "HASH", "MODIFIED"
+            "{:<2} {:<1} {:<14} {:>8} {:<6} {:<8} {:<10}",
+            "", "M", "PATH", "SIZE", "STATE", "HASH", "MODIFIED"
         ),
     }
 }
 
-fn file_row(marker: &str, file: &db::FileRow, view: FileView) -> String {
+fn file_row(marker: &str, selected: bool, file: &db::FileRow, view: FileView) -> String {
     let hash = file.content_id.as_deref().map(short_id).unwrap_or("stat");
     let modified = file.modified_at.as_deref().unwrap_or("-");
+    let marked = if selected { "*" } else { " " };
     match view {
         FileView::Basic => format!(
-            "{:<2} {:<26} {:>9} {:<8}",
+            "{:<2} {:<1} {:<24} {:>9} {:<8}",
             marker,
-            truncate(&file.relative_path, 26),
+            marked,
+            truncate(&file.relative_path, 24),
             human_size(file.size_bytes as u64),
             truncate(&file.status, 8)
         ),
         FileView::Meta => format!(
-            "{:<2} {:<20} {:>9} {:<18}",
+            "{:<2} {:<1} {:<18} {:>9} {:<18}",
             marker,
-            truncate(&file.relative_path, 20),
+            marked,
+            truncate(&file.relative_path, 18),
             human_size(file.size_bytes as u64),
             truncate(modified, 18)
         ),
         FileView::Hash => format!(
-            "{:<2} {:<28} {:<18}",
+            "{:<2} {:<1} {:<26} {:<18}",
             marker,
-            truncate(&file.relative_path, 28),
+            marked,
+            truncate(&file.relative_path, 26),
             truncate(hash, 18)
         ),
         FileView::All => format!(
-            "{:<2} {:<16} {:>8} {:<6} {:<8} {:<10}",
+            "{:<2} {:<1} {:<14} {:>8} {:<6} {:<8} {:<10}",
             marker,
-            truncate(&file.relative_path, 16),
+            marked,
+            truncate(&file.relative_path, 14),
             human_size(file.size_bytes as u64),
             truncate(&file.status, 6),
             truncate(hash, 8),
@@ -732,6 +786,29 @@ fn request_selected_cancel(
     } else {
         state.status = format!("job {} is not cancelable", event.job_id);
     }
+    Ok(())
+}
+
+fn toggle_selected_file_mark(
+    conn: &Connection,
+    selected_root: Option<&db::RootRow>,
+    selected_file: Option<&db::FileRow>,
+    state: &mut AppState,
+) -> anyhow::Result<()> {
+    let Some(root) = selected_root else {
+        state.status = "No root selected".to_string();
+        return Ok(());
+    };
+    let Some(file) = selected_file else {
+        state.status = "No file selected".to_string();
+        return Ok(());
+    };
+    let marked = db::toggle_selection_entry(conn, &root.id, &file.relative_path)?;
+    state.status = if marked {
+        format!("marked {}", file.relative_path)
+    } else {
+        format!("unmarked {}", file.relative_path)
+    };
     Ok(())
 }
 

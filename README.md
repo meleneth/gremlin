@@ -96,6 +96,8 @@ Roots maintain `current_size_bytes`, the projected total size of currently index
 
 `job create` records an intended scan or hash job without executing file work. This is the same seam used by the TUI: UI actions create jobs, start them through the job runner, display projected progress, and can request cooperative cancellation between files.
 
+In the TUI, Space marks/unmarks the selected file in a persisted default selection set for the current root. These marks are intended to feed transfer planning.
+
 `target inspect` classifies obvious target forms without touching the database:
 
 ```bash

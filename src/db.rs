@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -32,6 +33,13 @@ pub struct FileRow {
 pub struct RootSummary {
     pub file_count: i64,
     pub content_count: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct SelectionSummary {
+    pub set_id: String,
+    pub marked_count: i64,
+    pub marked_bytes: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -268,6 +276,24 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             blake3 TEXT,
             sha256 TEXT,
             metadata_json TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS selection_sets (
+            id TEXT PRIMARY KEY,
+            root_id TEXT NOT NULL REFERENCES roots(id),
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(root_id, name)
+        );
+
+        CREATE TABLE IF NOT EXISTS selection_entries (
+            id TEXT PRIMARY KEY,
+            selection_set_id TEXT NOT NULL REFERENCES selection_sets(id),
+            root_id TEXT NOT NULL REFERENCES roots(id),
+            relative_path TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(selection_set_id, relative_path)
         );
         "#,
     )?;
@@ -701,6 +727,111 @@ pub fn insert_checksum_entry(
         ],
     )?;
     Ok(())
+}
+
+pub fn ensure_default_selection_set(conn: &Connection, root_id: &str) -> rusqlite::Result<String> {
+    if let Some(id) = conn
+        .query_row(
+            "SELECT id FROM selection_sets WHERE root_id = ?1 AND name = 'default'",
+            params![root_id],
+            |row| row.get(0),
+        )
+        .optional()?
+    {
+        return Ok(id);
+    }
+    let id = new_id("selection");
+    let now = now_rfc3339();
+    conn.execute(
+        r#"
+        INSERT INTO selection_sets (id, root_id, name, created_at, updated_at)
+        VALUES (?1, ?2, 'default', ?3, ?3)
+        "#,
+        params![id, root_id, now],
+    )?;
+    Ok(id)
+}
+
+pub fn toggle_selection_entry(
+    conn: &Connection,
+    root_id: &str,
+    relative_path: &str,
+) -> rusqlite::Result<bool> {
+    let set_id = ensure_default_selection_set(conn, root_id)?;
+    let existing: Option<String> = conn
+        .query_row(
+            r#"
+            SELECT id
+            FROM selection_entries
+            WHERE selection_set_id = ?1 AND relative_path = ?2
+            "#,
+            params![set_id, relative_path],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let now = now_rfc3339();
+    if let Some(id) = existing {
+        conn.execute("DELETE FROM selection_entries WHERE id = ?1", params![id])?;
+        conn.execute(
+            "UPDATE selection_sets SET updated_at = ?2 WHERE id = ?1",
+            params![set_id, now],
+        )?;
+        Ok(false)
+    } else {
+        conn.execute(
+            r#"
+            INSERT INTO selection_entries
+                (id, selection_set_id, root_id, relative_path, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![new_id("mark"), set_id, root_id, relative_path, now],
+        )?;
+        conn.execute(
+            "UPDATE selection_sets SET updated_at = ?2 WHERE id = ?1",
+            params![set_id, now],
+        )?;
+        Ok(true)
+    }
+}
+
+pub fn selected_paths_for_root(
+    conn: &Connection,
+    root_id: &str,
+) -> rusqlite::Result<BTreeSet<String>> {
+    let set_id = ensure_default_selection_set(conn, root_id)?;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT relative_path
+        FROM selection_entries
+        WHERE selection_set_id = ?1
+        ORDER BY relative_path ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(params![set_id], |row| row.get::<_, String>(0))?;
+    rows.collect()
+}
+
+pub fn selection_summary_for_root(
+    conn: &Connection,
+    root_id: &str,
+) -> rusqlite::Result<SelectionSummary> {
+    let set_id = ensure_default_selection_set(conn, root_id)?;
+    let (marked_count, marked_bytes): (i64, i64) = conn.query_row(
+        r#"
+        SELECT COUNT(e.relative_path), COALESCE(SUM(p.size_bytes), 0)
+        FROM selection_entries e
+        LEFT JOIN path_observations p
+            ON p.root_id = e.root_id AND p.relative_path = e.relative_path
+        WHERE e.selection_set_id = ?1
+        "#,
+        params![set_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(SelectionSummary {
+        set_id,
+        marked_count,
+        marked_bytes,
+    })
 }
 
 pub fn ensure_import_job(conn: &Connection, source: &str) -> rusqlite::Result<String> {
@@ -1251,6 +1382,41 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(root.current_size_bytes, 2);
+    }
+
+    #[test]
+    fn toggles_selection_entries_and_summarizes_bytes() {
+        let conn = Connection::open_in_memory().unwrap();
+        configure(&conn).unwrap();
+        init_schema(&conn).unwrap();
+        let machine_id = ensure_local_machine_with_label(&conn, None).unwrap();
+        let root_id = ensure_root(&conn, &machine_id, "/tmp/root").unwrap();
+        insert_path_observation(
+            &conn,
+            PathObservationInput {
+                machine_id: &machine_id,
+                root_id: &root_id,
+                relative_path: "a.txt",
+                basename: "a.txt",
+                parent_path: ".",
+                size_bytes: 5,
+                modified_at: None,
+                content_id: None,
+            },
+        )
+        .unwrap();
+
+        assert!(toggle_selection_entry(&conn, &root_id, "a.txt").unwrap());
+        let selected = selected_paths_for_root(&conn, &root_id).unwrap();
+        assert!(selected.contains("a.txt"));
+        let summary = selection_summary_for_root(&conn, &root_id).unwrap();
+        assert_eq!(summary.marked_count, 1);
+        assert_eq!(summary.marked_bytes, 5);
+
+        assert!(!toggle_selection_entry(&conn, &root_id, "a.txt").unwrap());
+        let summary = selection_summary_for_root(&conn, &root_id).unwrap();
+        assert_eq!(summary.marked_count, 0);
+        assert_eq!(summary.marked_bytes, 0);
     }
 
     #[test]
