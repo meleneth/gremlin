@@ -19,6 +19,7 @@ use crate::db;
 #[derive(Debug, Default)]
 struct AppState {
     focus: FocusPane,
+    file_view: FileView,
     selected_root: usize,
     file_offset: usize,
     event_offset: usize,
@@ -31,6 +32,35 @@ enum FocusPane {
     Roots,
     Files,
     Events,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum FileView {
+    #[default]
+    Basic,
+    Meta,
+    Hash,
+    All,
+}
+
+impl FileView {
+    fn next(self) -> Self {
+        match self {
+            Self::Basic => Self::Meta,
+            Self::Meta => Self::Hash,
+            Self::Hash => Self::All,
+            Self::All => Self::Basic,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Basic => "basic",
+            Self::Meta => "meta",
+            Self::Hash => "hash",
+            Self::All => "all",
+        }
+    }
 }
 
 impl FocusPane {
@@ -72,7 +102,7 @@ fn run_loop(
     machine_label: Option<String>,
 ) -> anyhow::Result<()> {
     let mut state = AppState {
-        status: "q quit | Tab focus | arrows move/scroll | s queue scan | h queue hash".to_string(),
+        status: "ready".to_string(),
         ..AppState::default()
     };
     loop {
@@ -98,9 +128,10 @@ fn run_loop(
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(3),
-                    Constraint::Min(8),
-                    Constraint::Length(7),
-                    Constraint::Length(6),
+                    Constraint::Min(5),
+                    Constraint::Length(8),
+                    Constraint::Length(3),
+                    Constraint::Length(5),
                 ])
                 .split(area);
             let middle = Layout::default()
@@ -117,9 +148,15 @@ fn run_loop(
                 selected,
                 summary.as_ref(),
                 files.get(state.file_offset),
+            );
+            render_info_bar(
+                frame,
+                vertical[3],
+                selected,
+                files.get(state.file_offset),
                 &state,
             );
-            render_events(frame, vertical[3], &events, &state);
+            render_events(frame, vertical[4], &events, &state);
         })?;
 
         if event::poll(Duration::from_millis(250))? {
@@ -127,6 +164,10 @@ fn run_loop(
                 match key.code {
                     KeyCode::Char('q') => break,
                     KeyCode::Tab => state.focus = state.focus.next(),
+                    KeyCode::Char('v') => {
+                        state.file_view = state.file_view.next();
+                        state.status = format!("file fields: {}", state.file_view.label());
+                    }
                     KeyCode::Down => move_down(&mut state, roots.len(), files.len(), events.len()),
                     KeyCode::Up => move_up(&mut state),
                     KeyCode::Char('s') => {
@@ -160,7 +201,7 @@ fn run_loop(
 fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect) {
     let header = Paragraph::new(Line::from(vec![
         Span::styled("Gremlin", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw("  local file evidence database"),
+        Span::raw("  q quit | Tab focus | arrows move | v fields | s scan job | h hash job"),
     ]))
     .block(Block::default().borders(Borders::ALL));
     frame.render_widget(header, area);
@@ -211,44 +252,63 @@ fn render_detail_panel(
     selected: Option<&db::RootRow>,
     summary: Option<&db::RootSummary>,
     selected_file: Option<&db::FileRow>,
-    state: &AppState,
 ) {
-    let root_text = match (selected, summary) {
+    let root_lines = match (selected, summary) {
         (Some(root), Some(summary)) => format!(
-            "root: {} | files: {} | hashed: {} | size: {}\npath: {}",
-            root.id,
+            "Root: {}\nPath: {}\nMachine: {} | Files: {} | Hashed: {} | Current size: {}",
+            root.label.as_deref().unwrap_or(&root.id),
+            root.path,
+            short_id(&root.machine_id),
             summary.file_count,
             summary.content_count,
-            human_size(root.current_size_bytes as u64),
-            root.path
+            human_size(root.current_size_bytes as u64)
         ),
-        _ => "No root selected".to_string(),
+        _ => "Root: -\nPath: -\nMachine: - | Files: - | Hashed: - | Current size: -".to_string(),
     };
-    let file_text = if let Some(file) = selected_file {
+    let file_lines = if let Some(file) = selected_file {
         format!(
-            "file: {} | {} ({} bytes) | {} | {}\nmodified: {} | content: {}",
+            "File: {}\nSize: {} ({} bytes) | Status: {} | Modified: {}\nContent: {} | Metadata: not extracted yet",
             file.relative_path,
             human_size(file.size_bytes as u64),
             file.size_bytes,
             file.status,
-            if file.content_id.is_some() {
-                "hashed"
-            } else {
-                "stat"
-            },
             file.modified_at.as_deref().unwrap_or("-"),
-            file.content_id.as_deref().unwrap_or("-")
+            file.content_id.as_deref().map(short_id).unwrap_or("stat-only")
         )
     } else {
-        "file: -".to_string()
+        "File: -\nSize: - | Status: - | Modified: -\nContent: - | Metadata: not extracted yet"
+            .to_string()
     };
-    let text = format!("{}\n{}\n{}", root_text, file_text, state.status);
+    let text = format!("{root_lines}\n{file_lines}");
     frame.render_widget(
-        Paragraph::new(text).block(
-            Block::default()
-                .title("Details / Actions")
-                .borders(Borders::ALL),
-        ),
+        Paragraph::new(text).block(Block::default().title("Details").borders(Borders::ALL)),
+        area,
+    );
+}
+
+fn render_info_bar(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    selected: Option<&db::RootRow>,
+    selected_file: Option<&db::FileRow>,
+    state: &AppState,
+) {
+    let root = selected
+        .map(|root| root.label.as_deref().unwrap_or(&root.path))
+        .unwrap_or("-");
+    let file = selected_file
+        .map(|file| file.relative_path.as_str())
+        .unwrap_or("-");
+    let text = format!(
+        "focus {:?} | selector fields {} | root {} | file {} | {}",
+        state.focus,
+        state.file_view.label(),
+        truncate(root, 24),
+        truncate(file, 28),
+        state.status
+    );
+    frame.render_widget(
+        Paragraph::new(text).block(Block::default().title("Info").borders(Borders::ALL)),
         area,
     );
 }
@@ -263,24 +323,12 @@ fn render_files(
     let items = if files.is_empty() {
         vec![ListItem::new("No indexed files for this root")]
     } else {
-        visible
-            .map(|(idx, file)| {
-                let hash = if file.content_id.is_some() {
-                    "hashed"
-                } else {
-                    "stat"
-                };
-                let marker = if idx == state.file_offset { "> " } else { "  " };
-                ListItem::new(format!(
-                    "{marker}{}  {}  {}  {}\n  {}",
-                    file.relative_path,
-                    human_size(file.size_bytes as u64),
-                    file.status,
-                    hash,
-                    file.modified_at.as_deref().unwrap_or("-")
-                ))
-            })
-            .collect()
+        let mut rows = vec![ListItem::new(file_header(state.file_view))];
+        rows.extend(visible.map(|(idx, file)| {
+            let marker = if idx == state.file_offset { "> " } else { "  " };
+            ListItem::new(file_row(marker, file, state.file_view))
+        }));
+        rows
     };
     frame.render_widget(
         List::new(items).block(
@@ -290,6 +338,70 @@ fn render_files(
         ),
         area,
     );
+}
+
+fn file_header(view: FileView) -> String {
+    match view {
+        FileView::Basic => format!("{:<2} {:<26} {:>9} {:<8}", "", "PATH", "SIZE", "STATE"),
+        FileView::Meta => format!("{:<2} {:<20} {:>9} {:<18}", "", "PATH", "SIZE", "MODIFIED"),
+        FileView::Hash => format!("{:<2} {:<28} {:<18}", "", "PATH", "CONTENT"),
+        FileView::All => format!(
+            "{:<2} {:<16} {:>8} {:<6} {:<8} {:<10}",
+            "", "PATH", "SIZE", "STATE", "HASH", "MODIFIED"
+        ),
+    }
+}
+
+fn file_row(marker: &str, file: &db::FileRow, view: FileView) -> String {
+    let hash = file.content_id.as_deref().map(short_id).unwrap_or("stat");
+    let modified = file.modified_at.as_deref().unwrap_or("-");
+    match view {
+        FileView::Basic => format!(
+            "{:<2} {:<26} {:>9} {:<8}",
+            marker,
+            truncate(&file.relative_path, 26),
+            human_size(file.size_bytes as u64),
+            truncate(&file.status, 8)
+        ),
+        FileView::Meta => format!(
+            "{:<2} {:<20} {:>9} {:<18}",
+            marker,
+            truncate(&file.relative_path, 20),
+            human_size(file.size_bytes as u64),
+            truncate(modified, 18)
+        ),
+        FileView::Hash => format!(
+            "{:<2} {:<28} {:<18}",
+            marker,
+            truncate(&file.relative_path, 28),
+            truncate(hash, 18)
+        ),
+        FileView::All => format!(
+            "{:<2} {:<16} {:>8} {:<6} {:<8} {:<10}",
+            marker,
+            truncate(&file.relative_path, 16),
+            human_size(file.size_bytes as u64),
+            truncate(&file.status, 6),
+            truncate(hash, 8),
+            truncate(modified, 10)
+        ),
+    }
+}
+
+fn truncate(value: &str, width: usize) -> String {
+    if value.chars().count() <= width {
+        value.to_string()
+    } else if width <= 1 {
+        "~".to_string()
+    } else {
+        let mut out = value.chars().take(width - 1).collect::<String>();
+        out.push('~');
+        out
+    }
+}
+
+fn short_id(value: &str) -> &str {
+    value.get(..value.len().min(18)).unwrap_or(value)
 }
 
 fn human_size(bytes: u64) -> String {
@@ -319,6 +431,12 @@ mod tests {
         assert_eq!(human_size(999), "999 B");
         assert_eq!(human_size(1024), "1.00 KiB");
         assert_eq!(human_size(12 * 1024), "12.0 KiB");
+    }
+
+    #[test]
+    fn truncates_long_values() {
+        assert_eq!(truncate("abcdef", 4), "abc~");
+        assert_eq!(truncate("abc", 4), "abc");
     }
 }
 
