@@ -95,6 +95,11 @@ async fn main() -> anyhow::Result<()> {
             let conn = db::open_existing(&db)?;
             import::import_events_file(&conn, &input)?;
         }
+        Some(Commands::ImportManifest { input }) => {
+            let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
+            let conn = db::open_existing(&db)?;
+            import::import_manifest_file(&conn, &input)?;
+        }
         Some(Commands::Events) => {
             let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
             let conn = db::open_existing(&db)?;

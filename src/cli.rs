@@ -54,6 +54,9 @@ pub enum Commands {
     ImportEvents {
         input: PathBuf,
     },
+    ImportManifest {
+        input: PathBuf,
+    },
     Events,
     Files,
     Jobs,
