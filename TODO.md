@@ -48,7 +48,7 @@
 
 ## Transfer Planning
 
-- Add TUI controls to choose a destination root and create/display a transfer plan.
+- Improve TUI transfer plan display beyond the latest summary line.
 - Add compare flow between two roots or checksum collections.
 - Add transfer plan job/events around plan creation if the evidence model wants planning history in `job_events`.
 - Add detailed transfer plan inspection command with per-file filtering by action.

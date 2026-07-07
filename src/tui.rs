@@ -20,6 +20,7 @@ use tokio::task;
 
 use crate::db;
 use crate::fswork::{self, OutputOptions};
+use crate::transfer;
 use crate::util::human_size;
 
 #[derive(Debug, Default)]
@@ -30,6 +31,16 @@ struct AppState {
     file_offset: usize,
     event_offset: usize,
     status: String,
+    transfer_source_root_id: Option<String>,
+    last_plan: Option<PlanSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+struct PlanSnapshot {
+    plan_id: String,
+    source_name: String,
+    dest_name: String,
+    summary: Vec<db::TransferPlanActionSummary>,
 }
 
 struct InfoBarData<'a> {
@@ -38,6 +49,15 @@ struct InfoBarData<'a> {
     selection: Option<&'a db::SelectionSummary>,
     event: Option<&'a db::JobEventRow>,
     root_count: usize,
+}
+
+struct DetailData<'a> {
+    root: Option<&'a db::RootRow>,
+    summary: Option<&'a db::RootSummary>,
+    selection: Option<&'a db::SelectionSummary>,
+    file: Option<&'a db::FileRow>,
+    selected_paths: &'a BTreeSet<String>,
+    plan: Option<&'a PlanSnapshot>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -160,7 +180,7 @@ async fn run_loop(
                 .constraints([
                     Constraint::Length(3),
                     Constraint::Min(5),
-                    Constraint::Length(9),
+                    Constraint::Length(11),
                     Constraint::Length(3),
                     Constraint::Length(5),
                 ])
@@ -176,11 +196,14 @@ async fn run_loop(
             render_detail_panel(
                 frame,
                 vertical[2],
-                selected,
-                summary.as_ref(),
-                selection_summary.as_ref(),
-                files.get(state.file_offset),
-                &selected_paths,
+                DetailData {
+                    root: selected,
+                    summary: summary.as_ref(),
+                    selection: selection_summary.as_ref(),
+                    file: files.get(state.file_offset),
+                    selected_paths: &selected_paths,
+                    plan: state.last_plan.as_ref(),
+                },
             );
             render_info_bar(
                 frame,
@@ -233,6 +256,15 @@ async fn run_loop(
                     KeyCode::Char('c') => {
                         request_selected_cancel(conn, events.get(state.event_offset), &mut state)?;
                     }
+                    KeyCode::Char('t') => {
+                        start_transfer_plan_selection(roots.get(state.selected_root), &mut state);
+                    }
+                    KeyCode::Enter => {
+                        create_transfer_plan_from_selection(conn, &roots, &mut state)?;
+                    }
+                    KeyCode::Esc => {
+                        cancel_transfer_plan_selection(&mut state);
+                    }
                     KeyCode::Char(' ') => {
                         toggle_selected_file_mark(
                             conn,
@@ -252,7 +284,9 @@ async fn run_loop(
 fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect) {
     let header = Paragraph::new(Line::from(vec![
         Span::styled("Gremlin", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw("  q quit | Tab focus | arrows | Space mark | s scan | h hash | c cancel"),
+        Span::raw(
+            "  q quit | Tab | arrows | Space mark | s scan | h hash | c cancel | t plan | Enter",
+        ),
     ]))
     .block(Block::default().borders(Borders::ALL));
     frame.render_widget(header, area);
@@ -276,7 +310,12 @@ fn render_roots(
             } else {
                 "  "
             };
-            ListItem::new(root_row(marker, root))
+            let transfer_marker = if state.transfer_source_root_id.as_deref() == Some(&root.id) {
+                "S"
+            } else {
+                " "
+            };
+            ListItem::new(root_row(marker, transfer_marker, root))
         }));
         rows
     };
@@ -291,13 +330,17 @@ fn render_roots(
 }
 
 fn root_header() -> String {
-    format!("{:<2} {:<8} {:>5} {:<6}", "", "ROOT", "SIZE", "JOB")
+    format!(
+        "{:<2} {:<1} {:<8} {:>5} {:<6}",
+        "", "T", "ROOT", "SIZE", "JOB"
+    )
 }
 
-fn root_row(marker: &str, root: &db::RootRow) -> String {
+fn root_row(marker: &str, transfer_marker: &str, root: &db::RootRow) -> String {
     format!(
-        "{:<2} {:<8} {:>5} {:<6}",
+        "{:<2} {:<1} {:<8} {:>5} {:<6}",
         marker,
+        transfer_marker,
         truncate(&root_display_name(root), 8),
         human_size(root.current_size_bytes as u64),
         truncate(&root_job_label(root), 6)
@@ -369,16 +412,8 @@ fn root_display_name(root: &db::RootRow) -> String {
         .to_string()
 }
 
-fn render_detail_panel(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    selected: Option<&db::RootRow>,
-    summary: Option<&db::RootSummary>,
-    selection: Option<&db::SelectionSummary>,
-    selected_file: Option<&db::FileRow>,
-    selected_paths: &BTreeSet<String>,
-) {
-    let root_lines = match (selected, summary) {
+fn render_detail_panel(frame: &mut ratatui::Frame<'_>, area: Rect, data: DetailData<'_>) {
+    let root_lines = match (data.root, data.summary) {
         (Some(root), Some(summary)) => format!(
             "Root: {}\nPath: {}\nFiles: {} | Hashed: {} | Current: {} | Marked: {} ({})\nMachine: {} | Set: {}",
             root_display_name(root),
@@ -386,23 +421,23 @@ fn render_detail_panel(
             summary.file_count,
             summary.content_count,
             human_size(root.current_size_bytes as u64),
-            selection.map(|value| value.marked_count).unwrap_or(0),
-            human_size(selection.map(|value| value.marked_bytes).unwrap_or(0) as u64),
+            data.selection.map(|value| value.marked_count).unwrap_or(0),
+            human_size(data.selection.map(|value| value.marked_bytes).unwrap_or(0) as u64),
             short_id(&root.machine_id),
-            selection
+            data.selection
                 .map(|value| short_id(&value.set_id))
                 .unwrap_or("-")
         ),
         _ => "Root: -\nPath: -\nMachine: - | Files: - | Hashed: - | Current size: -".to_string(),
     };
-    let file_lines = if let Some(file) = selected_file {
+    let file_lines = if let Some(file) = data.file {
         format!(
             "File: {}\nSize: {} ({} bytes) | Status: {} | Marked: {}\nModified: {} | Content: {} | Metadata: not extracted yet",
             file.relative_path,
             human_size(file.size_bytes as u64),
             file.size_bytes,
             file.status,
-            if selected_paths.contains(&file.relative_path) {
+            if data.selected_paths.contains(&file.relative_path) {
                 "yes"
             } else {
                 "no"
@@ -414,7 +449,19 @@ fn render_detail_panel(
         "File: -\nSize: - | Status: - | Modified: -\nContent: - | Metadata: not extracted yet"
             .to_string()
     };
-    let text = format!("{root_lines}\n{file_lines}");
+    let plan_lines = if let Some(plan) = data.plan {
+        format!(
+            "Plan: {} | {} -> {}\n{}",
+            short_id(&plan.plan_id),
+            truncate(&plan.source_name, 18),
+            truncate(&plan.dest_name, 18),
+            plan_summary_line(&plan.summary)
+        )
+    } else {
+        "Plan: -\nPress t on a source root, choose a destination root, Enter plans marked files"
+            .to_string()
+    };
+    let text = format!("{root_lines}\n{file_lines}\n{plan_lines}");
     frame.render_widget(
         Paragraph::new(text).block(Block::default().title("Details").borders(Borders::ALL)),
         area,
@@ -557,6 +604,24 @@ fn short_id(value: &str) -> &str {
     value.get(..value.len().min(18)).unwrap_or(value)
 }
 
+fn plan_summary_line(summary: &[db::TransferPlanActionSummary]) -> String {
+    if summary.is_empty() {
+        return "No plan entries".to_string();
+    }
+    summary
+        .iter()
+        .map(|row| {
+            format!(
+                "{} {} {}",
+                row.action,
+                row.files,
+                human_size(row.bytes as u64)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,6 +645,16 @@ mod tests {
             latest_job_phase: None,
         };
         assert_eq!(root_display_name(&root), "photos");
+    }
+
+    #[test]
+    fn formats_plan_summary_line() {
+        let summary = vec![db::TransferPlanActionSummary {
+            action: "copy".to_string(),
+            files: 2,
+            bytes: 2048,
+        }];
+        assert_eq!(plan_summary_line(&summary), "copy 2 2.00 KiB");
     }
 }
 
@@ -785,6 +860,61 @@ fn toggle_selected_file_mark(
     } else {
         format!("unmarked {}", file.relative_path)
     };
+    Ok(())
+}
+
+fn start_transfer_plan_selection(root: Option<&db::RootRow>, state: &mut AppState) {
+    let Some(root) = root else {
+        state.status = "No source root selected".to_string();
+        return;
+    };
+    state.transfer_source_root_id = Some(root.id.clone());
+    state.focus = FocusPane::Roots;
+    state.status = format!(
+        "transfer source: {}; choose destination root and press Enter",
+        root_display_name(root)
+    );
+}
+
+fn cancel_transfer_plan_selection(state: &mut AppState) {
+    if state.transfer_source_root_id.take().is_some() {
+        state.status = "transfer planning canceled".to_string();
+    }
+}
+
+fn create_transfer_plan_from_selection(
+    conn: &Connection,
+    roots: &[db::RootRow],
+    state: &mut AppState,
+) -> anyhow::Result<()> {
+    let Some(source_root_id) = state.transfer_source_root_id.clone() else {
+        return Ok(());
+    };
+    let Some(source) = roots.iter().find(|root| root.id == source_root_id) else {
+        state.transfer_source_root_id = None;
+        state.status = "transfer source root is no longer visible".to_string();
+        return Ok(());
+    };
+    let Some(dest) = roots.get(state.selected_root) else {
+        state.status = "No destination root selected".to_string();
+        return Ok(());
+    };
+    match transfer::plan_selected_files(conn, source, dest) {
+        Ok(result) => {
+            let summary = result.summary.clone();
+            state.last_plan = Some(PlanSnapshot {
+                plan_id: result.plan_id.clone(),
+                source_name: root_display_name(source),
+                dest_name: root_display_name(dest),
+                summary,
+            });
+            state.transfer_source_root_id = None;
+            state.status = format!("planned transfer {}", result.plan_id);
+        }
+        Err(err) => {
+            state.status = format!("transfer plan failed: {err}");
+        }
+    }
     Ok(())
 }
 
