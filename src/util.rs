@@ -59,6 +59,23 @@ pub fn parent_path(relative_path: &str) -> String {
         .unwrap_or_else(|| ".".to_string())
 }
 
+pub fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else if value >= 10.0 {
+        format!("{value:.1} {}", UNITS[unit])
+    } else {
+        format!("{value:.2} {}", UNITS[unit])
+    }
+}
+
 pub fn local_machine_id() -> String {
     let host = std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
@@ -84,5 +101,13 @@ mod tests {
         let file = Path::new("/tmp/root/a/b.txt");
         assert_eq!(relative_path(root, file).unwrap(), "a/b.txt");
         assert_eq!(parent_path("a/b.txt"), "a");
+    }
+
+    #[test]
+    fn formats_human_sizes() {
+        assert_eq!(human_size(0), "0 B");
+        assert_eq!(human_size(999), "999 B");
+        assert_eq!(human_size(1024), "1.00 KiB");
+        assert_eq!(human_size(12 * 1024), "12.0 KiB");
     }
 }

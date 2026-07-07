@@ -6,12 +6,15 @@ mod events;
 mod fswork;
 mod import;
 mod targets;
+mod transfer;
 mod tui;
 mod util;
 
 use anyhow::Context;
 use clap::Parser;
-use cli::{Cli, Commands, ConfigCommands, JobCommands, TargetCommands, WorkerCommands};
+use cli::{
+    Cli, Commands, ConfigCommands, JobCommands, TargetCommands, TransferCommands, WorkerCommands,
+};
 use targets::{ParsedTarget, TargetKind};
 
 #[tokio::main]
@@ -252,6 +255,23 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         },
+        Some(Commands::Transfer { command }) => match command {
+            TransferCommands::Plan {
+                source,
+                dest,
+                source_kind,
+                dest_kind,
+            } => {
+                let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
+                let conn = db::open_existing(&db)?;
+                let source_root =
+                    resolve_registered_root(&conn, &source, source_kind, machine_label.as_deref())?;
+                let dest_root =
+                    resolve_registered_root(&conn, &dest, dest_kind, machine_label.as_deref())?;
+                let result = transfer::plan_selected_files(&conn, &source_root, &dest_root)?;
+                print_transfer_plan(&conn, &source_root, &dest_root, result, output)?;
+            }
+        },
         Some(Commands::Status { target, kind }) => {
             let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
             let conn = db::open_existing(&db)?;
@@ -278,6 +298,22 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn resolve_registered_root(
+    conn: &rusqlite::Connection,
+    target: &str,
+    kind: Option<TargetKind>,
+    machine_label: Option<&str>,
+) -> anyhow::Result<db::RootRow> {
+    let parsed = targets::parse_target(target, kind)?;
+    let (machine_id, root_path) = resolve_target_identity(conn, &parsed, machine_label)?;
+    db::find_root_by_machine_path(conn, &machine_id, &root_path)?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "target is not a known root yet: {target}. Run `gremlin target add {target}` or scan it first"
+            )
+        })
 }
 
 fn run_default_target(
@@ -380,4 +416,49 @@ fn print_target_status(parsed: &ParsedTarget, status: db::TargetStatus) {
     } else {
         println!("latest_job:\t-");
     }
+}
+
+fn print_transfer_plan(
+    conn: &rusqlite::Connection,
+    source: &db::RootRow,
+    dest: &db::RootRow,
+    result: transfer::TransferPlanResult,
+    output: fswork::OutputOptions,
+) -> anyhow::Result<()> {
+    println!("transfer_plan:\t{}", result.plan_id);
+    println!("source_root:\t{}\t{}", source.id, source.path);
+    println!("dest_root:\t{}\t{}", dest.id, dest.path);
+    println!("selection_set:\t{}", result.selection_set_id);
+    println!(
+        "marked:\t{}\t{}",
+        result.marked_count,
+        util::human_size(result.marked_bytes as u64)
+    );
+    for row in result.summary {
+        println!(
+            "{}:\t{}\t{}",
+            row.action,
+            row.files,
+            util::human_size(row.bytes as u64)
+        );
+    }
+    if output.details {
+        for entry in db::transfer_plan_entries(conn, &result.plan_id)?
+            .into_iter()
+            .take(output.limit)
+        {
+            println!(
+                "entry:\t{}\t{}\t{}\t{}\tsource={}\tdest={}\tmetadata={}",
+                entry.action,
+                util::human_size(entry.size_bytes),
+                entry.reason,
+                entry.relative_path,
+                entry.source_content_id.unwrap_or_else(|| "-".to_string()),
+                entry.dest_content_id.unwrap_or_else(|| "-".to_string()),
+                entry.metadata_json
+            );
+        }
+    }
+    println!("note:\tplanning only; no files were copied");
+    Ok(())
 }

@@ -48,10 +48,10 @@
 
 ## Transfer Planning
 
-- Build transfer planning from persisted TUI selection sets.
+- Add TUI controls to choose a destination root and create/display a transfer plan.
 - Add compare flow between two roots or checksum collections.
-- Add transfer plan tables/events without executing transfers.
-- Add dry-run transfer summaries.
+- Add transfer plan job/events around plan creation if the evidence model wants planning history in `job_events`.
+- Add detailed transfer plan inspection command with per-file filtering by action.
 - Keep transfer execution separate from planning until integrity and resume semantics are solid.
 - Model copy chunks or per-file transfer checkpoints before implementing actual transfer execution.
 - Verify destination hashes after copy and make resume skip already verified files.

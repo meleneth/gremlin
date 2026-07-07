@@ -40,6 +40,7 @@ gremlin job run JOB_ID --db ./gremlin.db
 gremlin target inspect TARGET
 gremlin target add TARGET --db ./gremlin.db
 gremlin status TARGET --db ./gremlin.db
+gremlin transfer plan SOURCE DEST --db ./gremlin.db
 gremlin tui --db ./gremlin.db
 ```
 
@@ -98,6 +99,8 @@ Roots maintain `current_size_bytes`, the projected total size of currently index
 
 In the TUI, Space marks/unmarks the selected file in a persisted default selection set for the current root. These marks are intended to feed transfer planning.
 
+`transfer plan SOURCE DEST` reads the source root's default TUI selection set, compares those marked paths against the destination root's current indexed observations, stores a durable transfer plan, and prints a dry-run summary. It never copies or overwrites files. Initial actions are `copy`, `skip`, `verify_needed`, `conflict`, and `unavailable`.
+
 `target inspect` classifies obvious target forms without touching the database:
 
 ```bash
@@ -118,7 +121,7 @@ Future seams deliberately left open:
 - SSH remote dispatch: run `gremlin worker hash ... --jsonl --out ...` remotely, then copy JSONL back for import.
 - Manifest imports: add SFV/CFV checksum manifests and PAR2 file-list extraction as checksum collection sources.
 - SMB path mapping: add machine/root mapping without changing content identity.
-- Transfer planning: compare projected observations and checksum collections before adding transfer jobs.
+- Transfer planning: persisted dry-run root-to-root plans exist for TUI selections; next slices should add TUI destination selection, checksum collection comparisons, and transfer jobs.
 - Seamless resume: make interrupted remote browsing, hashing, importing, and future copy jobs restart from durable job/event state instead of requiring manual cleanup.
 - Metadata extractors: add new job kinds and events rather than expanding scan/hash responsibilities.
 - Richer TUI job control: the TUI can start local jobs now; future slices should add progress, cancellation states, filtering, and async remote supervision without putting scan/hash/copy logic in TUI code.
@@ -127,4 +130,4 @@ Future seams deliberately left open:
 
 - Path storage uses UTF-8 lossy display strings; raw non-UTF-8 Unix path support should be added later.
 - Import preserves evidence and checksum entries but does not perform full reconciliation.
-- No deletion, transfer, daemon, remote SSH dispatch, or metadata extraction is implemented.
+- No deletion, transfer execution, daemon, remote SSH dispatch, or metadata extraction is implemented.

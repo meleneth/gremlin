@@ -43,6 +43,36 @@ pub struct SelectionSummary {
 }
 
 #[derive(Debug, Clone)]
+pub struct TransferPlanEntryInput<'a> {
+    pub plan_id: &'a str,
+    pub relative_path: &'a str,
+    pub size_bytes: u64,
+    pub source_content_id: Option<&'a str>,
+    pub dest_content_id: Option<&'a str>,
+    pub action: &'a str,
+    pub reason: &'a str,
+    pub metadata_json: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct TransferPlanEntryRow {
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub source_content_id: Option<String>,
+    pub dest_content_id: Option<String>,
+    pub action: String,
+    pub reason: String,
+    pub metadata_json: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct TransferPlanActionSummary {
+    pub action: String,
+    pub files: i64,
+    pub bytes: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct PathObservationRow {
     pub relative_path: String,
     pub size_bytes: u64,
@@ -294,6 +324,29 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             relative_path TEXT NOT NULL,
             created_at TEXT NOT NULL,
             UNIQUE(selection_set_id, relative_path)
+        );
+
+        CREATE TABLE IF NOT EXISTS transfer_plans (
+            id TEXT PRIMARY KEY,
+            source_root_id TEXT NOT NULL REFERENCES roots(id),
+            dest_root_id TEXT NOT NULL REFERENCES roots(id),
+            selection_set_id TEXT REFERENCES selection_sets(id),
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            params_json TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS transfer_plan_entries (
+            id TEXT PRIMARY KEY,
+            plan_id TEXT NOT NULL REFERENCES transfer_plans(id),
+            relative_path TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            source_content_id TEXT,
+            dest_content_id TEXT,
+            action TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            metadata_json TEXT,
+            UNIQUE(plan_id, relative_path)
         );
         "#,
     )?;
@@ -811,6 +864,31 @@ pub fn selected_paths_for_root(
     rows.collect()
 }
 
+pub fn path_observation_for_root_path(
+    conn: &Connection,
+    root_id: &str,
+    relative_path: &str,
+) -> rusqlite::Result<Option<PathObservationRow>> {
+    conn.query_row(
+        r#"
+        SELECT relative_path, size_bytes, modified_at, content_id
+        FROM path_observations
+        WHERE root_id = ?1 AND relative_path = ?2
+        "#,
+        params![root_id, relative_path],
+        |row| {
+            let size: i64 = row.get(1)?;
+            Ok(PathObservationRow {
+                relative_path: row.get(0)?,
+                size_bytes: size as u64,
+                modified_at: row.get(2)?,
+                content_id: row.get(3)?,
+            })
+        },
+    )
+    .optional()
+}
+
 pub fn selection_summary_for_root(
     conn: &Connection,
     root_id: &str,
@@ -832,6 +910,116 @@ pub fn selection_summary_for_root(
         marked_count,
         marked_bytes,
     })
+}
+
+pub fn create_transfer_plan(
+    conn: &Connection,
+    source_root_id: &str,
+    dest_root_id: &str,
+    selection_set_id: Option<&str>,
+    params_json: Value,
+) -> rusqlite::Result<String> {
+    let id = new_id("plan");
+    conn.execute(
+        r#"
+        INSERT INTO transfer_plans
+            (id, source_root_id, dest_root_id, selection_set_id, status, created_at, params_json)
+        VALUES (?1, ?2, ?3, ?4, 'planned', ?5, ?6)
+        "#,
+        params![
+            id,
+            source_root_id,
+            dest_root_id,
+            selection_set_id,
+            now_rfc3339(),
+            serde_json::to_string(&params_json).unwrap_or_else(|_| "{}".to_string())
+        ],
+    )?;
+    Ok(id)
+}
+
+pub fn insert_transfer_plan_entry(
+    conn: &Connection,
+    input: TransferPlanEntryInput<'_>,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        r#"
+        INSERT INTO transfer_plan_entries
+            (id, plan_id, relative_path, size_bytes, source_content_id, dest_content_id,
+             action, reason, metadata_json)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        ON CONFLICT(plan_id, relative_path) DO UPDATE SET
+            size_bytes = excluded.size_bytes,
+            source_content_id = excluded.source_content_id,
+            dest_content_id = excluded.dest_content_id,
+            action = excluded.action,
+            reason = excluded.reason,
+            metadata_json = excluded.metadata_json
+        "#,
+        params![
+            new_id("planentry"),
+            input.plan_id,
+            input.relative_path,
+            input.size_bytes as i64,
+            input.source_content_id,
+            input.dest_content_id,
+            input.action,
+            input.reason,
+            serde_json::to_string(&input.metadata_json).unwrap_or_else(|_| "{}".to_string())
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn transfer_plan_entries(
+    conn: &Connection,
+    plan_id: &str,
+) -> rusqlite::Result<Vec<TransferPlanEntryRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT relative_path, size_bytes, source_content_id, dest_content_id,
+               action, reason, metadata_json
+        FROM transfer_plan_entries
+        WHERE plan_id = ?1
+        ORDER BY relative_path ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(params![plan_id], |row| {
+        let size: i64 = row.get(1)?;
+        Ok(TransferPlanEntryRow {
+            relative_path: row.get(0)?,
+            size_bytes: size as u64,
+            source_content_id: row.get(2)?,
+            dest_content_id: row.get(3)?,
+            action: row.get(4)?,
+            reason: row.get(5)?,
+            metadata_json: row.get(6)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn transfer_plan_action_summary(
+    conn: &Connection,
+    plan_id: &str,
+) -> rusqlite::Result<Vec<TransferPlanActionSummary>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT action, COUNT(*), COALESCE(SUM(size_bytes), 0)
+        FROM transfer_plan_entries
+        WHERE plan_id = ?1
+        GROUP BY action
+        ORDER BY action ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(params![plan_id], |row| {
+        Ok(TransferPlanActionSummary {
+            action: row.get(0)?,
+            files: row.get(1)?,
+            bytes: row.get(2)?,
+        })
+    })?;
+    rows.collect()
 }
 
 pub fn ensure_import_job(conn: &Connection, source: &str) -> rusqlite::Result<String> {

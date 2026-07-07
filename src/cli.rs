@@ -72,6 +72,10 @@ pub enum Commands {
         #[command(subcommand)]
         command: TargetCommands,
     },
+    Transfer {
+        #[command(subcommand)]
+        command: TransferCommands,
+    },
     Status {
         target: String,
         #[arg(long, value_enum)]
@@ -123,6 +127,18 @@ pub enum TargetCommands {
         kind: Option<TargetKind>,
         #[arg(long)]
         label: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TransferCommands {
+    Plan {
+        source: String,
+        dest: String,
+        #[arg(long, value_enum)]
+        source_kind: Option<TargetKind>,
+        #[arg(long, value_enum)]
+        dest_kind: Option<TargetKind>,
     },
 }
 
