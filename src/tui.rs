@@ -167,6 +167,7 @@ async fn run_loop(
                 vertical[3],
                 selected,
                 files.get(state.file_offset),
+                events.get(state.event_offset),
                 roots.len(),
                 &state,
             );
@@ -330,6 +331,7 @@ fn render_info_bar(
     area: Rect,
     selected: Option<&db::RootRow>,
     selected_file: Option<&db::FileRow>,
+    selected_event: Option<&db::JobEventRow>,
     root_count: usize,
     state: &AppState,
 ) {
@@ -338,13 +340,17 @@ fn render_info_bar(
     let file = selected_file
         .map(|file| file.relative_path.as_str())
         .unwrap_or("-");
+    let event = selected_event
+        .map(event_summary)
+        .unwrap_or_else(|| "event -".to_string());
     let text = format!(
-        "focus {:?} | roots {} | selector fields {} | root {} | file {} | {}",
+        "focus {:?} | roots {} | fields {} | root {} | file {} | {} | {}",
         state.focus,
         root_count,
         state.file_view.label(),
         truncate(root, 24),
-        truncate(file, 28),
+        truncate(file, 20),
+        truncate(&event, 24),
         state.status
     );
     frame.render_widget(
@@ -498,27 +504,66 @@ fn render_events(
     events: &[db::JobEventRow],
     state: &AppState,
 ) {
-    let visible = events.iter().skip(state.event_offset);
+    let visible = events.iter().enumerate().skip(state.event_offset);
     let items = if events.is_empty() {
         vec![ListItem::new("No jobs or events for this root")]
     } else {
-        visible
-            .map(|row| {
-                ListItem::new(format!(
-                    "{}  {}  {}  {}",
-                    row.created_at, row.job_id, row.status, row.event_kind
-                ))
-            })
-            .collect()
+        let mut rows = vec![ListItem::new(event_header())];
+        rows.extend(visible.map(|(idx, row)| {
+            let marker = if idx == state.event_offset {
+                "> "
+            } else {
+                "  "
+            };
+            ListItem::new(event_row(marker, row))
+        }));
+        rows
     };
     frame.render_widget(
         List::new(items).block(
             Block::default()
-                .title(FocusPane::Events.title("Jobs / Events", state.focus))
+                .title(FocusPane::Events.title("Jobs", state.focus))
                 .borders(Borders::ALL),
         ),
         area,
     );
+}
+
+fn event_header() -> String {
+    format!(
+        "{:<2} {:<18} {:<5} {:<9} {:<14} {:<8}",
+        "", "JOB", "KIND", "STATUS", "EVENT", "TIME"
+    )
+}
+
+fn event_row(marker: &str, row: &db::JobEventRow) -> String {
+    format!(
+        "{:<2} {:<18} {:<5} {:<9} {:<14} {:<8}",
+        marker,
+        short_id(&row.job_id),
+        truncate(&row.job_kind, 5),
+        truncate(&row.status, 9),
+        truncate(&row.event_kind, 14),
+        event_time(&row.created_at)
+    )
+}
+
+fn event_summary(row: &db::JobEventRow) -> String {
+    format!(
+        "{} {} #{} {} {}",
+        row.job_kind,
+        row.status,
+        row.sequence,
+        row.event_kind,
+        truncate(&row.payload_json, 28)
+    )
+}
+
+fn event_time(created_at: &str) -> &str {
+    created_at
+        .get(11..19)
+        .or_else(|| created_at.get(..created_at.len().min(8)))
+        .unwrap_or("-")
 }
 
 fn normalize_selection(state: &mut AppState, root_count: usize) {

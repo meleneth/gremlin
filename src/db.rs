@@ -59,9 +59,12 @@ pub struct EventRow {
 #[derive(Debug, Clone)]
 pub struct JobEventRow {
     pub job_id: String,
+    pub job_kind: String,
     pub status: String,
+    pub sequence: i64,
     pub created_at: String,
     pub event_kind: String,
+    pub payload_json: String,
 }
 
 #[derive(Debug, Clone)]
@@ -812,7 +815,7 @@ pub fn target_status(
 pub fn recent_jobs_and_events(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<JobEventRow>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT j.id, j.status, e.created_at, e.event_kind
+        SELECT j.id, j.kind, j.status, e.sequence, e.created_at, e.event_kind, e.payload_json
         FROM job_events e
         JOIN jobs j ON j.id = e.job_id
         ORDER BY e.created_at DESC, e.sequence DESC
@@ -822,9 +825,12 @@ pub fn recent_jobs_and_events(conn: &Connection, limit: i64) -> rusqlite::Result
     let rows = stmt.query_map(params![limit], |row| {
         Ok(JobEventRow {
             job_id: row.get(0)?,
-            status: row.get(1)?,
-            created_at: row.get(2)?,
-            event_kind: row.get(3)?,
+            job_kind: row.get(1)?,
+            status: row.get(2)?,
+            sequence: row.get(3)?,
+            created_at: row.get(4)?,
+            event_kind: row.get(5)?,
+            payload_json: row.get(6)?,
         })
     })?;
     rows.collect()
@@ -837,7 +843,7 @@ pub fn recent_jobs_and_events_for_root(
 ) -> rusqlite::Result<Vec<JobEventRow>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT j.id, j.status, e.created_at, e.event_kind
+        SELECT j.id, j.kind, j.status, e.sequence, e.created_at, e.event_kind, e.payload_json
         FROM job_events e
         JOIN jobs j ON j.id = e.job_id
         WHERE j.root_id = ?1
@@ -848,9 +854,12 @@ pub fn recent_jobs_and_events_for_root(
     let rows = stmt.query_map(params![root_id, limit], |row| {
         Ok(JobEventRow {
             job_id: row.get(0)?,
-            status: row.get(1)?,
-            created_at: row.get(2)?,
-            event_kind: row.get(3)?,
+            job_kind: row.get(1)?,
+            status: row.get(2)?,
+            sequence: row.get(3)?,
+            created_at: row.get(4)?,
+            event_kind: row.get(5)?,
+            payload_json: row.get(6)?,
         })
     })?;
     rows.collect()
