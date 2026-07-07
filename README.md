@@ -2,6 +2,8 @@
 
 Gremlin is a local-first file database, checksum, audit, and transfer-planning tool. It tracks evidence about files while preserving separate ideas of content identity, filename identity, and location identity.
 
+This project is heavily vibe-coded with Codex using GPT-5.
+
 This first slice is intentionally small: a single Rust CLI crate, a local SQLite database, append-only job events, projected query tables, stat-only scanning, file hashing, JSONL worker/import seams, and a read-only Ratatui TUI.
 
 ## Architecture Rule
