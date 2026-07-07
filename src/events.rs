@@ -27,6 +27,10 @@ pub enum EventKind {
     VerifyStarted,
     VerifyFinding,
     VerifyCompleted,
+    TransferStarted,
+    TransferCompleted,
+    TransferSkipped,
+    TransferFailed,
 }
 
 impl EventKind {
@@ -47,6 +51,10 @@ impl EventKind {
             Self::VerifyStarted => "verify_started",
             Self::VerifyFinding => "verify_finding",
             Self::VerifyCompleted => "verify_completed",
+            Self::TransferStarted => "transfer_started",
+            Self::TransferCompleted => "transfer_completed",
+            Self::TransferSkipped => "transfer_skipped",
+            Self::TransferFailed => "transfer_failed",
         }
     }
 }
@@ -109,6 +117,15 @@ pub enum EventPayload {
         expected_sha256: Option<String>,
         actual_blake3: Option<String>,
         actual_sha256: Option<String>,
+        error: Option<String>,
+    },
+    TransferFile {
+        relative_path: String,
+        source_path: String,
+        dest_path: String,
+        size_bytes: u64,
+        action: String,
+        message: Option<String>,
         error: Option<String>,
     },
 }

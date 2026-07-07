@@ -146,6 +146,9 @@ pub enum TransferCommands {
         #[arg(long)]
         action: Option<String>,
     },
+    Run {
+        plan_id: String,
+    },
 }
 
 impl JobKind {

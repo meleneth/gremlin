@@ -43,6 +43,7 @@ gremlin status TARGET --db ./gremlin.db
 gremlin transfer plan SOURCE DEST --db ./gremlin.db
 gremlin transfer list --db ./gremlin.db
 gremlin transfer show PLAN_ID --db ./gremlin.db
+gremlin transfer run PLAN_ID --db ./gremlin.db
 gremlin tui --db ./gremlin.db
 ```
 
@@ -105,6 +106,8 @@ In the TUI, Space marks/unmarks the selected file in a persisted default selecti
 
 `transfer list` shows recent dry-run plans. `transfer show PLAN_ID` prints the plan summary and capped file entries; use `--action copy`, `--action conflict`, or another action name to filter entries.
 
+`transfer run PLAN_ID` is the first conservative local copy runner. It only executes plan entries whose action is `copy`, creates parent directories, refuses overwrites, records a `transfer_copy` job with per-file events, and updates destination path observations after successful copies. It does not yet verify destination hashes after copy.
+
 `target inspect` classifies obvious target forms without touching the database:
 
 ```bash
@@ -125,7 +128,7 @@ Future seams deliberately left open:
 - SSH remote dispatch: run `gremlin worker hash ... --jsonl --out ...` remotely, then copy JSONL back for import.
 - Manifest imports: add SFV/CFV checksum manifests and PAR2 file-list extraction as checksum collection sources.
 - SMB path mapping: add machine/root mapping without changing content identity.
-- Transfer planning: persisted dry-run root-to-root plans, job events, and CLI inspection exist for TUI selections; next slices should add richer TUI plan browsing, checksum collection comparisons, and transfer jobs.
+- Transfer planning/copying: persisted dry-run root-to-root plans, job events, CLI inspection, and conservative local copy execution exist for TUI selections; next slices should add richer TUI plan browsing, checksum collection comparisons, post-copy hash verification, and resumable copy checkpoints.
 - Seamless resume: make interrupted remote browsing, hashing, importing, and future copy jobs restart from durable job/event state instead of requiring manual cleanup.
 - Metadata extractors: add new job kinds and events rather than expanding scan/hash responsibilities.
 - Richer TUI job control: the TUI can start local jobs now; future slices should add progress, cancellation states, filtering, and async remote supervision without putting scan/hash/copy logic in TUI code.
@@ -134,4 +137,4 @@ Future seams deliberately left open:
 
 - Path storage uses UTF-8 lossy display strings; raw non-UTF-8 Unix path support should be added later.
 - Import preserves evidence and checksum entries but does not perform full reconciliation.
-- No deletion, transfer execution, daemon, remote SSH dispatch, or metadata extraction is implemented.
+- No deletion, daemon, remote SSH dispatch, or metadata extraction is implemented. Transfer execution is local-only and intentionally conservative.

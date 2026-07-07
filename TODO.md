@@ -51,9 +51,9 @@
 - Improve TUI transfer plan display beyond the latest summary line.
 - Add compare flow between two roots or checksum collections.
 - Add more transfer plan filters and output formats after the copy runner requirements settle.
-- Keep transfer execution separate from planning until integrity and resume semantics are solid.
-- Model copy chunks or per-file transfer checkpoints before implementing actual transfer execution.
+- Model copy chunks or per-file transfer checkpoints beyond the current whole-file copy runner.
 - Verify destination hashes after copy and make resume skip already verified files.
+- Add TUI controls to run a transfer plan and inspect copy progress.
 
 ## Metadata Extractors
 

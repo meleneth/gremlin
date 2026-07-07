@@ -963,6 +963,18 @@ pub fn create_transfer_plan(
     Ok(id)
 }
 
+pub fn update_transfer_plan_status(
+    conn: &Connection,
+    plan_id: &str,
+    status: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE transfer_plans SET status = ?2 WHERE id = ?1",
+        params![plan_id, status],
+    )?;
+    Ok(())
+}
+
 pub fn insert_transfer_plan_entry(
     conn: &Connection,
     input: TransferPlanEntryInput<'_>,
@@ -1388,6 +1400,56 @@ pub fn find_root_by_machine_path(
         WHERE r.machine_id = ?1 AND r.path = ?2
         "#,
         params![machine_id, path],
+        |row| {
+            Ok(RootRow {
+                id: row.get(0)?,
+                machine_id: row.get(1)?,
+                path: row.get(2)?,
+                label: row.get(3)?,
+                current_size_bytes: row.get(4)?,
+                latest_job_kind: row.get(5)?,
+                latest_job_status: row.get(6)?,
+                latest_job_phase: row.get(7)?,
+            })
+        },
+    )
+    .optional()
+}
+
+pub fn root_by_id(conn: &Connection, root_id: &str) -> rusqlite::Result<Option<RootRow>> {
+    conn.query_row(
+        r#"
+        SELECT
+            r.id,
+            r.machine_id,
+            r.path,
+            r.label,
+            r.current_size_bytes,
+            (
+                SELECT j.kind
+                FROM jobs j
+                WHERE j.root_id = r.id
+                ORDER BY j.created_at DESC
+                LIMIT 1
+            ) AS latest_job_kind,
+            (
+                SELECT j.status
+                FROM jobs j
+                WHERE j.root_id = r.id
+                ORDER BY j.created_at DESC
+                LIMIT 1
+            ) AS latest_job_status,
+            (
+                SELECT j.phase
+                FROM jobs j
+                WHERE j.root_id = r.id
+                ORDER BY j.created_at DESC
+                LIMIT 1
+            ) AS latest_job_phase
+        FROM roots r
+        WHERE r.id = ?1
+        "#,
+        params![root_id],
         |row| {
             Ok(RootRow {
                 id: row.get(0)?,
