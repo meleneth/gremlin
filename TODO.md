@@ -35,6 +35,7 @@
 
 ## Remote And Imports
 
+- Build remote dispatch and progress streaming on Tokio rather than adding a separate sync orchestration path.
 - Implement SSH dispatch for `worker hash --jsonl`.
 - Add remote job metadata so imported events can be tied back to remote machines/roots cleanly.
 - Add SMB path mapping and target normalization.

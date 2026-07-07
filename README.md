@@ -4,11 +4,11 @@ Gremlin is a local-first file database, checksum, audit, and transfer-planning t
 
 This project is heavily vibe-coded with Codex using GPT-5.
 
-This first slice is intentionally small: a single Rust CLI crate, a local SQLite database, append-only job events, projected query tables, stat-only scanning, file hashing, JSONL worker/import seams, and a read-only Ratatui TUI.
+This first slice is intentionally small: a single Rust CLI crate, a Tokio runtime baseline, a local SQLite database, append-only job events, projected query tables, stat-only scanning, file hashing, JSONL worker/import seams, and a Ratatui TUI.
 
 ## Architecture Rule
 
-The TUI never performs file work directly. File work is represented as commands and jobs. Jobs emit events. Events are persisted as durable history. The database projects current query state from those events and command results.
+The TUI may drive jobs, but it must not contain scan/hash/copy logic directly. File work is represented as commands and jobs. Jobs emit events. Events are persisted as durable history. The database projects current query state from those events and command results.
 
 ## Commands
 
@@ -115,7 +115,7 @@ Future seams deliberately left open:
 - Transfer planning: compare projected observations and checksum collections before adding transfer jobs.
 - Seamless resume: make interrupted remote browsing, hashing, importing, and future copy jobs restart from durable job/event state instead of requiring manual cleanup.
 - Metadata extractors: add new job kinds and events rather than expanding scan/hash responsibilities.
-- Richer TUI job control: the TUI can enqueue jobs now; future slices should add job execution, cancellation states, and filtering without making the TUI scan or hash files directly.
+- Richer TUI job control: the TUI can start local jobs now; future slices should add progress, cancellation states, filtering, and async remote supervision without putting scan/hash/copy logic in TUI code.
 
 ## Known v0 Limits
 

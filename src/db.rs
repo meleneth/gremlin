@@ -294,7 +294,7 @@ pub fn ensure_root(conn: &Connection, machine_id: &str, path: &str) -> rusqlite:
     let id = new_id("root");
     conn.execute(
         "INSERT INTO roots (id, machine_id, path, label, created_at, current_size_bytes) VALUES (?1, ?2, ?3, ?4, ?5, 0)",
-        params![id, machine_id, path, path, now_rfc3339()],
+        params![id, machine_id, path, Option::<&str>::None, now_rfc3339()],
     )?;
     Ok(id)
 }

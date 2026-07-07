@@ -14,13 +14,15 @@ use clap::Parser;
 use cli::{Cli, Commands, ConfigCommands, JobCommands, TargetCommands, WorkerCommands};
 use targets::{ParsedTarget, TargetKind};
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config_ctx = config::load(cli.config.clone(), cli.no_config)?;
     let machine_label = config_ctx.machine_label(cli.machine_label.clone());
     let output = fswork::OutputOptions {
         details: cli.details,
         limit: cli.limit,
+        quiet: false,
     };
 
     match cli.command {
@@ -29,7 +31,7 @@ fn main() -> anyhow::Result<()> {
                 let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
                 let conn = db::open_or_create(&db)?;
                 db::init_schema(&conn)?;
-                tui::run_with_options(&conn, machine_label)?;
+                tui::run_with_options(&conn, &db, machine_label).await?;
                 return Ok(());
             };
             run_default_target(
@@ -250,7 +252,7 @@ fn main() -> anyhow::Result<()> {
         Some(Commands::Tui) => {
             let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
             let conn = db::open_existing(&db)?;
-            tui::run_with_options(&conn, machine_label)?;
+            tui::run_with_options(&conn, &db, machine_label).await?;
         }
     }
 

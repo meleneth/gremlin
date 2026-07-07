@@ -19,6 +19,7 @@ use crate::util::{
 pub struct OutputOptions {
     pub details: bool,
     pub limit: usize,
+    pub quiet: bool,
 }
 
 impl Default for OutputOptions {
@@ -26,6 +27,7 @@ impl Default for OutputOptions {
         Self {
             details: false,
             limit: 20,
+            quiet: false,
         }
     }
 }
@@ -1184,6 +1186,9 @@ fn write_jsonl_event(
 }
 
 fn print_scan_summary(summary: &ScanSummary, options: OutputOptions) {
+    if options.quiet {
+        return;
+    }
     println!(
         "scan job {}: {} files, {} new, {} changed, {} missing, {} errors",
         summary.job_id,
@@ -1197,6 +1202,9 @@ fn print_scan_summary(summary: &ScanSummary, options: OutputOptions) {
 }
 
 fn print_hash_summary(summary: &HashSummary, options: OutputOptions) {
+    if options.quiet {
+        return;
+    }
     println!(
         "hash job {}: {} hashed, {} skipped unchanged, {} errors",
         summary.job_id, summary.files_hashed, summary.skipped_unchanged, summary.errors
@@ -1212,6 +1220,9 @@ fn print_hash_summary(summary: &HashSummary, options: OutputOptions) {
 }
 
 fn print_verify_summary(summary: &VerifySummary, options: OutputOptions) {
+    if options.quiet {
+        return;
+    }
     println!(
         "verify job {}: {} ok, {} changed, {} new, {} missing, {} errors, {} accepted",
         summary.job_id,

@@ -1,4 +1,5 @@
 use std::io;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode};
@@ -13,8 +14,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Terminal;
 use rusqlite::Connection;
+use tokio::sync::mpsc;
+use tokio::task;
 
 use crate::db;
+use crate::fswork::{self, OutputOptions};
 
 #[derive(Debug, Default)]
 struct AppState {
@@ -81,14 +85,18 @@ impl FocusPane {
     }
 }
 
-pub fn run_with_options(conn: &Connection, machine_label: Option<String>) -> anyhow::Result<()> {
+pub async fn run_with_options(
+    conn: &Connection,
+    db_path: &Path,
+    machine_label: Option<String>,
+) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(conn, &mut terminal, machine_label);
+    let result = run_loop(conn, db_path, &mut terminal, machine_label).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -96,16 +104,21 @@ pub fn run_with_options(conn: &Connection, machine_label: Option<String>) -> any
     result
 }
 
-fn run_loop(
+async fn run_loop(
     conn: &Connection,
+    db_path: &Path,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     machine_label: Option<String>,
 ) -> anyhow::Result<()> {
+    let (job_tx, mut job_rx) = mpsc::unbounded_channel::<String>();
     let mut state = AppState {
         status: "ready".to_string(),
         ..AppState::default()
     };
     loop {
+        while let Ok(message) = job_rx.try_recv() {
+            state.status = message;
+        }
         let roots = db::roots(conn)?;
         normalize_selection(&mut state, roots.len());
         let selected = roots.get(state.selected_root);
@@ -154,6 +167,7 @@ fn run_loop(
                 vertical[3],
                 selected,
                 files.get(state.file_offset),
+                roots.len(),
                 &state,
             );
             render_events(frame, vertical[4], &events, &state);
@@ -173,20 +187,22 @@ fn run_loop(
                     KeyCode::Char('s') => {
                         queue_selected_root(
                             conn,
-                            &roots,
-                            state.selected_root,
+                            db_path,
+                            roots.get(state.selected_root),
                             "scan",
                             machine_label.as_deref(),
+                            job_tx.clone(),
                             &mut state,
                         )?;
                     }
                     KeyCode::Char('h') => {
                         queue_selected_root(
                             conn,
-                            &roots,
-                            state.selected_root,
+                            db_path,
+                            roots.get(state.selected_root),
                             "hash",
                             machine_label.as_deref(),
+                            job_tx.clone(),
                             &mut state,
                         )?;
                     }
@@ -201,7 +217,7 @@ fn run_loop(
 fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect) {
     let header = Paragraph::new(Line::from(vec![
         Span::styled("Gremlin", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw("  q quit | Tab focus | arrows move | v fields | s scan job | h hash job"),
+        Span::raw("  q quit | Tab focus | arrows move | v fields | s scan | h hash"),
     ]))
     .block(Block::default().borders(Borders::ALL));
     frame.render_widget(header, area);
@@ -218,23 +234,16 @@ fn render_roots(
             "No roots yet\nRun `gremlin /path` or `gremlin target add /path`",
         )]
     } else {
-        roots
-            .iter()
-            .enumerate()
-            .map(|(idx, root)| {
-                let label = root.label.as_deref().unwrap_or(&root.path);
-                let marker = if idx == state.selected_root {
-                    "> "
-                } else {
-                    "  "
-                };
-                ListItem::new(format!(
-                    "{marker}{label}\n  {}\n  {}",
-                    human_size(root.current_size_bytes as u64),
-                    root.path
-                ))
-            })
-            .collect()
+        let mut rows = vec![ListItem::new(root_header())];
+        rows.extend(roots.iter().enumerate().map(|(idx, root)| {
+            let marker = if idx == state.selected_root {
+                "> "
+            } else {
+                "  "
+            };
+            ListItem::new(root_row(marker, root))
+        }));
+        rows
     };
     frame.render_widget(
         List::new(items).block(
@@ -244,6 +253,36 @@ fn render_roots(
         ),
         area,
     );
+}
+
+fn root_header() -> String {
+    format!("{:<2} {:<18} {:>9}", "", "ROOT", "SIZE")
+}
+
+fn root_row(marker: &str, root: &db::RootRow) -> String {
+    format!(
+        "{:<2} {:<18} {:>9}",
+        marker,
+        truncate(&root_display_name(root), 18),
+        human_size(root.current_size_bytes as u64)
+    )
+}
+
+fn root_display_name(root: &db::RootRow) -> String {
+    if let Some(label) = root
+        .label
+        .as_deref()
+        .filter(|label| !label.is_empty() && *label != root.path)
+    {
+        return label.to_string();
+    }
+    root.path
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&root.path)
+        .to_string()
 }
 
 fn render_detail_panel(
@@ -291,17 +330,18 @@ fn render_info_bar(
     area: Rect,
     selected: Option<&db::RootRow>,
     selected_file: Option<&db::FileRow>,
+    root_count: usize,
     state: &AppState,
 ) {
-    let root = selected
-        .map(|root| root.label.as_deref().unwrap_or(&root.path))
-        .unwrap_or("-");
+    let root_name = selected.map(root_display_name);
+    let root = root_name.as_deref().unwrap_or("-");
     let file = selected_file
         .map(|file| file.relative_path.as_str())
         .unwrap_or("-");
     let text = format!(
-        "focus {:?} | selector fields {} | root {} | file {} | {}",
+        "focus {:?} | roots {} | selector fields {} | root {} | file {} | {}",
         state.focus,
+        root_count,
         state.file_view.label(),
         truncate(root, 24),
         truncate(file, 28),
@@ -438,6 +478,18 @@ mod tests {
         assert_eq!(truncate("abcdef", 4), "abc~");
         assert_eq!(truncate("abc", 4), "abc");
     }
+
+    #[test]
+    fn root_display_name_uses_basename_when_label_is_path() {
+        let root = db::RootRow {
+            id: "root_1".to_string(),
+            machine_id: "machine_1".to_string(),
+            path: "/tmp/archive/photos".to_string(),
+            label: Some("/tmp/archive/photos".to_string()),
+            current_size_bytes: 0,
+        };
+        assert_eq!(root_display_name(&root), "photos");
+    }
 }
 
 fn render_events(
@@ -519,17 +571,54 @@ fn move_up(state: &mut AppState) {
 
 fn queue_selected_root(
     conn: &Connection,
-    roots: &[db::RootRow],
-    selected_root: usize,
+    db_path: &Path,
+    root: Option<&db::RootRow>,
     kind: &str,
     machine_label: Option<&str>,
+    job_tx: mpsc::UnboundedSender<String>,
     state: &mut AppState,
 ) -> anyhow::Result<()> {
-    let Some(root) = roots.get(selected_root) else {
+    let Some(root) = root else {
         state.status = "No root selected. Add one with `gremlin /path`.".to_string();
         return Ok(());
     };
     let job_id = db::queue_file_job(conn, kind, std::path::Path::new(&root.path), machine_label)?;
-    state.status = format!("queued {kind} job {job_id}");
+    state.status = format!("started {kind} job {job_id}");
+    spawn_job_runner(
+        db_path.to_path_buf(),
+        job_id,
+        kind.to_string(),
+        machine_label.map(str::to_string),
+        job_tx,
+    );
     Ok(())
+}
+
+fn spawn_job_runner(
+    db_path: PathBuf,
+    job_id: String,
+    kind: String,
+    machine_label: Option<String>,
+    job_tx: mpsc::UnboundedSender<String>,
+) {
+    task::spawn_blocking(move || {
+        let result = (|| -> anyhow::Result<()> {
+            let conn = db::open_existing(&db_path)?;
+            fswork::run_queued_job(
+                &conn,
+                &job_id,
+                &db_path,
+                machine_label.as_deref(),
+                OutputOptions {
+                    quiet: true,
+                    ..OutputOptions::default()
+                },
+            )
+        })();
+        let message = match result {
+            Ok(()) => format!("completed {kind} job {job_id}"),
+            Err(err) => format!("failed {kind} job {job_id}: {err}"),
+        };
+        let _ = job_tx.send(message);
+    });
 }
