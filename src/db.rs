@@ -105,6 +105,13 @@ pub struct HashBaselineRow {
 }
 
 #[derive(Debug, Clone)]
+pub struct ContentObjectRow {
+    pub size_bytes: u64,
+    pub blake3: Option<String>,
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct EventRow {
     pub job_id: String,
     pub sequence: i64,
@@ -760,6 +767,29 @@ pub fn ensure_content_object(
         params![id, size_bytes as i64, blake3, sha256, now_rfc3339()],
     )?;
     Ok(id)
+}
+
+pub fn content_object_by_id(
+    conn: &Connection,
+    content_id: &str,
+) -> rusqlite::Result<Option<ContentObjectRow>> {
+    conn.query_row(
+        r#"
+        SELECT size_bytes, blake3, sha256
+        FROM content_objects
+        WHERE id = ?1
+        "#,
+        params![content_id],
+        |row| {
+            let size: i64 = row.get(0)?;
+            Ok(ContentObjectRow {
+                size_bytes: size as u64,
+                blake3: row.get(1)?,
+                sha256: row.get(2)?,
+            })
+        },
+    )
+    .optional()
 }
 
 pub fn create_checksum_collection(

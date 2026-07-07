@@ -52,7 +52,7 @@
 - Add compare flow between two roots or checksum collections.
 - Add more transfer plan filters and output formats after the copy runner requirements settle.
 - Model copy chunks or per-file transfer checkpoints beyond the current whole-file copy runner.
-- Verify destination hashes after copy and make resume skip already verified files.
+- Make resume distinguish size-only skips from hash-verified skips.
 - Add TUI controls to run a transfer plan and inspect copy progress.
 
 ## Metadata Extractors

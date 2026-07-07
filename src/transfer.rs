@@ -2,6 +2,7 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::Context;
 use rusqlite::Connection;
+use sha2::{Digest, Sha256};
 
 use crate::db::{self, RootRow, TransferPlanActionSummary};
 use crate::events::{EventEnvelope, EventKind, EventPayload};
@@ -45,6 +46,12 @@ pub struct TransferRunResult {
     pub skipped: u64,
     pub errors: u64,
     pub bytes_copied: u64,
+}
+
+struct CopyHashResult {
+    bytes: u64,
+    blake3: String,
+    sha256: String,
 }
 
 pub fn plan_selected_files(
@@ -179,7 +186,11 @@ pub fn plan_selected_files(
     }
 }
 
-pub fn run_transfer_plan(conn: &Connection, plan_id: &str) -> anyhow::Result<TransferRunResult> {
+pub fn run_transfer_plan(
+    conn: &Connection,
+    plan_id: &str,
+    paranoid: bool,
+) -> anyhow::Result<TransferRunResult> {
     let plan = db::transfer_plan_by_id(conn, plan_id)?
         .ok_or_else(|| anyhow::anyhow!("transfer plan not found: {plan_id}"))?;
     let source_root = db::root_by_id(conn, &plan.source_root_id)?
@@ -207,6 +218,7 @@ pub fn run_transfer_plan(conn: &Connection, plan_id: &str) -> anyhow::Result<Tra
             "dest_root_id": dest_root.id,
             "dest_path": dest_root.path,
             "copy_entries": entries.len(),
+            "paranoid": paranoid,
         }),
     )?;
     persist_job_event(
@@ -248,8 +260,15 @@ pub fn run_transfer_plan(conn: &Connection, plan_id: &str) -> anyhow::Result<Tra
         let dest_path = safe_join(&dest_root.path, &entry.relative_path)?;
         let current = entry.relative_path.as_str();
 
-        let copy_result =
-            copy_one_entry(conn, &job_id, &dest_root, &entry, &source_path, &dest_path);
+        let copy_result = copy_one_entry(
+            conn,
+            &job_id,
+            &dest_root,
+            &entry,
+            &source_path,
+            &dest_path,
+            paranoid,
+        );
         match copy_result {
             Ok(CopyOutcome::Copied(bytes)) => {
                 result.copied += 1;
@@ -346,6 +365,7 @@ fn copy_one_entry(
     entry: &db::TransferPlanEntryRow,
     source_path: &Path,
     dest_path: &Path,
+    paranoid: bool,
 ) -> anyhow::Result<CopyOutcome> {
     let source_meta = std::fs::metadata(source_path)
         .with_context(|| format!("reading source {}", source_path.display()))?;
@@ -363,7 +383,19 @@ fn copy_one_entry(
 
     if let Ok(dest_meta) = std::fs::metadata(dest_path) {
         if dest_meta.is_file() && dest_meta.len() == entry.size_bytes {
-            insert_dest_observation(conn, dest_root, entry)?;
+            let verified_content_id = if paranoid {
+                let readback_hash = hash_existing_file(dest_path)?;
+                verify_copy_hash(conn, entry, &readback_hash)?;
+                Some(db::ensure_content_object(
+                    conn,
+                    readback_hash.bytes,
+                    &readback_hash.blake3,
+                    &readback_hash.sha256,
+                )?)
+            } else {
+                None
+            };
+            insert_dest_observation(conn, dest_root, entry, verified_content_id.as_deref())?;
             persist_transfer_file_event(
                 conn,
                 job_id,
@@ -387,23 +419,32 @@ fn copy_one_entry(
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating destination directory {}", parent.display()))?;
     }
-    let bytes = std::fs::copy(source_path, dest_path).with_context(|| {
-        format!(
-            "copying {} to {}",
-            source_path.display(),
-            dest_path.display()
-        )
-    })?;
-    if bytes != entry.size_bytes {
+    let copy_hash = copy_with_hash(source_path, dest_path)?;
+    if copy_hash.bytes != entry.size_bytes {
         anyhow::bail!(
             "copied byte count mismatch for {}: planned {}, copied {}",
             entry.relative_path,
             entry.size_bytes,
-            bytes
+            copy_hash.bytes
         );
     }
+    verify_copy_hash(conn, entry, &copy_hash)?;
+    if paranoid {
+        let readback_hash = hash_existing_file(dest_path)?;
+        if readback_hash.bytes != copy_hash.bytes
+            || readback_hash.blake3 != copy_hash.blake3
+            || readback_hash.sha256 != copy_hash.sha256
+        {
+            anyhow::bail!(
+                "paranoid readback hash mismatch for {}",
+                dest_path.display()
+            );
+        }
+    }
 
-    insert_dest_observation(conn, dest_root, entry)?;
+    let content_id =
+        db::ensure_content_object(conn, copy_hash.bytes, &copy_hash.blake3, &copy_hash.sha256)?;
+    insert_dest_observation(conn, dest_root, entry, Some(&content_id))?;
     persist_transfer_file_event(
         conn,
         job_id,
@@ -418,13 +459,14 @@ fn copy_one_entry(
             error: None,
         },
     )?;
-    Ok(CopyOutcome::Copied(bytes))
+    Ok(CopyOutcome::Copied(copy_hash.bytes))
 }
 
 fn insert_dest_observation(
     conn: &Connection,
     dest_root: &RootRow,
     entry: &db::TransferPlanEntryRow,
+    content_id: Option<&str>,
 ) -> rusqlite::Result<()> {
     let base =
         basename(Path::new(&entry.relative_path)).unwrap_or_else(|_| entry.relative_path.clone());
@@ -438,9 +480,100 @@ fn insert_dest_observation(
             parent_path: &parent_path(&entry.relative_path),
             size_bytes: entry.size_bytes,
             modified_at: None,
-            content_id: entry.source_content_id.as_deref(),
+            content_id,
         },
     )
+}
+
+fn copy_with_hash(source_path: &Path, dest_path: &Path) -> anyhow::Result<CopyHashResult> {
+    let mut source = std::fs::File::open(source_path)
+        .with_context(|| format!("opening source {}", source_path.display()))?;
+    let mut dest = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dest_path)
+        .with_context(|| format!("creating destination {}", dest_path.display()))?;
+    hash_stream_to_writer(&mut source, Some(&mut dest), source_path)
+}
+
+fn hash_existing_file(path: &Path) -> anyhow::Result<CopyHashResult> {
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    hash_stream_to_writer(&mut file, None, path)
+}
+
+fn hash_stream_to_writer(
+    reader: &mut std::fs::File,
+    mut writer: Option<&mut std::fs::File>,
+    path: &Path,
+) -> anyhow::Result<CopyHashResult> {
+    use std::io::{Read, Write};
+
+    let mut blake3_hasher = blake3::Hasher::new();
+    let mut sha256_hasher = Sha256::new();
+    let mut bytes = 0_u64;
+    let mut buf = [0_u8; 64 * 1024];
+
+    loop {
+        let read = reader
+            .read(&mut buf)
+            .with_context(|| format!("reading {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        let chunk = &buf[..read];
+        blake3_hasher.update(chunk);
+        sha256_hasher.update(chunk);
+        if let Some(writer) = writer.as_deref_mut() {
+            writer
+                .write_all(chunk)
+                .with_context(|| format!("writing copy for {}", path.display()))?;
+        }
+        bytes += read as u64;
+    }
+    if let Some(writer) = writer {
+        writer
+            .sync_all()
+            .with_context(|| format!("syncing copy for {}", path.display()))?;
+    }
+
+    Ok(CopyHashResult {
+        bytes,
+        blake3: blake3_hasher.finalize().to_hex().to_string(),
+        sha256: format!("{:x}", sha256_hasher.finalize()),
+    })
+}
+
+fn verify_copy_hash(
+    conn: &Connection,
+    entry: &db::TransferPlanEntryRow,
+    actual: &CopyHashResult,
+) -> anyhow::Result<()> {
+    let Some(source_content_id) = entry.source_content_id.as_deref() else {
+        return Ok(());
+    };
+    let Some(expected) = db::content_object_by_id(conn, source_content_id)? else {
+        anyhow::bail!("planned source content object not found: {source_content_id}");
+    };
+    if expected.size_bytes != actual.bytes {
+        anyhow::bail!(
+            "source content size mismatch for {}: expected {}, copied {}",
+            entry.relative_path,
+            expected.size_bytes,
+            actual.bytes
+        );
+    }
+    if let Some(expected_blake3) = expected.blake3.as_deref() {
+        if expected_blake3 != actual.blake3 {
+            anyhow::bail!("BLAKE3 mismatch while copying {}", entry.relative_path);
+        }
+    }
+    if let Some(expected_sha256) = expected.sha256.as_deref() {
+        if expected_sha256 != actual.sha256 {
+            anyhow::bail!("SHA-256 mismatch while copying {}", entry.relative_path);
+        }
+    }
+    Ok(())
 }
 
 fn build_transfer_plan(
@@ -720,7 +853,13 @@ mod tests {
         let dest_path = dest_dir.path().to_string_lossy().to_string();
         let source_id = db::ensure_root(&conn, &machine_id, &source_path).unwrap();
         let dest_id = db::ensure_root(&conn, &machine_id, &dest_path).unwrap();
-        let content_id = db::ensure_content_object(&conn, 5, "b3", "s256").unwrap();
+        let content_id = db::ensure_content_object(
+            &conn,
+            5,
+            &blake3::hash(b"hello").to_hex().to_string(),
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        )
+        .unwrap();
         observe(
             &conn,
             &machine_id,
@@ -734,7 +873,7 @@ mod tests {
         let dest = db::root_by_id(&conn, &dest_id).unwrap().unwrap();
         let plan = plan_selected_files(&conn, &source, &dest).unwrap();
 
-        let result = run_transfer_plan(&conn, &plan.plan_id).unwrap();
+        let result = run_transfer_plan(&conn, &plan.plan_id, false).unwrap();
 
         assert_eq!(result.copied, 1);
         assert_eq!(result.errors, 0);
@@ -750,6 +889,39 @@ mod tests {
         let job = db::job_by_id(&conn, &result.job_id).unwrap().unwrap();
         assert_eq!(job.kind, "transfer_copy");
         assert_eq!(job.status, "completed");
+    }
+
+    #[test]
+    fn copy_fails_when_stream_hash_does_not_match_planned_content() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        std::fs::write(source_dir.path().join("a.txt"), b"hello").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+        let source_path = source_dir.path().to_string_lossy().to_string();
+        let dest_path = dest_dir.path().to_string_lossy().to_string();
+        let source_id = db::ensure_root(&conn, &machine_id, &source_path).unwrap();
+        let dest_id = db::ensure_root(&conn, &machine_id, &dest_path).unwrap();
+        let bad_content_id = db::ensure_content_object(&conn, 5, "bad", "bad").unwrap();
+        observe(
+            &conn,
+            &machine_id,
+            &source_id,
+            "a.txt",
+            5,
+            Some(&bad_content_id),
+        );
+        db::toggle_selection_entry(&conn, &source_id, "a.txt").unwrap();
+        let source = db::root_by_id(&conn, &source_id).unwrap().unwrap();
+        let dest = db::root_by_id(&conn, &dest_id).unwrap().unwrap();
+        let plan = plan_selected_files(&conn, &source, &dest).unwrap();
+
+        let result = run_transfer_plan(&conn, &plan.plan_id, false).unwrap();
+
+        assert_eq!(result.copied, 0);
+        assert_eq!(result.errors, 1);
     }
 
     #[test]

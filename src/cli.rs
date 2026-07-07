@@ -148,6 +148,8 @@ pub enum TransferCommands {
     },
     Run {
         plan_id: String,
+        #[arg(long)]
+        paranoid: bool,
     },
 }
 

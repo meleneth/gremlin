@@ -291,10 +291,10 @@ async fn main() -> anyhow::Result<()> {
                     print_transfer_entry(&entry);
                 }
             }
-            TransferCommands::Run { plan_id } => {
+            TransferCommands::Run { plan_id, paranoid } => {
                 let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
                 let conn = db::open_existing(&db)?;
-                let result = transfer::run_transfer_plan(&conn, &plan_id)?;
+                let result = transfer::run_transfer_plan(&conn, &plan_id, paranoid)?;
                 println!("transfer_run:\t{}", result.job_id);
                 println!("plan:\t{}", result.plan_id);
                 println!(
