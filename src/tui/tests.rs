@@ -787,6 +787,21 @@ fn progress_bar_uses_partial_blocks_at_static_width() {
 }
 
 #[test]
+fn animated_progress_bar_spans_shift_wave_colors() {
+    let first = animated_progress_bar_spans(4, 4, 4, 0);
+    let second = animated_progress_bar_spans(4, 4, 4, 8);
+
+    assert_eq!(
+        first
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>(),
+        "▕▌▌▌▌▏"
+    );
+    assert_ne!(first[1].style, second[1].style);
+}
+
+#[test]
 fn formats_transfer_progress_detail() {
     let payload = serde_json::json!({
         "type": "job_progress",

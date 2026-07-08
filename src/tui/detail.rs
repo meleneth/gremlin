@@ -81,24 +81,40 @@ impl Widget for DetailPane<'_> {
             .collection
             .map(collection_detail_lines)
             .unwrap_or_default();
-        let transfer_lines = data
-            .transfer_progress
-            .as_ref()
-            .map(|progress| {
-                format!(
-                    "Transfer file: {}\n{}",
-                    progress.current_path,
-                    transfer_progress_lines(progress)
-                )
-            })
-            .unwrap_or_else(|| "Transfer: -".to_string());
-        let text =
-            format!("{root_lines}\n{file_lines}\n{plan_lines}{collection_lines}\n{transfer_lines}");
-        Paragraph::new(text)
+        let mut lines = detail_text_lines(format!(
+            "{root_lines}\n{file_lines}\n{plan_lines}{collection_lines}"
+        ));
+        match data.transfer_progress.as_ref() {
+            Some(progress) => {
+                lines.push(Line::from(format!(
+                    "Transfer file: {}",
+                    progress.current_path
+                )));
+                lines.extend(transfer_progress_styled_lines(
+                    progress,
+                    progress_animation_phase(),
+                ));
+            }
+            None => lines.push(Line::from("Transfer: -")),
+        }
+        Paragraph::new(lines)
             .style(theme::panel_dark())
             .block(panel_block("Details", false))
             .render(area, buf);
     }
+}
+
+fn detail_text_lines(text: String) -> Vec<Line<'static>> {
+    text.lines()
+        .map(|line| Line::from(line.to_string()))
+        .collect()
+}
+
+fn progress_animation_phase() -> usize {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| (duration.as_millis() / 160) as usize)
+        .unwrap_or(0)
 }
 
 fn file_hash_lines(content: Option<&db::ContentObjectRow>) -> String {

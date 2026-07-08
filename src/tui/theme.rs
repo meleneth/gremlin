@@ -16,6 +16,7 @@ pub const RED: Color = Color::Rgb(0xec, 0x27, 0x3f);
 pub const ORANGE: Color = Color::Rgb(0xe9, 0x85, 0x37);
 pub const SELECT: Color = Color::Rgb(0x6b, 0x26, 0x43);
 pub const ATTENTION: Color = Color::Rgb(0x1e, 0x40, 0x44);
+pub const PROGRESS_GRADIENT: [Color; 6] = [BLUE, CYAN, LIME, ACCENT, ORANGE, RED];
 
 pub fn base() -> Style {
     Style::default().fg(TEXT).bg(BG)

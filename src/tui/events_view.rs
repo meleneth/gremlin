@@ -164,6 +164,7 @@ pub(super) fn transfer_progress_snapshot(payload_json: &str) -> Option<TransferP
     })
 }
 
+#[cfg(test)]
 pub(super) fn transfer_progress_lines(progress: &TransferProgressSnapshot) -> String {
     let overall_percent = progress_percent(progress.bytes_done, progress.bytes_total);
     let file_percent = progress_percent(progress.file_bytes_done, progress.file_bytes_total);
@@ -203,6 +204,160 @@ pub(super) fn transfer_progress_lines(progress: &TransferProgressSnapshot) -> St
         lines.push_str(&format!("\nChunk {}", truncate(message, 72)));
     }
     lines
+}
+
+pub(super) fn transfer_progress_styled_lines(
+    progress: &TransferProgressSnapshot,
+    phase: usize,
+) -> Vec<Line<'static>> {
+    let overall_percent = progress_percent(progress.bytes_done, progress.bytes_total);
+    let file_percent = progress_percent(progress.file_bytes_done, progress.file_bytes_total);
+    let active_file = if progress.files_total == 0 {
+        0
+    } else {
+        progress
+            .files_done
+            .saturating_add(1)
+            .min(progress.files_total)
+    };
+    let mut lines = vec![
+        progress_detail_line(
+            "Job ",
+            progress.bytes_done,
+            progress.bytes_total,
+            phase,
+            format!(
+                " {:>3}% {}/{} @ {}/s",
+                overall_percent,
+                human_size(progress.bytes_done),
+                human_size(progress.bytes_total),
+                transfer_rate(progress.bytes_per_second)
+            ),
+        ),
+        progress_detail_line(
+            "File",
+            progress.file_bytes_done,
+            progress.file_bytes_total,
+            phase + 2,
+            format!(
+                " {:>3}% {}/{} ({}/{})",
+                file_percent,
+                human_size(progress.file_bytes_done),
+                human_size(progress.file_bytes_total),
+                active_file,
+                progress.files_total
+            ),
+        ),
+        Line::from(format!(
+            "Path {} | errors {}",
+            truncate(&progress.current_path, 54),
+            progress.errors
+        )),
+    ];
+    if let Some(message) = progress.message.as_deref() {
+        lines.push(Line::from(format!("Chunk {}", truncate(message, 72))));
+    }
+    lines
+}
+
+fn progress_detail_line(
+    label: &'static str,
+    done: u64,
+    total: u64,
+    phase: usize,
+    suffix: String,
+) -> Line<'static> {
+    let mut spans = vec![Span::raw(format!("{label} "))];
+    spans.extend(animated_progress_bar_spans(
+        done,
+        total,
+        DETAIL_PROGRESS_WIDTH,
+        phase,
+    ));
+    spans.push(Span::raw(suffix));
+    Line::from(spans)
+}
+
+pub(super) fn animated_progress_bar_spans(
+    done: u64,
+    total: u64,
+    width: usize,
+    phase: usize,
+) -> Vec<Span<'static>> {
+    if width == 0 {
+        return vec![Span::styled("[]", theme::muted())];
+    }
+    let clamped_done = done.min(total);
+    let eighths_total = if total == 0 {
+        0
+    } else {
+        ((clamped_done as u128) * (width as u128) * 8) / (total as u128)
+    };
+    let full = (eighths_total / 8).min(width as u128) as usize;
+    let partial = (eighths_total % 8) as usize;
+    let mut spans = Vec::with_capacity(width + 2);
+    spans.push(Span::styled("▕", theme::muted()));
+    for idx in 0..full {
+        spans.push(progress_cell("▌", idx, phase, true));
+    }
+    if full < width {
+        if partial > 0 {
+            spans.push(progress_cell(PARTIAL_BLOCKS[partial], full, phase, true));
+        }
+        let empty = width.saturating_sub(full + usize::from(partial > 0));
+        for idx in 0..empty {
+            spans.push(progress_cell(
+                "░",
+                full + usize::from(partial > 0) + idx,
+                phase,
+                false,
+            ));
+        }
+    }
+    spans.push(Span::styled("▏", theme::muted()));
+    spans
+}
+
+fn progress_cell(symbol: &'static str, idx: usize, phase: usize, filled: bool) -> Span<'static> {
+    let fg = progress_wave_color((idx * 2) as f64, phase, 0.0);
+    let bg = progress_wave_color((idx * 2 + 1) as f64, phase, 0.0);
+    if filled {
+        Span::styled(symbol, Style::default().fg(fg).bg(bg))
+    } else {
+        Span::styled(symbol, Style::default().fg(bg).bg(theme::PANEL_DARK))
+    }
+}
+
+fn progress_wave_color(sample: f64, phase: usize, offset: f64) -> ratatui::style::Color {
+    let wave = ((sample * 0.34) + (phase as f64 * 0.22) + offset).sin();
+    let normalized = (wave + 1.0) * 0.5;
+    interpolated_gradient_color(normalized)
+}
+
+fn interpolated_gradient_color(position: f64) -> ratatui::style::Color {
+    let gradient = theme::PROGRESS_GRADIENT;
+    let scaled = position.clamp(0.0, 1.0) * (gradient.len().saturating_sub(1) as f64);
+    let left = scaled.floor() as usize;
+    let right = (left + 1).min(gradient.len() - 1);
+    let amount = scaled - (left as f64);
+    let (left_r, left_g, left_b) = color_rgb(gradient[left]);
+    let (right_r, right_g, right_b) = color_rgb(gradient[right]);
+    ratatui::style::Color::Rgb(
+        interpolate_channel(left_r, right_r, amount),
+        interpolate_channel(left_g, right_g, amount),
+        interpolate_channel(left_b, right_b, amount),
+    )
+}
+
+fn color_rgb(color: ratatui::style::Color) -> (u8, u8, u8) {
+    match color {
+        ratatui::style::Color::Rgb(r, g, b) => (r, g, b),
+        _ => (0xff, 0xff, 0xff),
+    }
+}
+
+fn interpolate_channel(left: u8, right: u8, amount: f64) -> u8 {
+    (left as f64 + ((right as f64 - left as f64) * amount)).round() as u8
 }
 
 pub(super) fn byte_progress_summary(payload_json: &str) -> Option<String> {
