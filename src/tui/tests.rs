@@ -850,10 +850,11 @@ fn formats_plan_review_hint_and_count() {
         source_name: "source".to_string(),
         dest_name: "dest".to_string(),
         summary: Vec::new(),
-        entries: vec![review.clone(), copy],
+        entries: vec![review.clone(), copy.clone()],
     };
 
     assert_eq!(plan_entry_hint(&review), "review hash=1 name=1");
+    assert!(plan_entry_row("> ", &copy, 120).contains("destination path is not indexed"));
     assert_eq!(plan_review_count(&plan), 1);
     assert_eq!(plan_copy_count(&plan), 1);
 }
@@ -885,7 +886,7 @@ fn app_screen_renders_empty_state_widgets() {
         .iter()
         .map(|cell| cell.symbol())
         .collect::<String>();
-    assert!(text.contains("Commands"));
+    assert!(text.contains("Gremlin"));
     assert!(text.contains("No roots yet"));
     assert!(text.contains("No indexed files"));
     assert!(text.contains("No transfer plan yet"));

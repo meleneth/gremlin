@@ -82,7 +82,13 @@ impl Widget for DetailPane<'_> {
         let transfer_lines = data
             .transfer_progress
             .as_ref()
-            .map(transfer_progress_lines)
+            .map(|progress| {
+                format!(
+                    "Transfer file: {}\n{}",
+                    progress.current_path,
+                    transfer_progress_lines(progress)
+                )
+            })
             .unwrap_or_else(|| "Transfer: -".to_string());
         let text =
             format!("{root_lines}\n{file_lines}\n{plan_lines}{collection_lines}\n{transfer_lines}");

@@ -6,10 +6,15 @@ pub(super) struct HeaderPane<'a> {
 
 impl Widget for HeaderPane<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        let needs_attention = command_hint_needs_attention(self.state);
         let header = Paragraph::new(command_hint_lines(self.state, self.has_temporary_browse))
-            .style(theme::panel())
+            .style(if needs_attention {
+                theme::attention()
+            } else {
+                theme::panel()
+            })
             .wrap(Wrap { trim: true })
-            .block(panel_block("Commands", true));
+            .block(panel_block("Gremlin", true));
         header.render(area, buf);
     }
 }
@@ -29,9 +34,25 @@ pub(super) fn command_hint_lines(
         ]),
         Line::from(vec![
             Span::styled("Here    ", theme::header()),
-            Span::styled(mode, theme::panel()),
+            Span::styled(
+                mode,
+                if command_hint_needs_attention(state) {
+                    theme::attention()
+                } else {
+                    theme::panel()
+                },
+            ),
         ]),
     ]
+}
+
+fn command_hint_needs_attention(state: &AppState) -> bool {
+    state.file_filter_editing
+        || state.retarget_draft.is_some()
+        || state.pending_delete_root_id.is_some()
+        || state.pending_import.is_some()
+        || state.pending_scoped_job.is_some()
+        || state.transfer_source_root_id.is_some()
 }
 
 pub(super) fn active_command_hint(state: &AppState, has_temporary_browse: bool) -> &'static str {

@@ -23,9 +23,7 @@ impl Widget for AppScreen<'_> {
             .constraints([
                 Constraint::Length(4),
                 Constraint::Min(5),
-                Constraint::Length(14),
-                Constraint::Length(6),
-                Constraint::Length(6),
+                Constraint::Percentage(34),
             ])
             .split(area);
         let middle = Layout::default()
@@ -36,10 +34,18 @@ impl Widget for AppScreen<'_> {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
             .split(vertical[2]);
-        let bottom = Layout::default()
+        let bottom_left = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+            .split(lower[0]);
+        let bottom_right = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(56), Constraint::Percentage(44)])
+            .split(lower[1]);
+        let activity = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-            .split(vertical[4]);
+            .split(bottom_right[1]);
 
         HeaderPane {
             state: self.state,
@@ -73,13 +79,13 @@ impl Widget for AppScreen<'_> {
                 transfer_progress: self.transfer_progress,
             },
         }
-        .render(lower[0], buf);
+        .render(bottom_left[0], buf);
         PlanReviewPane {
             plan: self.state.last_plan.as_ref(),
             collection: self.state.collection_result.as_ref(),
             state: self.state,
         }
-        .render(lower[1], buf);
+        .render(bottom_right[0], buf);
         InfoBar {
             data: InfoBarData {
                 root_name: selected_root_name(self.selected_root, self.selected_temporary),
@@ -90,12 +96,12 @@ impl Widget for AppScreen<'_> {
             },
             state: self.state,
         }
-        .render(vertical[3], buf);
-        ActivityPane { state: self.state }.render(bottom[0], buf);
+        .render(bottom_left[1], buf);
+        ActivityPane { state: self.state }.render(activity[0], buf);
         EventsPane {
             events: self.events,
             state: self.state,
         }
-        .render(bottom[1], buf);
+        .render(activity[1], buf);
     }
 }

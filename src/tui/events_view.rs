@@ -8,7 +8,7 @@ impl Widget for EventsPane<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let visible = self.events.iter().enumerate().skip(self.state.event_offset);
         let items = if self.events.is_empty() {
-            vec![ListItem::new("No jobs or events for this root")]
+            vec![ListItem::new("No activity for this root yet")]
         } else {
             let mut rows = vec![ListItem::new(event_header()).style(theme::header())];
             rows.extend(visible.map(|(idx, row)| {
@@ -28,28 +28,39 @@ impl Widget for EventsPane<'_> {
         };
         List::new(items)
             .style(theme::panel())
-            .block(focus_block("Jobs", FocusPane::Events, self.state.focus))
+            .block(focus_block(
+                "Activity Log",
+                FocusPane::Events,
+                self.state.focus,
+            ))
             .render(area, buf);
     }
 }
 
 pub(super) fn event_header() -> String {
     format!(
-        "{:<2} {:<18} {:<5} {:<9} {:<10} {:<24}",
-        "", "JOB", "KIND", "STATUS", "PHASE", "PROGRESS"
+        "{:<2} {:<18} {:<8} {:<10} {:<12} {:<24}",
+        "", "JOB", "TYPE", "STATUS", "EVENT", "PROGRESS"
     )
 }
 
 pub(super) fn event_row(marker: &str, row: &db::JobEventRow) -> String {
     format!(
-        "{:<2} {:<18} {:<5} {:<9} {:<10} {:<24}",
+        "{:<2} {:<18} {:<8} {:<10} {:<12} {:<24}",
         marker,
         short_id(&row.job_id),
-        truncate(&row.job_kind, 5),
-        truncate(&event_status(row), 9),
-        truncate(row.phase.as_deref().unwrap_or("-"), 10),
+        truncate(&row.job_kind, 8),
+        truncate(&event_status(row), 10),
+        truncate(&event_label(row), 12),
         truncate(&progress_count(row), 24)
     )
+}
+
+fn event_label(row: &db::JobEventRow) -> String {
+    if row.event_kind == "job_progress" {
+        return row.phase.clone().unwrap_or_else(|| "progress".to_string());
+    }
+    row.event_kind.clone()
 }
 
 pub(super) fn event_summary(row: &db::JobEventRow) -> String {

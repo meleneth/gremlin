@@ -7,7 +7,6 @@ pub(super) struct PlanReviewPane<'a> {
 
 impl Widget for PlanReviewPane<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let needs_attention = self.state.retarget_draft.is_some();
         let items = if let Some(collection) = self.collection {
             collection_items(collection, self.state.plan_offset)
         } else if let Some(plan) = self.plan {
@@ -28,7 +27,7 @@ impl Widget for PlanReviewPane<'_> {
                         } else {
                             plan_action_style(&entry.action)
                         };
-                        ListItem::new(plan_entry_row(marker, entry)).style(style)
+                        ListItem::new(plan_entry_row(marker, entry, area.width)).style(style)
                     }),
             );
             rows
@@ -36,12 +35,8 @@ impl Widget for PlanReviewPane<'_> {
             vec![ListItem::new("No transfer plan yet")]
         };
         List::new(items)
-            .style(if needs_attention {
-                theme::attention()
-            } else {
-                theme::panel()
-            })
-            .block(attention_focus_block(
+            .style(theme::panel())
+            .block(focus_block(
                 if self.collection.is_some() {
                     "Collection"
                 } else {
@@ -49,7 +44,6 @@ impl Widget for PlanReviewPane<'_> {
                 },
                 FocusPane::Plan,
                 self.state.focus,
-                needs_attention,
             ))
             .render(area, buf);
     }
@@ -167,19 +161,28 @@ pub(super) fn plan_entry_header() -> String {
     )
 }
 
-pub(super) fn plan_entry_row(marker: &str, entry: &db::TransferPlanEntryRow) -> String {
+pub(super) fn plan_entry_row(
+    marker: &str,
+    entry: &db::TransferPlanEntryRow,
+    area_width: u16,
+) -> String {
     let path = if entry.dest_relative_path == entry.relative_path {
         entry.relative_path.clone()
     } else {
         format!("{} -> {}", entry.relative_path, entry.dest_relative_path)
     };
+    let width = area_width.saturating_sub(4) as usize;
+    let fixed_width = 2 + 1 + 10 + 1 + 9 + 1;
+    let flexible = width.saturating_sub(fixed_width).max(42);
+    let path_width = (flexible / 2).clamp(18, 52);
+    let why_width = flexible.saturating_sub(path_width).max(24);
     format!(
-        "{:<2} {:<10} {:<18} {:>9} {}",
+        "{:<2} {:<10} {:<path_width$} {:>9} {}",
         marker,
         truncate(&entry.action, 10),
-        truncate(&path, 18),
+        truncate(&path, path_width),
         human_size(entry.size_bytes),
-        truncate(&plan_entry_hint(entry), 26)
+        truncate(&plan_entry_hint(entry), why_width)
     )
 }
 

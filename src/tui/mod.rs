@@ -529,24 +529,6 @@ fn focus_block(title: impl Into<String>, pane: FocusPane, active: FocusPane) -> 
         .title_style(title_style)
 }
 
-fn attention_focus_block(
-    title: impl Into<String>,
-    pane: FocusPane,
-    active: FocusPane,
-    attention: bool,
-) -> Block<'static> {
-    let title = title.into();
-    if !attention {
-        return focus_block(title, pane, active);
-    }
-    Block::default()
-        .title(pane.title(&title, active))
-        .borders(Borders::ALL)
-        .style(theme::attention())
-        .border_style(Style::default().fg(theme::ACCENT).bg(theme::ATTENTION))
-        .title_style(Style::default().fg(theme::TEXT).bg(theme::ATTENTION))
-}
-
 fn file_status_style(status: &str) -> Style {
     match status {
         "present" => theme::panel(),

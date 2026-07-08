@@ -8,7 +8,6 @@ pub(super) struct FilesPane<'a> {
 impl Widget for FilesPane<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let visible = self.files.iter().enumerate().skip(self.state.file_offset);
-        let needs_attention = self.state.pending_import.is_some();
         let items = if self.files.is_empty() {
             let message = if !self.state.file_filter.is_empty() {
                 "No files match the active filter"
@@ -40,16 +39,11 @@ impl Widget for FilesPane<'_> {
             rows
         };
         List::new(items)
-            .style(if needs_attention {
-                theme::attention()
-            } else {
-                theme::panel()
-            })
-            .block(attention_focus_block(
+            .style(theme::panel())
+            .block(focus_block(
                 files_title(self.state),
                 FocusPane::Files,
                 self.state.focus,
-                needs_attention,
             ))
             .render(area, buf);
     }
