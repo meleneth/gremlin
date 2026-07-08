@@ -16,6 +16,7 @@ use cli::{
     Cli, Commands, ConfigCommands, JobCommands, TargetCommands, TransferCommands, WorkerCommands,
 };
 use serde::Serialize;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
@@ -51,6 +52,7 @@ async fn main() -> anyhow::Result<()> {
                 target,
                 machine_label.as_deref(),
                 output,
+                !cli.no_tui,
             )?;
             if !cli.no_tui {
                 let conn = db::open_existing(&default_target.db_path)?;
@@ -535,6 +537,7 @@ fn run_default_target(
     target: &str,
     machine_label: Option<&str>,
     output: fswork::OutputOptions,
+    will_open_tui: bool,
 ) -> anyhow::Result<DefaultTargetResult> {
     let text_output = fswork::OutputOptions {
         json: false,
@@ -566,6 +569,13 @@ fn run_default_target(
             );
         }
         TargetKind::Ssh => {
+            let host = parsed
+                .machine_hint
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("SSH target missing machine hint"))?;
+            if will_open_tui {
+                ensure_passwordless_ssh_or_offer_copy_id(host)?;
+            }
             println!("db:\t{}", db_path.display());
             println!(
                 "target {:?}\tmachine={}\troot=temporary\tpath={}",
@@ -657,6 +667,73 @@ fn resolve_target_identity(
             Ok((machine_id, parsed.path.clone()))
         }
     }
+}
+
+fn ensure_passwordless_ssh_or_offer_copy_id(host: &str) -> anyhow::Result<()> {
+    match probe_passwordless_ssh(host) {
+        Ok(()) => return Ok(()),
+        Err(first_err) => {
+            eprintln!("ssh:\tpasswordless login to {host} failed: {first_err}");
+        }
+    }
+
+    eprintln!("ssh:\tGremlin needs passwordless SSH before opening the TUI for {host}.");
+    eprintln!("ssh:\tRun `ssh-copy-id {host}` now to install your default public key?");
+    if !confirm_stdin("Run ssh-copy-id? [y/N] ")? {
+        anyhow::bail!("passwordless SSH is required before opening the TUI for {host}");
+    }
+
+    let status = Command::new("ssh-copy-id")
+        .arg(host)
+        .status()
+        .with_context(|| format!("running ssh-copy-id {host}"))?;
+    if !status.success() {
+        anyhow::bail!("ssh-copy-id {host} exited with {status}");
+    }
+
+    probe_passwordless_ssh(host).with_context(|| {
+        format!("passwordless SSH still failed after running ssh-copy-id for {host}")
+    })
+}
+
+fn probe_passwordless_ssh(host: &str) -> anyhow::Result<()> {
+    let output = Command::new("ssh")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ConnectTimeout=5")
+        .arg(host)
+        .arg("true")
+        .output()
+        .with_context(|| format!("probing passwordless SSH for {host}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = [stderr.trim(), stdout.trim()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
+    if detail.is_empty() {
+        anyhow::bail!("ssh exited with {}", output.status);
+    }
+    anyhow::bail!("{detail}");
+}
+
+fn confirm_stdin(prompt: &str) -> anyhow::Result<bool> {
+    eprint!("{prompt}");
+    io::stderr().flush().context("flushing prompt")?;
+    let mut input = String::new();
+    io::stdin()
+        .read_line(&mut input)
+        .context("reading confirmation")?;
+    Ok(is_yes(input.trim()))
+}
+
+fn is_yes(input: &str) -> bool {
+    matches!(input, "y" | "Y" | "yes" | "YES" | "Yes")
 }
 
 #[derive(Debug, Serialize)]
@@ -1348,6 +1425,16 @@ mod tests {
             "foo.png"
         );
         assert_eq!(remote_path_basename("/srv/archive/foo.png"), "foo.png");
+    }
+
+    #[test]
+    fn confirmation_accepts_only_explicit_yes() {
+        assert!(is_yes("y"));
+        assert!(is_yes("yes"));
+        assert!(is_yes("YES"));
+        assert!(!is_yes(""));
+        assert!(!is_yes("n"));
+        assert!(!is_yes("sure"));
     }
 
     #[test]

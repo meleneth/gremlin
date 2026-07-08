@@ -120,7 +120,7 @@ gremlin --no-config --db ./scratch.db init
 gremlin --machine-label laptop scan ~/archive
 ```
 
-`gremlin TARGET` classifies a target, prepares/reuses the matching root, then opens the TUI unless `--no-tui` is supplied. For local directories it also runs a lightweight stat scan and prints status plus new/changed/missing highlights. For SSH-like and URL targets it registers metadata and prints status/hints without attempting remote execution.
+`gremlin TARGET` classifies a target, prepares/reuses the matching root, then opens the TUI unless `--no-tui` is supplied. For local directories it also runs a lightweight stat scan and prints status plus new/changed/missing highlights. Before opening the TUI for an SSH target, Gremlin probes passwordless SSH with batch mode; if the key is not available, it can run `ssh-copy-id HOST` in the normal terminal so the standard SSH password/key prompt can install the key, then it retries the batch probe before continuing. For SSH-like and URL targets it registers metadata and prints status/hints without attempting remote execution when `--no-tui` is supplied.
 
 `scan` walks a directory tree and records stat-level path observations. It reports new, changed, and missing paths. Missing paths are report-only in v0; no deletion or missing projection is performed.
 
