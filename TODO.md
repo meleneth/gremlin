@@ -49,7 +49,6 @@
 
 ## Transfer Planning
 
-- Improve TUI transfer plan display beyond the latest summary line.
 - Add compare flow between two roots or checksum collections.
 - Add more transfer plan filters and output formats after the copy runner requirements settle.
 - Model copy chunks or per-file transfer checkpoints beyond the current whole-file copy runner.

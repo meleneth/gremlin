@@ -114,6 +114,7 @@ struct AppState {
     file_view: FileView,
     selected_root: usize,
     file_offset: usize,
+    plan_offset: usize,
     event_offset: usize,
     status: String,
     transfer_source_root_id: Option<String>,
@@ -126,6 +127,7 @@ struct PlanSnapshot {
     source_name: String,
     dest_name: String,
     summary: Vec<db::TransferPlanActionSummary>,
+    entries: Vec<db::TransferPlanEntryRow>,
 }
 
 struct InfoBarData<'a> {
@@ -150,6 +152,7 @@ enum FocusPane {
     #[default]
     Roots,
     Files,
+    Plan,
     Events,
 }
 
@@ -186,7 +189,8 @@ impl FocusPane {
     fn next(self) -> Self {
         match self {
             Self::Roots => Self::Files,
-            Self::Files => Self::Events,
+            Self::Files => Self::Plan,
+            Self::Plan => Self::Events,
             Self::Events => Self::Roots,
         }
     }
@@ -333,13 +337,17 @@ async fn run_loop(
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
                 .split(vertical[1]);
+            let lower = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+                .split(vertical[2]);
 
             render_header(frame, vertical[0]);
             render_roots(frame, middle[0], &roots, &state);
             render_files(frame, middle[1], &files, &selected_paths, &state);
             render_detail_panel(
                 frame,
-                vertical[2],
+                lower[0],
                 DetailData {
                     root: selected,
                     summary: summary.as_ref(),
@@ -349,6 +357,7 @@ async fn run_loop(
                     plan: state.last_plan.as_ref(),
                 },
             );
+            render_plan_review(frame, lower[1], state.last_plan.as_ref(), &state);
             render_info_bar(
                 frame,
                 vertical[3],
@@ -373,7 +382,20 @@ async fn run_loop(
                         state.file_view = state.file_view.next();
                         state.status = format!("file fields: {}", state.file_view.label());
                     }
-                    KeyCode::Down => move_down(&mut state, roots.len(), files.len(), events.len()),
+                    KeyCode::Down => {
+                        let plan_count = state
+                            .last_plan
+                            .as_ref()
+                            .map(|plan| plan.entries.len())
+                            .unwrap_or(0);
+                        move_down(
+                            &mut state,
+                            roots.len(),
+                            files.len(),
+                            plan_count,
+                            events.len(),
+                        );
+                    }
                     KeyCode::Up => move_up(&mut state),
                     KeyCode::Char('s') => {
                         queue_selected_root(
@@ -435,7 +457,7 @@ fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "  q quit | Tab | arrows | Space mark | s scan | h hash | c cancel | t plan | Enter",
+            "  q quit | Tab panes | arrows move | Space mark | s scan | h hash | c cancel | t plan | Enter",
             theme::muted(),
         ),
     ]))
@@ -646,10 +668,15 @@ fn render_info_bar(
         .map(event_summary)
         .unwrap_or_else(|| "event -".to_string());
     let text = format!(
-        "focus {:?} | roots {} | marked {} | root {} | file {} | {} | {}",
+        "focus {:?} | roots {} | marked {} | plan {} | root {} | file {} | {} | {}",
         state.focus,
         data.root_count,
         data.selection.map(|value| value.marked_count).unwrap_or(0),
+        state
+            .last_plan
+            .as_ref()
+            .map(|plan| plan_review_count(plan).to_string())
+            .unwrap_or_else(|| "-".to_string()),
         truncate(root, 24),
         truncate(file, 20),
         truncate(&event, 24),
@@ -792,6 +819,99 @@ fn plan_summary_line(summary: &[db::TransferPlanActionSummary]) -> String {
         .join(" | ")
 }
 
+fn plan_review_count(plan: &PlanSnapshot) -> usize {
+    plan.entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.action.as_str(),
+                "review" | "conflict" | "verify_needed"
+            )
+        })
+        .count()
+}
+
+fn render_plan_review(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    plan: Option<&PlanSnapshot>,
+    state: &AppState,
+) {
+    let items =
+        if let Some(plan) = plan {
+            let mut rows = vec![ListItem::new(plan_entry_header()).style(theme::header())];
+            rows.extend(plan.entries.iter().enumerate().skip(state.plan_offset).map(
+                |(idx, entry)| {
+                    let marker = if idx == state.plan_offset { "> " } else { "  " };
+                    let style = if idx == state.plan_offset {
+                        theme::selected()
+                    } else {
+                        plan_action_style(&entry.action)
+                    };
+                    ListItem::new(plan_entry_row(marker, entry)).style(style)
+                },
+            ));
+            rows
+        } else {
+            vec![ListItem::new("No transfer plan yet")]
+        };
+    frame.render_widget(
+        List::new(items).style(theme::panel()).block(focus_block(
+            "Plan",
+            FocusPane::Plan,
+            state.focus,
+        )),
+        area,
+    );
+}
+
+fn plan_entry_header() -> String {
+    format!(
+        "{:<2} {:<10} {:<18} {:>9} {}",
+        "", "ACTION", "PATH", "SIZE", "WHY"
+    )
+}
+
+fn plan_entry_row(marker: &str, entry: &db::TransferPlanEntryRow) -> String {
+    format!(
+        "{:<2} {:<10} {:<18} {:>9} {}",
+        marker,
+        truncate(&entry.action, 10),
+        truncate(&entry.relative_path, 18),
+        human_size(entry.size_bytes),
+        truncate(&plan_entry_hint(entry), 26)
+    )
+}
+
+fn plan_entry_hint(entry: &db::TransferPlanEntryRow) -> String {
+    if entry.action == "review" {
+        let payload: serde_json::Value =
+            serde_json::from_str(&entry.metadata_json).unwrap_or(serde_json::Value::Null);
+        let hash_count = payload
+            .get("hash_collisions")
+            .and_then(|value| value.as_array())
+            .map(|value| value.len())
+            .unwrap_or(0);
+        let name_count = payload
+            .get("filename_size_date_collisions")
+            .and_then(|value| value.as_array())
+            .map(|value| value.len())
+            .unwrap_or(0);
+        return format!("review hash={hash_count} name={name_count}");
+    }
+    entry.reason.clone()
+}
+
+fn plan_action_style(action: &str) -> Style {
+    match action {
+        "copy" => theme::ok(),
+        "review" | "verify_needed" => theme::warn(),
+        "conflict" | "unavailable" => theme::error(),
+        "skip" => theme::muted(),
+        _ => theme::panel(),
+    }
+}
+
 fn render_events(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -931,7 +1051,13 @@ fn normalize_selection(state: &mut AppState, root_count: usize) {
     }
 }
 
-fn move_down(state: &mut AppState, root_count: usize, file_count: usize, event_count: usize) {
+fn move_down(
+    state: &mut AppState,
+    root_count: usize,
+    file_count: usize,
+    plan_count: usize,
+    event_count: usize,
+) {
     match state.focus {
         FocusPane::Roots => {
             if state.selected_root + 1 < root_count {
@@ -943,6 +1069,11 @@ fn move_down(state: &mut AppState, root_count: usize, file_count: usize, event_c
         FocusPane::Files => {
             if state.file_offset + 1 < file_count {
                 state.file_offset += 1;
+            }
+        }
+        FocusPane::Plan => {
+            if state.plan_offset + 1 < plan_count {
+                state.plan_offset += 1;
             }
         }
         FocusPane::Events => {
@@ -964,6 +1095,9 @@ fn move_up(state: &mut AppState) {
         }
         FocusPane::Files => {
             state.file_offset = state.file_offset.saturating_sub(1);
+        }
+        FocusPane::Plan => {
+            state.plan_offset = state.plan_offset.saturating_sub(1);
         }
         FocusPane::Events => {
             state.event_offset = state.event_offset.saturating_sub(1);
@@ -1089,13 +1223,17 @@ fn create_transfer_plan_from_selection(
     match transfer::plan_selected_files(conn, source, dest) {
         Ok(result) => {
             let summary = result.summary.clone();
+            let entries = db::transfer_plan_entries(conn, &result.plan_id)?;
             state.last_plan = Some(PlanSnapshot {
                 plan_id: result.plan_id.clone(),
                 source_name: root_display_name(source),
                 dest_name: root_display_name(dest),
                 summary,
+                entries,
             });
             state.transfer_source_root_id = None;
+            state.plan_offset = 0;
+            state.focus = FocusPane::Plan;
             state.status = format!("planned transfer {}", result.plan_id);
         }
         Err(err) => {
@@ -1181,5 +1319,37 @@ mod tests {
             byte_progress_summary(&payload.to_string()).unwrap(),
             "[####----]  50% 1.0 MiB/s"
         );
+    }
+
+    #[test]
+    fn formats_plan_review_hint_and_count() {
+        let review = db::TransferPlanEntryRow {
+            relative_path: "incoming/foo.png".to_string(),
+            size_bytes: 10,
+            source_content_id: Some("content_src".to_string()),
+            dest_content_id: Some("content_dest".to_string()),
+            action: "review".to_string(),
+            reason: "collision".to_string(),
+            metadata_json: serde_json::json!({
+                "hash_collisions": [{"relative_path": "existing/foo.png"}],
+                "filename_size_date_collisions": [{"relative_path": "other/foo.png"}]
+            })
+            .to_string(),
+        };
+        let copy = db::TransferPlanEntryRow {
+            action: "copy".to_string(),
+            reason: "destination path is not indexed".to_string(),
+            ..review.clone()
+        };
+        let plan = PlanSnapshot {
+            plan_id: "plan_1".to_string(),
+            source_name: "source".to_string(),
+            dest_name: "dest".to_string(),
+            summary: Vec::new(),
+            entries: vec![review.clone(), copy],
+        };
+
+        assert_eq!(plan_entry_hint(&review), "review hash=1 name=1");
+        assert_eq!(plan_review_count(&plan), 1);
     }
 }
