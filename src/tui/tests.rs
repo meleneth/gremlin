@@ -799,7 +799,7 @@ fn formats_transfer_progress_detail() {
         "file_bytes_total": 256,
         "bytes_per_second": 2.0 * 1024.0 * 1024.0,
         "errors": 1,
-        "message": "2/8 reused local checkpoint offset=67108864 size=67108864"
+        "message": "2/8 reused local checkpoint after MD5 verify offset=67108864 size=67108864"
     });
     let progress = transfer_progress_snapshot(&payload.to_string()).unwrap();
     let lines = transfer_progress_lines(&progress);
@@ -809,7 +809,7 @@ fn formats_transfer_progress_detail() {
     assert!(lines.contains("File ▕██████████████░░░░░░░░░░░░░░▏  50%"));
     assert!(lines.contains("(3/4)"));
     assert!(lines.contains("Path incoming/photos/foo.png | errors 1"));
-    assert!(lines.contains("Chunk 2/8 reused local checkpoint"));
+    assert!(lines.contains("Chunk 2/8 reused local checkpoint after MD5 verify"));
 }
 
 #[test]

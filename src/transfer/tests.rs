@@ -736,9 +736,9 @@ fn chunk_progress_message_names_state_and_position() {
     };
 
     assert_eq!(
-        chunk_progress_message(chunk, 4, "reused local checkpoint"),
+        chunk_progress_message(chunk, 4, "reused local checkpoint after MD5 verify"),
         format!(
-            "2/4 reused local checkpoint offset={} size={}",
+            "2/4 reused local checkpoint after MD5 verify offset={} size={}",
             crate::fswork::DEFAULT_CHUNK_SIZE_BYTES,
             crate::fswork::DEFAULT_CHUNK_SIZE_BYTES
         )

@@ -203,17 +203,17 @@ pub(super) fn copy_ssh_to_local_chunked(
     let chunks = transfer_chunks(entry.size_bytes);
     let chunk_total = chunks.len() as u64;
     for chunk in chunks {
-        let mut chunk_state = "fetching remote chunk";
+        let mut chunk_state = "fetching and verifying remote chunk";
         let bytes = if let Some(checkpoint) =
             matching_copy_chunk_checkpoint(conn, plan_id, entry, chunk)?
         {
             match local_chunk_bytes(temp_path, chunk) {
                 Ok(bytes) if format!("{:x}", md5::compute(&bytes)) == checkpoint.digest => {
-                    chunk_state = "reused local checkpoint";
+                    chunk_state = "reused local checkpoint after MD5 verify";
                     bytes
                 }
                 _ => {
-                    chunk_state = "checkpoint miss; fetched remote chunk";
+                    chunk_state = "checkpoint miss; fetched and MD5 verified remote chunk";
                     fetch_verified_remote_chunk(host, path, chunk)?
                 }
             }
@@ -286,17 +286,17 @@ pub(super) fn copy_local_to_ssh_chunked(
             .with_context(|| format!("reading {}", source_path.display()))?;
         let local_md5 = format!("{:x}", md5::compute(&bytes));
         let checkpoint = matching_copy_chunk_checkpoint(conn, plan_id, entry, chunk)?;
-        let mut chunk_state = "wrote remote chunk";
+        let mut chunk_state = "wrote and MD5 verified remote chunk";
         let remote_md5 = if checkpoint
             .as_ref()
             .is_some_and(|checkpoint| checkpoint.digest == local_md5)
         {
             let remote_md5 = remote_chunk_md5(host, path, chunk.index)?;
             if remote_md5 == local_md5 {
-                chunk_state = "reused remote checkpoint";
+                chunk_state = "reused remote checkpoint after MD5 verify";
                 remote_md5
             } else {
-                chunk_state = "checkpoint miss; rewrote remote chunk";
+                chunk_state = "checkpoint miss; rewrote and MD5 verified remote chunk";
                 write_remote_chunk(host, path, chunk.index, &bytes)?;
                 remote_chunk_md5(host, path, chunk.index)?
             }
