@@ -1,15 +1,18 @@
+use std::collections::BTreeSet;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use anyhow::Context;
+use chrono::DateTime;
+use filetime::FileTime;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
 use crate::db::{self, RootRow, TransferPlanActionSummary};
 use crate::events::{EventEnvelope, EventKind, EventPayload};
-use crate::util::{basename, local_machine_id, now_rfc3339, parent_path};
+use crate::util::{basename, local_machine_id, now_rfc3339, parent_path, system_time_rfc3339};
 
 struct JobEventInput<'a> {
     event_kind: EventKind,
@@ -77,6 +80,49 @@ struct CopyHashResult {
     bytes: u64,
     blake3: String,
     sha256: String,
+}
+
+#[derive(Debug, Clone)]
+struct DestinationObservation {
+    size_bytes: u64,
+    modified_at: Option<String>,
+    content_id: Option<String>,
+    source: DestinationObservationSource,
+    conflict_reason: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DestinationObservationSource {
+    Index,
+    Probe,
+}
+
+impl DestinationObservationSource {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Index => "index",
+            Self::Probe => "probe",
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct DestinationProbeCache {
+    existing_dirs: BTreeSet<String>,
+    missing_dirs: BTreeSet<String>,
+}
+
+enum EndpointPathKind {
+    Missing,
+    Directory,
+    File {
+        size_bytes: u64,
+        modified_at: Option<String>,
+    },
+    Other {
+        size_bytes: u64,
+        modified_at: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -576,6 +622,7 @@ fn copy_local_to_local(
             source_meta.len()
         );
     }
+    let source_modified_at = source_meta.modified().ok().map(system_time_rfc3339);
 
     if let Ok(dest_meta) = std::fs::metadata(dest_path) {
         if dest_meta.is_file() && dest_meta.len() == entry.size_bytes {
@@ -592,11 +639,13 @@ fn copy_local_to_local(
             } else {
                 None
             };
+            let dest_modified_at = dest_meta.modified().ok().map(system_time_rfc3339);
             insert_dest_observation(
                 ctx.conn,
                 ctx.dest_root,
                 entry,
                 verified_content_id.as_deref(),
+                dest_modified_at.as_deref(),
             )?;
             persist_transfer_file_event(
                 ctx.conn,
@@ -628,6 +677,7 @@ fn copy_local_to_local(
         );
     }
     verify_copy_hash(ctx.conn, entry, &copy_hash)?;
+    set_local_file_mtime(dest_path, source_modified_at.as_deref())?;
     if paranoid {
         sync_for_paranoid_readback(dest_path, parent_created)?;
         let readback_hash = hash_existing_file(dest_path)?;
@@ -648,7 +698,13 @@ fn copy_local_to_local(
         &copy_hash.blake3,
         &copy_hash.sha256,
     )?;
-    insert_dest_observation(ctx.conn, ctx.dest_root, entry, Some(&content_id))?;
+    insert_dest_observation(
+        ctx.conn,
+        ctx.dest_root,
+        entry,
+        Some(&content_id),
+        source_modified_at.as_deref(),
+    )?;
     persist_transfer_file_event(
         ctx.conn,
         ctx.job_id,
@@ -713,6 +769,8 @@ fn copy_ssh_to_local(
     }
     std::fs::rename(&temp_path, dest_path)
         .with_context(|| format!("installing copy at {}", dest_path.display()))?;
+    let source_modified_at = source_modified_at(entry)?;
+    set_local_file_mtime(dest_path, source_modified_at.as_deref())?;
     sync_for_paranoid_readback(dest_path, parent)?;
     let content_id = db::ensure_content_object(
         ctx.conn,
@@ -720,7 +778,13 @@ fn copy_ssh_to_local(
         &copy_hash.blake3,
         &copy_hash.sha256,
     )?;
-    insert_dest_observation(ctx.conn, ctx.dest_root, entry, Some(&content_id))?;
+    insert_dest_observation(
+        ctx.conn,
+        ctx.dest_root,
+        entry,
+        Some(&content_id),
+        source_modified_at.as_deref(),
+    )?;
     let source_display = source.display_path();
     let dest_display = dest_path.display().to_string();
     persist_transfer_file_event(
@@ -760,6 +824,7 @@ fn copy_local_to_ssh(
             source_meta.len()
         );
     }
+    let source_modified_at = source_meta.modified().ok().map(system_time_rfc3339);
     let source_hash = hash_existing_file(source_path)?;
     verify_copy_hash(ctx.conn, entry, &source_hash)?;
 
@@ -800,13 +865,20 @@ fn copy_local_to_ssh(
             dest.display_path()
         )
     })?;
+    set_remote_file_mtime(host, path, source_modified_at.as_deref())?;
     let content_id = db::ensure_content_object(
         ctx.conn,
         source_hash.bytes,
         &source_hash.blake3,
         &source_hash.sha256,
     )?;
-    insert_dest_observation(ctx.conn, ctx.dest_root, entry, Some(&content_id))?;
+    insert_dest_observation(
+        ctx.conn,
+        ctx.dest_root,
+        entry,
+        Some(&content_id),
+        source_modified_at.as_deref(),
+    )?;
     let source_display = source_path.display().to_string();
     let dest_display = dest.display_path();
     persist_transfer_file_event(
@@ -1187,6 +1259,7 @@ fn insert_dest_observation(
     dest_root: &RootRow,
     entry: &db::TransferPlanEntryRow,
     content_id: Option<&str>,
+    modified_at: Option<&str>,
 ) -> rusqlite::Result<()> {
     let base = basename(Path::new(&entry.dest_relative_path))
         .unwrap_or_else(|_| entry.dest_relative_path.clone());
@@ -1199,7 +1272,7 @@ fn insert_dest_observation(
             basename: &base,
             parent_path: &parent_path(&entry.dest_relative_path),
             size_bytes: entry.size_bytes,
-            modified_at: None,
+            modified_at,
             content_id,
         },
     )
@@ -1243,6 +1316,163 @@ fn endpoint_join(root: &TransferEndpoint, relative_path: &str) -> anyhow::Result
             path: remote_join(path, relative_path)?,
         }),
     }
+}
+
+fn probe_destination_observation(
+    endpoint: &TransferEndpoint,
+    relative_path: &str,
+    cache: &mut DestinationProbeCache,
+) -> anyhow::Result<Option<DestinationObservation>> {
+    for parent in relative_parent_prefixes(relative_path) {
+        if cache.missing_dirs.iter().any(|missing| {
+            parent == *missing
+                || parent
+                    .strip_prefix(missing)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        }) {
+            return Ok(None);
+        }
+        if cache.existing_dirs.contains(&parent) {
+            continue;
+        }
+        match probe_endpoint_path(&endpoint_join(endpoint, &parent)?)? {
+            EndpointPathKind::Missing => {
+                cache.missing_dirs.insert(parent);
+                return Ok(None);
+            }
+            EndpointPathKind::Directory => {
+                cache.existing_dirs.insert(parent);
+            }
+            EndpointPathKind::File {
+                size_bytes,
+                modified_at,
+            }
+            | EndpointPathKind::Other {
+                size_bytes,
+                modified_at,
+            } => {
+                return Ok(Some(DestinationObservation {
+                    size_bytes,
+                    modified_at,
+                    content_id: None,
+                    source: DestinationObservationSource::Probe,
+                    conflict_reason: Some("destination parent path exists but is not a directory"),
+                }));
+            }
+        }
+    }
+
+    match probe_endpoint_path(&endpoint_join(endpoint, relative_path)?)? {
+        EndpointPathKind::Missing => Ok(None),
+        EndpointPathKind::File {
+            size_bytes,
+            modified_at,
+        } => Ok(Some(DestinationObservation {
+            size_bytes,
+            modified_at,
+            content_id: None,
+            source: DestinationObservationSource::Probe,
+            conflict_reason: None,
+        })),
+        EndpointPathKind::Directory => Ok(Some(DestinationObservation {
+            size_bytes: 0,
+            modified_at: None,
+            content_id: None,
+            source: DestinationObservationSource::Probe,
+            conflict_reason: Some("destination path exists as a directory"),
+        })),
+        EndpointPathKind::Other {
+            size_bytes,
+            modified_at,
+        } => Ok(Some(DestinationObservation {
+            size_bytes,
+            modified_at,
+            content_id: None,
+            source: DestinationObservationSource::Probe,
+            conflict_reason: Some("destination path exists but is not a regular file"),
+        })),
+    }
+}
+
+fn relative_parent_prefixes(relative_path: &str) -> Vec<String> {
+    let parts = Path::new(relative_path)
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            Component::CurDir => None,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => None,
+        })
+        .collect::<Vec<_>>();
+    if parts.len() <= 1 {
+        return Vec::new();
+    }
+    (1..parts.len()).map(|len| parts[..len].join("/")).collect()
+}
+
+fn probe_endpoint_path(endpoint: &TransferEndpoint) -> anyhow::Result<EndpointPathKind> {
+    match endpoint {
+        TransferEndpoint::Local(path) => probe_local_path(path),
+        TransferEndpoint::Ssh { host, path } => probe_remote_path(host, path),
+    }
+}
+
+fn probe_local_path(path: &Path) -> anyhow::Result<EndpointPathKind> {
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => Ok(EndpointPathKind::Directory),
+        Ok(metadata) if metadata.is_file() => Ok(EndpointPathKind::File {
+            size_bytes: metadata.len(),
+            modified_at: metadata.modified().ok().map(system_time_rfc3339),
+        }),
+        Ok(metadata) => Ok(EndpointPathKind::Other {
+            size_bytes: metadata.len(),
+            modified_at: metadata.modified().ok().map(system_time_rfc3339),
+        }),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(EndpointPathKind::Missing),
+        Err(err) => Err(err).with_context(|| format!("checking destination {}", path.display())),
+    }
+}
+
+fn probe_remote_path(host: &str, path: &str) -> anyhow::Result<EndpointPathKind> {
+    let command = format!(
+        "if test ! -e {path}; then exit 3; elif test -d {path}; then printf 'dir\\n'; elif test -f {path}; then printf 'file '; stat -c '%s' {path}; else printf 'other '; stat -c '%s' {path}; fi",
+        path = remote_shell_path(path)
+    );
+    let output = Command::new("ssh")
+        .arg(host)
+        .arg(command)
+        .output()
+        .with_context(|| format!("checking remote destination {host}:{path}"))?;
+    if output.status.code() == Some(3) {
+        return Ok(EndpointPathKind::Missing);
+    }
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "remote destination probe failed for {host}:{path}: {}",
+            stderr.trim()
+        );
+    }
+    let stdout = String::from_utf8(output.stdout).context("remote stat output was not UTF-8")?;
+    let mut fields = stdout.split_whitespace();
+    match fields.next() {
+        Some("dir") => Ok(EndpointPathKind::Directory),
+        Some("file") => Ok(EndpointPathKind::File {
+            size_bytes: parse_remote_stat_size(fields.next(), host, path)?,
+            modified_at: None,
+        }),
+        Some("other") => Ok(EndpointPathKind::Other {
+            size_bytes: parse_remote_stat_size(fields.next(), host, path)?,
+            modified_at: None,
+        }),
+        _ => anyhow::bail!("remote stat produced invalid output for {host}:{path}"),
+    }
+}
+
+fn parse_remote_stat_size(value: Option<&str>, host: &str, path: &str) -> anyhow::Result<u64> {
+    value
+        .ok_or_else(|| anyhow::anyhow!("remote stat produced no size for {host}:{path}"))?
+        .parse::<u64>()
+        .with_context(|| format!("remote stat produced invalid size for {host}:{path}"))
 }
 
 fn remote_join(root: &str, relative_path: &str) -> anyhow::Result<String> {
@@ -1358,6 +1588,45 @@ fn sync_for_paranoid_readback(dest_path: &Path, parent: Option<PathBuf>) -> anyh
     Ok(())
 }
 
+fn source_modified_at(entry: &db::TransferPlanEntryRow) -> anyhow::Result<Option<String>> {
+    let metadata: serde_json::Value = serde_json::from_str(&entry.metadata_json)
+        .with_context(|| format!("parsing transfer metadata for {}", entry.relative_path))?;
+    Ok(metadata
+        .get("source_modified_at")
+        .and_then(|value| value.as_str())
+        .map(str::to_string))
+}
+
+fn set_local_file_mtime(path: &Path, modified_at: Option<&str>) -> anyhow::Result<()> {
+    let Some(modified_at) = modified_at else {
+        return Ok(());
+    };
+    let time = file_time_from_rfc3339(modified_at)?;
+    filetime::set_file_mtime(path, time)
+        .with_context(|| format!("setting mtime on {}", path.display()))
+}
+
+fn set_remote_file_mtime(host: &str, path: &str, modified_at: Option<&str>) -> anyhow::Result<()> {
+    let Some(modified_at) = modified_at else {
+        return Ok(());
+    };
+    run_command(Command::new("ssh").arg(host).arg(format!(
+        "touch -d {} {}",
+        shell_quote(modified_at),
+        remote_shell_path(path)
+    )))
+    .with_context(|| format!("setting remote mtime on {host}:{path}"))
+}
+
+fn file_time_from_rfc3339(value: &str) -> anyhow::Result<FileTime> {
+    let dt = DateTime::parse_from_rfc3339(value)
+        .with_context(|| format!("invalid RFC3339 timestamp: {value}"))?;
+    Ok(FileTime::from_unix_time(
+        dt.timestamp(),
+        dt.timestamp_subsec_nanos(),
+    ))
+}
+
 fn hash_stream_to_writer(
     reader: &mut std::fs::File,
     mut writer: Option<&mut std::fs::File>,
@@ -1454,9 +1723,11 @@ fn build_transfer_plan(
     source_root: &RootRow,
     dest_root: &RootRow,
     selection: &db::SelectionSummary,
-    selected: &std::collections::BTreeSet<String>,
+    selected: &BTreeSet<String>,
     job_id: &str,
 ) -> anyhow::Result<(String, Vec<TransferPlanActionSummary>)> {
+    let dest_endpoint = root_transfer_endpoint(conn, dest_root)?;
+    let mut probe_cache = DestinationProbeCache::default();
     let plan_id = db::create_transfer_plan(
         conn,
         Some(job_id),
@@ -1492,7 +1763,17 @@ fn build_transfer_plan(
             continue;
         };
 
-        let dest = db::path_observation_for_root_path(conn, &dest_root.id, relative_path)?;
+        let indexed_dest = db::path_observation_for_root_path(conn, &dest_root.id, relative_path)?;
+        let dest = match indexed_dest {
+            Some(row) => Some(DestinationObservation {
+                size_bytes: row.size_bytes,
+                modified_at: row.modified_at,
+                content_id: row.content_id,
+                source: DestinationObservationSource::Index,
+                conflict_reason: None,
+            }),
+            None => probe_destination_observation(&dest_endpoint, relative_path, &mut probe_cache)?,
+        };
         let source_basename = basename(Path::new(&source.relative_path))
             .unwrap_or_else(|_| source.relative_path.clone());
         let hash_collisions = match source.content_id.as_deref() {
@@ -1522,7 +1803,17 @@ fn build_transfer_plan(
                     .or_else(|| filename_collisions.first())
                     .and_then(|row| row.content_id.as_deref()),
             ),
-            None => ("copy", "destination path is not indexed", None),
+            None => (
+                "copy",
+                "destination path does not exist or is not indexed",
+                None,
+            ),
+            Some(dest) if dest.conflict_reason.is_some() => (
+                "conflict",
+                dest.conflict_reason
+                    .unwrap_or("destination path cannot receive this copy"),
+                dest.content_id.as_deref(),
+            ),
             Some(dest) => {
                 match (
                     source.content_id.as_deref(),
@@ -1532,6 +1823,11 @@ fn build_transfer_plan(
                     (Some(source_id), Some(dest_id), _) if source_id == dest_id => {
                         ("skip", "destination content already matches", Some(dest_id))
                     }
+                    (_, _, true) if dest.source == DestinationObservationSource::Probe => (
+                        "review",
+                        "destination path exists but is not indexed; review before copy",
+                        dest.content_id.as_deref(),
+                    ),
                     (_, _, true) => (
                         "verify_needed",
                         "destination has the same size but lacks matching hash proof",
@@ -1560,6 +1856,7 @@ fn build_transfer_plan(
                 metadata_json: serde_json::json!({
                     "source_modified_at": source.modified_at,
                     "dest_modified_at": dest.as_ref().and_then(|row| row.modified_at.clone()),
+                    "dest_observation_source": dest.as_ref().map(|row| row.source.label()),
                     "hash_collisions": collision_metadata(&hash_collisions),
                     "filename_size_date_collisions": collision_metadata(&filename_collisions),
                 }),
@@ -1846,10 +2143,110 @@ mod tests {
     }
 
     #[test]
+    fn plans_review_when_unindexed_destination_path_exists_with_same_size() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        std::fs::write(dest_dir.path().join("a.txt"), b"1234567890").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+        let source_id =
+            db::ensure_root(&conn, &machine_id, &source_dir.path().to_string_lossy()).unwrap();
+        let dest_id =
+            db::ensure_root(&conn, &machine_id, &dest_dir.path().to_string_lossy()).unwrap();
+        observe(&conn, &machine_id, &source_id, "a.txt", 10, None);
+        db::toggle_selection_entry(&conn, &source_id, "a.txt").unwrap();
+        let source = db::root_by_id(&conn, &source_id).unwrap().unwrap();
+        let dest = db::root_by_id(&conn, &dest_id).unwrap().unwrap();
+
+        let result = plan_selected_files(&conn, &source, &dest).unwrap();
+        let entry = only_entry(&conn, &result.plan_id);
+
+        assert_eq!(entry.action, "review");
+        assert!(entry.reason.contains("not indexed"));
+        assert!(entry
+            .metadata_json
+            .contains("\"dest_observation_source\":\"probe\""));
+    }
+
+    #[test]
+    fn plans_conflict_when_unindexed_destination_path_exists_with_different_size() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        std::fs::write(dest_dir.path().join("a.txt"), b"different-size").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+        let source_id =
+            db::ensure_root(&conn, &machine_id, &source_dir.path().to_string_lossy()).unwrap();
+        let dest_id =
+            db::ensure_root(&conn, &machine_id, &dest_dir.path().to_string_lossy()).unwrap();
+        observe(&conn, &machine_id, &source_id, "a.txt", 10, None);
+        db::toggle_selection_entry(&conn, &source_id, "a.txt").unwrap();
+        let source = db::root_by_id(&conn, &source_id).unwrap().unwrap();
+        let dest = db::root_by_id(&conn, &dest_id).unwrap().unwrap();
+
+        let result = plan_selected_files(&conn, &source, &dest).unwrap();
+        let entry = only_entry(&conn, &result.plan_id);
+
+        assert_eq!(entry.action, "conflict");
+        assert!(entry.reason.contains("exists"));
+        assert!(entry
+            .metadata_json
+            .contains("\"dest_observation_source\":\"probe\""));
+    }
+
+    #[test]
+    fn plans_copy_when_unindexed_destination_parent_is_missing() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+        let source_id =
+            db::ensure_root(&conn, &machine_id, &source_dir.path().to_string_lossy()).unwrap();
+        let dest_id =
+            db::ensure_root(&conn, &machine_id, &dest_dir.path().to_string_lossy()).unwrap();
+        observe(
+            &conn,
+            &machine_id,
+            &source_id,
+            "missing/dir/a.txt",
+            10,
+            None,
+        );
+        observe(
+            &conn,
+            &machine_id,
+            &source_id,
+            "missing/dir/b.txt",
+            20,
+            None,
+        );
+        db::toggle_selection_entry(&conn, &source_id, "missing/dir/a.txt").unwrap();
+        db::toggle_selection_entry(&conn, &source_id, "missing/dir/b.txt").unwrap();
+        let source = db::root_by_id(&conn, &source_id).unwrap().unwrap();
+        let dest = db::root_by_id(&conn, &dest_id).unwrap().unwrap();
+
+        let result = plan_selected_files(&conn, &source, &dest).unwrap();
+        let entries = db::transfer_plan_entries(&conn, &result.plan_id).unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|entry| entry.action == "copy"));
+        assert!(!dest_dir.path().join("missing").exists());
+    }
+
+    #[test]
     fn runs_copy_entries_and_updates_destination_projection() {
         let source_dir = tempfile::tempdir().unwrap();
         let dest_dir = tempfile::tempdir().unwrap();
-        std::fs::write(source_dir.path().join("a.txt"), b"hello").unwrap();
+        let source_file = source_dir.path().join("a.txt");
+        let source_mtime = filetime::FileTime::from_unix_time(1_700_000_000, 123_000_000);
+        std::fs::write(&source_file, b"hello").unwrap();
+        filetime::set_file_mtime(&source_file, source_mtime).unwrap();
 
         let conn = Connection::open_in_memory().unwrap();
         db::init_schema(&conn).unwrap();
@@ -1886,11 +2283,20 @@ mod tests {
             std::fs::read(dest_dir.path().join("a.txt")).unwrap(),
             b"hello"
         );
+        let dest_mtime = filetime::FileTime::from_last_modification_time(
+            &std::fs::metadata(dest_dir.path().join("a.txt")).unwrap(),
+        );
+        assert_eq!(dest_mtime.unix_seconds(), source_mtime.unix_seconds());
+        assert_eq!(dest_mtime.nanoseconds(), source_mtime.nanoseconds());
         let dest_obs = db::path_observation_for_root_path(&conn, &dest_id, "a.txt")
             .unwrap()
             .unwrap();
         assert_eq!(dest_obs.size_bytes, 5);
         assert_eq!(dest_obs.content_id.as_deref(), Some(content_id.as_str()));
+        assert_eq!(
+            dest_obs.modified_at.as_deref(),
+            Some("2023-11-14T22:13:20.123+00:00")
+        );
         let job = db::job_by_id(&conn, &result.job_id).unwrap().unwrap();
         assert_eq!(job.kind, "transfer_copy");
         assert_eq!(job.status, "completed");

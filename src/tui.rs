@@ -902,25 +902,25 @@ fn render_roots(
 
 fn root_header() -> String {
     format!(
-        "{:<2} {:<1} {:<8} {:>5} {:<6}",
-        "", "T", "ROOT", "SIZE", "JOB"
+        "{:<2} {:<1} {:<8} {:>5} {:<11}",
+        "", "T", "ROOT", "SIZE", "STATE"
     )
 }
 
 fn root_row(marker: &str, transfer_marker: &str, root: &db::RootRow) -> String {
     format!(
-        "{:<2} {:<1} {:<8} {:>5} {:<6}",
+        "{:<2} {:<1} {:<8} {:>5} {:<11}",
         marker,
         transfer_marker,
         truncate(&root_display_name(root), 8),
         human_size(root.current_size_bytes as u64),
-        truncate(&root_job_label(root), 6)
+        truncate(&root_job_label(root), 11)
     )
 }
 
 fn temporary_root_row(selected: bool, browse: &TemporaryBrowse) -> String {
     format!(
-        "{:<2} {:<1} {:<8} {:>5} {:<6}",
+        "{:<2} {:<1} {:<8} {:>5} {:<11}",
         if selected { "> " } else { "  " },
         "T",
         truncate(&browse.label, 8),
@@ -955,9 +955,9 @@ fn root_job_label(root: &db::RootRow) -> String {
 
 fn compact_job_kind(kind: &str) -> &str {
     match kind {
-        "scan" => "s",
-        "hash" => "h",
-        "verify" => "v",
+        "scan" => "scan",
+        "hash" => "hash",
+        "verify" => "verify",
         other => other,
     }
 }
@@ -967,7 +967,7 @@ fn compact_status(status: &str) -> &str {
         "created" => "new",
         "running" => "run",
         "completed" => "done",
-        "completed_with_errors" => "errs",
+        "completed_with_errors" => "errors",
         "failed" => "fail",
         other => other,
     }
