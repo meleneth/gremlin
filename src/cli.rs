@@ -161,11 +161,46 @@ pub enum TransferCommands {
         #[arg(long)]
         action: Option<String>,
     },
+    Decide {
+        plan_id: String,
+        relative_path: String,
+        #[arg(long, value_enum)]
+        decision: TransferDecision,
+    },
     Run {
         plan_id: String,
         #[arg(long)]
         paranoid: bool,
     },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum TransferDecision {
+    Accept,
+    Drop,
+}
+
+impl TransferDecision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Accept => "accept",
+            Self::Drop => "drop",
+        }
+    }
+
+    pub fn action(self) -> &'static str {
+        match self {
+            Self::Accept => "copy",
+            Self::Drop => "skip",
+        }
+    }
+
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::Accept => "review accepted for copy",
+            Self::Drop => "review dropped by user",
+        }
+    }
 }
 
 impl JobKind {

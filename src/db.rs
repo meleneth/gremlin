@@ -1140,6 +1140,35 @@ pub fn transfer_plan_entries_filtered(
     rows.collect()
 }
 
+pub fn decide_review_transfer_plan_entry(
+    conn: &Connection,
+    plan_id: &str,
+    relative_path: &str,
+    action: &str,
+    reason: &str,
+    metadata_json: serde_json::Value,
+) -> rusqlite::Result<bool> {
+    let updated = conn.execute(
+        r#"
+        UPDATE transfer_plan_entries
+        SET action = ?3,
+            reason = ?4,
+            metadata_json = ?5
+        WHERE plan_id = ?1
+          AND relative_path = ?2
+          AND action = 'review'
+        "#,
+        params![
+            plan_id,
+            relative_path,
+            action,
+            reason,
+            serde_json::to_string(&metadata_json).unwrap_or_else(|_| "{}".to_string())
+        ],
+    )?;
+    Ok(updated > 0)
+}
+
 fn transfer_plan_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TransferPlanEntryRow> {
     let size: i64 = row.get(1)?;
     Ok(TransferPlanEntryRow {
@@ -2094,8 +2123,8 @@ mod tests {
                 size_bytes: 20,
                 source_content_id: None,
                 dest_content_id: None,
-                action: "conflict",
-                reason: "different",
+                action: "review",
+                reason: "possible duplicate",
                 metadata_json: serde_json::json!({}),
             },
         )
@@ -2110,6 +2139,29 @@ mod tests {
         let copy_entries = transfer_plan_entries_filtered(&conn, &plan_id, Some("copy")).unwrap();
         assert_eq!(copy_entries.len(), 1);
         assert_eq!(copy_entries[0].relative_path, "a.txt");
+
+        assert!(decide_review_transfer_plan_entry(
+            &conn,
+            &plan_id,
+            "b.txt",
+            "skip",
+            "review dropped by user",
+            serde_json::json!({ "decision": "drop" }),
+        )
+        .unwrap());
+        let skipped_entries =
+            transfer_plan_entries_filtered(&conn, &plan_id, Some("skip")).unwrap();
+        assert_eq!(skipped_entries.len(), 1);
+        assert_eq!(skipped_entries[0].relative_path, "b.txt");
+        assert!(!decide_review_transfer_plan_entry(
+            &conn,
+            &plan_id,
+            "b.txt",
+            "copy",
+            "review accepted for copy",
+            serde_json::json!({ "decision": "accept" }),
+        )
+        .unwrap());
     }
 
     #[test]

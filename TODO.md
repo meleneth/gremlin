@@ -53,7 +53,7 @@
 - Add more transfer plan filters and output formats after the copy runner requirements settle.
 - Model copy chunks or per-file transfer checkpoints beyond the current whole-file copy runner.
 - Make resume distinguish size-only skips from hash-verified skips.
-- Add TUI/CLI controls to accept, drop, or retarget `review` transfer entries before run.
+- Add TUI/CLI controls to retarget `review` transfer entries before run.
 - Add remote-to-remote transfer execution after one-sided SSH copies settle.
 - Add SSH paranoid readback/hash verification after remote writes.
 - Replace `scp` transfer execution with owned streams so SSH copies can emit live byte/rate progress.

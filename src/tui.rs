@@ -455,6 +455,22 @@ async fn run_loop(
                     KeyCode::Char('r') => {
                         run_current_transfer_plan(db_path, job_tx.clone(), &mut state);
                     }
+                    KeyCode::Char('a') => {
+                        decide_current_plan_entry(
+                            conn,
+                            &mut state,
+                            "copy",
+                            "review accepted for copy",
+                        )?;
+                    }
+                    KeyCode::Char('d') => {
+                        decide_current_plan_entry(
+                            conn,
+                            &mut state,
+                            "skip",
+                            "review dropped by user",
+                        )?;
+                    }
                     KeyCode::Enter => {
                         create_transfer_plan_from_selection(conn, &roots, &mut state)?;
                     }
@@ -487,7 +503,7 @@ fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "  q quit | Tab panes | arrows move | Space mark | s scan | h hash | c cancel | t plan | Enter | r run",
+            "  q quit | Tab panes | arrows move | Space mark | s scan | h hash | c cancel | t plan | Enter | r run | a accept | d drop",
             theme::muted(),
         ),
     ]))
@@ -1315,6 +1331,69 @@ fn run_current_transfer_plan(
         copy_entries
     );
     spawn_transfer_runner(db_path.to_path_buf(), plan_id, job_tx);
+}
+
+fn decide_current_plan_entry(
+    conn: &Connection,
+    state: &mut AppState,
+    action: &str,
+    reason: &str,
+) -> anyhow::Result<()> {
+    if state.focus != FocusPane::Plan {
+        state.status = "Move focus to Plan before deciding entries".to_string();
+        return Ok(());
+    }
+    let Some(plan) = state.last_plan.as_ref() else {
+        state.status = "No transfer plan to decide".to_string();
+        return Ok(());
+    };
+    let Some(entry) = plan.entries.get(state.plan_offset) else {
+        state.status = "No plan entry selected".to_string();
+        return Ok(());
+    };
+    if entry.action != "review" {
+        state.status = format!(
+            "{} is {}; only review entries can be decided",
+            entry.relative_path, entry.action
+        );
+        return Ok(());
+    }
+    let plan_id = plan.plan_id.clone();
+    let relative_path = entry.relative_path.clone();
+    let changed = db::decide_review_transfer_plan_entry(
+        conn,
+        &plan_id,
+        &relative_path,
+        action,
+        reason,
+        serde_json::json!({
+            "decision": action,
+            "decided_at": crate::util::now_rfc3339(),
+        }),
+    )?;
+    if !changed {
+        state.status = format!("{} is no longer a review entry", relative_path);
+        refresh_last_plan(conn, state, &plan_id)?;
+        return Ok(());
+    }
+    refresh_last_plan(conn, state, &plan_id)?;
+    state.status = format!("{} -> {}", relative_path, action);
+    Ok(())
+}
+
+fn refresh_last_plan(conn: &Connection, state: &mut AppState, plan_id: &str) -> anyhow::Result<()> {
+    if let Some(plan) = state
+        .last_plan
+        .as_mut()
+        .filter(|plan| plan.plan_id == plan_id)
+    {
+        plan.summary = db::transfer_plan_action_summary(conn, plan_id)?;
+        plan.entries = db::transfer_plan_entries(conn, plan_id)?;
+        if state.plan_offset >= plan.entries.len() {
+            state.plan_offset = plan.entries.len().saturating_sub(1);
+        }
+    }
+    Ok(())
 }
 
 fn spawn_job_runner(

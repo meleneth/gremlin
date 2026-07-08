@@ -342,6 +342,39 @@ async fn main() -> anyhow::Result<()> {
                     print_transfer_entry(&entry);
                 }
             }
+            TransferCommands::Decide {
+                plan_id,
+                relative_path,
+                decision,
+            } => {
+                let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
+                let conn = db::open_existing(&db)?;
+                let Some(plan) = db::transfer_plan_by_id(&conn, &plan_id)? else {
+                    anyhow::bail!("transfer plan not found: {plan_id}");
+                };
+                let changed = db::decide_review_transfer_plan_entry(
+                    &conn,
+                    &plan.id,
+                    &relative_path,
+                    decision.action(),
+                    decision.reason(),
+                    serde_json::json!({
+                        "decision": decision.as_str(),
+                        "decided_at": util::now_rfc3339(),
+                    }),
+                )?;
+                if !changed {
+                    anyhow::bail!(
+                        "no review entry found for {relative_path} in transfer plan {plan_id}"
+                    );
+                }
+                println!(
+                    "decision:\t{}\t{}\t{}",
+                    decision.as_str(),
+                    decision.action(),
+                    relative_path
+                );
+            }
             TransferCommands::Run { plan_id, paranoid } => {
                 let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
                 let conn = db::open_existing(&db)?;
