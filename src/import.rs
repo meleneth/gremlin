@@ -29,14 +29,6 @@ pub fn import_events_file_for_target(
     import_events_file_for_target_inner(conn, input, target, true)
 }
 
-pub fn import_events_file_for_target_silent(
-    conn: &Connection,
-    input: &Path,
-    target: Option<&EventImportTarget>,
-) -> anyhow::Result<()> {
-    import_events_file_for_target_inner(conn, input, target, false)
-}
-
 fn import_events_file_for_target_inner(
     conn: &Connection,
     input: &Path,

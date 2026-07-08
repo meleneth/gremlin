@@ -16,7 +16,6 @@ use cli::{
     Cli, Commands, ConfigCommands, JobCommands, TargetCommands, TransferCommands, WorkerCommands,
 };
 use serde::Serialize;
-use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
@@ -907,7 +906,7 @@ fn import_ssh_root(
         tui::ImportMode::Fast => {
             import_ssh_fast_stat(&conn, parsed, machine_id, &root_id, &execution_path)?
         }
-        tui::ImportMode::Hash => import_ssh_worker_hash(
+        tui::ImportMode::Hash => import_ssh_native_hash(
             &conn,
             parsed,
             machine_id,
@@ -991,7 +990,17 @@ fn import_ssh_fast_stat(
     Ok(entries.len() as u64)
 }
 
-fn import_ssh_worker_hash(
+#[derive(Debug)]
+struct RemoteHashEntry {
+    relative_path: String,
+    basename: String,
+    parent_path: String,
+    size_bytes: u64,
+    modified_at: Option<String>,
+    sha256: String,
+}
+
+fn import_ssh_native_hash(
     conn: &rusqlite::Connection,
     parsed: &ParsedTarget,
     machine_id: &str,
@@ -1003,8 +1012,52 @@ fn import_ssh_worker_hash(
         .machine_hint
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("SSH target missing machine hint"))?;
+    let entries = native_hash_ssh_tree(host, remote_path)?;
+    let collection_id = db::create_checksum_collection(
+        conn,
+        &format!("ssh native hash {root_path}"),
+        "ssh_native_hash",
+        None,
+    )?;
+    db::attach_checksum_collection_target(conn, &collection_id, machine_id, root_id)?;
+    for entry in &entries {
+        db::insert_checksum_entry(
+            conn,
+            db::ChecksumEntryInput {
+                collection_id: &collection_id,
+                relative_path: &entry.relative_path,
+                basename: &entry.basename,
+                size_bytes: entry.size_bytes,
+                modified_at: entry.modified_at.as_deref(),
+                blake3: None,
+                sha256: Some(&entry.sha256),
+                metadata_json: serde_json::json!({
+                    "source": "ssh_native_hash",
+                    "root_path": root_path,
+                }),
+            },
+        )?;
+        let content_id = db::ensure_content_object_sha256(conn, entry.size_bytes, &entry.sha256)?;
+        db::insert_path_observation(
+            conn,
+            db::PathObservationInput {
+                machine_id,
+                root_id,
+                relative_path: &entry.relative_path,
+                basename: &entry.basename,
+                parent_path: &entry.parent_path,
+                size_bytes: entry.size_bytes,
+                modified_at: entry.modified_at.as_deref(),
+                content_id: Some(&content_id),
+            },
+        )?;
+    }
+    Ok(entries.len() as u64)
+}
+
+fn native_hash_ssh_tree(host: &str, remote_path: &str) -> anyhow::Result<Vec<RemoteHashEntry>> {
     let command = format!(
-        "gremlin worker hash {} --jsonl",
+        "find -L {} -type f -printf '%P\\t%s\\t%T+\\t' -exec sha256sum {{}} \\;",
         remote_shell_path(remote_path)
     );
     let output = Command::new("ssh")
@@ -1015,31 +1068,45 @@ fn import_ssh_worker_hash(
         .arg(host)
         .arg(command)
         .output()
-        .with_context(|| format!("running remote hash worker for {host}:{remote_path}"))?;
+        .with_context(|| format!("hashing SSH target {host}:{remote_path}"))?;
     if !output.status.success() {
         anyhow::bail!(
-            "remote hash failed for {host}:{remote_path}: {}",
+            "ssh native hash failed for {host}:{remote_path}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    let temp_path =
-        std::env::temp_dir().join(format!("gremlin-{}.jsonl", util::new_id("ssh_hash")));
-    {
-        let mut file = std::fs::File::create(&temp_path)
-            .with_context(|| format!("creating {}", temp_path.display()))?;
-        file.write_all(&output.stdout)
-            .with_context(|| format!("writing {}", temp_path.display()))?;
+    Ok(parse_native_hash_output(
+        remote_path,
+        &String::from_utf8_lossy(&output.stdout),
+    ))
+}
+
+fn parse_native_hash_output(remote_path: &str, stdout: &str) -> Vec<RemoteHashEntry> {
+    let mut entries = Vec::new();
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let parts = line.splitn(4, '\t').collect::<Vec<_>>();
+        if parts.len() != 4 {
+            continue;
+        }
+        let Some(sha256) = parts[3].split_whitespace().next() else {
+            continue;
+        };
+        let relative_path = if parts[0].is_empty() {
+            remote_path_basename(remote_path)
+        } else {
+            parts[0].to_string()
+        };
+        entries.push(RemoteHashEntry {
+            basename: remote_basename(&relative_path).to_string(),
+            parent_path: remote_parent(&relative_path),
+            relative_path,
+            size_bytes: parts[1].parse::<u64>().unwrap_or(0),
+            modified_at: Some(parts[2].to_string()),
+            sha256: sha256.to_string(),
+        });
     }
-    let target = import::EventImportTarget {
-        machine_id: machine_id.to_string(),
-        root_id: root_id.to_string(),
-        root_path: root_path.to_string(),
-    };
-    let result = import::import_events_file_for_target_silent(conn, &temp_path, Some(&target));
-    let _ = std::fs::remove_file(&temp_path);
-    result?;
-    let summary = db::root_summary(conn, root_id)?;
-    Ok(summary.file_count as u64)
+    entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    entries
 }
 
 fn fast_scan_ssh_tree(
@@ -1281,5 +1348,35 @@ mod tests {
             "foo.png"
         );
         assert_eq!(remote_path_basename("/srv/archive/foo.png"), "foo.png");
+    }
+
+    #[test]
+    fn parses_native_ssh_hash_output_for_directory_files() {
+        let entries = parse_native_hash_output(
+            "/srv/archive",
+            "dir/a.txt\t5\t2026-07-08 12:00:00.000000000 +0000\tabcd1234  /srv/archive/dir/a.txt\n",
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].relative_path, "dir/a.txt");
+        assert_eq!(entries[0].basename, "a.txt");
+        assert_eq!(entries[0].parent_path, "dir");
+        assert_eq!(entries[0].size_bytes, 5);
+        assert_eq!(entries[0].sha256, "abcd1234");
+    }
+
+    #[test]
+    fn parses_native_ssh_hash_output_for_root_file() {
+        let entries = parse_native_hash_output(
+            "/srv/archive/foo.png",
+            "\t7\t2026-07-08 12:00:00.000000000 +0000\tffff  /srv/archive/foo.png\n",
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].relative_path, "foo.png");
+        assert_eq!(entries[0].basename, "foo.png");
+        assert_eq!(entries[0].parent_path, ".");
+        assert_eq!(entries[0].size_bytes, 7);
+        assert_eq!(entries[0].sha256, "ffff");
     }
 }

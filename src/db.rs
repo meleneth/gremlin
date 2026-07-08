@@ -1074,9 +1074,32 @@ pub fn ensure_content_object(
     blake3: &str,
     sha256: &str,
 ) -> rusqlite::Result<String> {
+    ensure_content_object_with_hashes(conn, size_bytes, Some(blake3), Some(sha256))
+}
+
+pub fn ensure_content_object_sha256(
+    conn: &Connection,
+    size_bytes: u64,
+    sha256: &str,
+) -> rusqlite::Result<String> {
+    ensure_content_object_with_hashes(conn, size_bytes, None, Some(sha256))
+}
+
+fn ensure_content_object_with_hashes(
+    conn: &Connection,
+    size_bytes: u64,
+    blake3: Option<&str>,
+    sha256: Option<&str>,
+) -> rusqlite::Result<String> {
     if let Some(id) = conn
         .query_row(
-            "SELECT id FROM content_objects WHERE size_bytes = ?1 AND blake3 = ?2 AND sha256 = ?3",
+            r#"
+            SELECT id
+            FROM content_objects
+            WHERE size_bytes = ?1
+              AND ((blake3 IS NULL AND ?2 IS NULL) OR blake3 = ?2)
+              AND ((sha256 IS NULL AND ?3 IS NULL) OR sha256 = ?3)
+            "#,
             params![size_bytes as i64, blake3, sha256],
             |row| row.get(0),
         )
