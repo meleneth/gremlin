@@ -131,6 +131,7 @@ pub(super) async fn run_loop(
             }
         }
         let roots = db::roots(conn)?;
+        state.resumable_transfer_plans = resumable_transfer_plans(conn)?;
         let root_count = visible_root_count(&state, roots.len());
         normalize_selection(&mut state, root_count);
         let selected = selected_persisted_root(&roots, &state);
@@ -378,6 +379,13 @@ pub(super) async fn run_loop(
                         start_temporary_import_prompt(&mut state, file);
                     }
                     KeyCode::Char('r') => {
+                        if state.focus == FocusPane::Roots {
+                            if let Some(plan_id) = selected_resume_plan(&state, roots.len())
+                                .map(|plan| plan.id.clone())
+                            {
+                                load_transfer_plan_by_id(conn, &plan_id, &mut state)?;
+                            }
+                        }
                         run_current_transfer_plan(db_path, job_tx.clone(), &mut state);
                     }
                     KeyCode::Char('a') => {
@@ -413,6 +421,14 @@ pub(super) async fn run_loop(
                                 root_id.as_deref(),
                                 file.as_ref(),
                             );
+                        } else if state.focus == FocusPane::Roots {
+                            if let Some(plan_id) = selected_resume_plan(&state, roots.len())
+                                .map(|plan| plan.id.clone())
+                            {
+                                load_transfer_plan_by_id(conn, &plan_id, &mut state)?;
+                            } else {
+                                create_transfer_plan_from_selection(conn, &roots, &mut state)?;
+                            }
                         } else {
                             create_transfer_plan_from_selection(conn, &roots, &mut state)?;
                         }
@@ -500,6 +516,13 @@ fn request_immediate_quit(conn: &Connection, state: &mut AppState) -> anyhow::Re
         format!("interrupt requested; cancel marked for {requested} active job(s)"),
     );
     Ok(())
+}
+
+fn resumable_transfer_plans(conn: &Connection) -> anyhow::Result<Vec<db::TransferPlanRow>> {
+    Ok(db::recent_transfer_plans(conn, 50)?
+        .into_iter()
+        .filter(|plan| matches!(plan.status.as_str(), "canceled" | "running"))
+        .collect())
 }
 
 fn append_interrupt_cancel_event(

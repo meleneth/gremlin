@@ -51,6 +51,7 @@ struct AppState {
     pending_scoped_job: Option<PendingScopedJob>,
     active_background_jobs: usize,
     active_job_ids: BTreeSet<String>,
+    resumable_transfer_plans: Vec<db::TransferPlanRow>,
     activities: VecDeque<ActivityMessage>,
     last_plan: Option<PlanSnapshot>,
     collection_result: Option<CollectionSnapshot>,

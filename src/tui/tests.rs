@@ -474,6 +474,37 @@ fn transfer_plan_selection_moves_focus_to_roots() {
 }
 
 #[test]
+fn root_selection_can_target_resume_transfer_plan_rows() {
+    let plan = db::TransferPlanRow {
+        id: "plan_resume".to_string(),
+        job_id: Some("job_1".to_string()),
+        source_root_id: "source".to_string(),
+        source_path: "/tmp/source".to_string(),
+        dest_root_id: "dest".to_string(),
+        dest_path: "/tmp/dest".to_string(),
+        selection_set_id: None,
+        status: "canceled".to_string(),
+        created_at: "2026-07-08T00:00:00Z".to_string(),
+        params_json: None,
+        entry_count: 3,
+        total_bytes: 1024,
+    };
+    let state = AppState {
+        selected_root: 2,
+        resumable_transfer_plans: vec![plan.clone()],
+        ..AppState::default()
+    };
+
+    assert_eq!(visible_root_count(&state, 2), 3);
+    assert!(selected_persisted_root(&[], &state).is_none());
+    assert_eq!(
+        selected_resume_plan(&state, 2).map(|plan| plan.id.as_str()),
+        Some("plan_resume")
+    );
+    assert!(resume_plan_row("> ", &plan).contains("canceled"));
+}
+
+#[test]
 fn transfer_plan_destination_uses_visible_persisted_root_with_temporary_browse() {
     let conn = Connection::open_in_memory().unwrap();
     db::init_schema(&conn).unwrap();

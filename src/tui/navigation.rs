@@ -8,7 +8,9 @@ pub(super) fn normalize_selection(state: &mut AppState, root_count: usize) {
 }
 
 pub(super) fn visible_root_count(state: &AppState, persisted_count: usize) -> usize {
-    persisted_count + usize::from(state.temporary_browse.is_some())
+    persisted_count
+        + usize::from(state.temporary_browse.is_some())
+        + state.resumable_transfer_plans.len()
 }
 
 pub(super) fn visible_index_for_persisted(state: &AppState, persisted_idx: usize) -> usize {
@@ -27,7 +29,20 @@ pub(super) fn selected_persisted_root<'a>(
     roots: &'a [db::RootRow],
     state: &AppState,
 ) -> Option<&'a db::RootRow> {
-    roots.get(persisted_index_for_visible(state)?)
+    let persisted_idx = persisted_index_for_visible(state)?;
+    if persisted_idx >= roots.len() {
+        return None;
+    }
+    roots.get(persisted_idx)
+}
+
+pub(super) fn selected_resume_plan(
+    state: &AppState,
+    persisted_count: usize,
+) -> Option<&db::TransferPlanRow> {
+    let first_resume = persisted_count + usize::from(state.temporary_browse.is_some());
+    let resume_idx = state.selected_root.checked_sub(first_resume)?;
+    state.resumable_transfer_plans.get(resume_idx)
 }
 
 pub(super) fn selected_temporary_browse(state: &AppState) -> Option<&TemporaryBrowse> {

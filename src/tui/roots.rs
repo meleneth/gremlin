@@ -46,6 +46,27 @@ impl Widget for RootsPane<'_> {
                 };
                 ListItem::new(root_row(marker, transfer_marker, root)).style(style)
             }));
+            if !self.state.resumable_transfer_plans.is_empty() {
+                rows.push(ListItem::new("  Resume").style(theme::header()));
+                let first_resume =
+                    self.roots.len() + usize::from(self.state.temporary_browse.is_some());
+                rows.extend(self.state.resumable_transfer_plans.iter().enumerate().map(
+                    |(resume_idx, plan)| {
+                        let idx = first_resume + resume_idx;
+                        let marker = if idx == self.state.selected_root {
+                            "> "
+                        } else {
+                            "  "
+                        };
+                        let style = if idx == self.state.selected_root {
+                            theme::selected()
+                        } else {
+                            theme::warn()
+                        };
+                        ListItem::new(resume_plan_row(marker, plan)).style(style)
+                    },
+                ));
+            }
             rows
         };
         List::new(items)
@@ -53,6 +74,17 @@ impl Widget for RootsPane<'_> {
             .block(focus_block("Roots", FocusPane::Roots, self.state.focus))
             .render(area, buf);
     }
+}
+
+pub(super) fn resume_plan_row(marker: &str, plan: &db::TransferPlanRow) -> String {
+    format!(
+        "{:<2} {:<1} {:<8} {:>5} {:<11}",
+        marker,
+        "R",
+        short_id(&plan.id),
+        human_size(plan.total_bytes as u64),
+        truncate(&format!("{} {}", plan.status, plan.entry_count), 11)
+    )
 }
 
 pub(super) fn root_header() -> String {

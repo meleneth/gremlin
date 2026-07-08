@@ -198,3 +198,41 @@ pub(super) fn load_latest_transfer_plan(
     state.status = format!("loaded transfer plan {}", short_id(&plan.id));
     Ok(())
 }
+
+pub(super) fn load_transfer_plan_by_id(
+    conn: &Connection,
+    plan_id: &str,
+    state: &mut AppState,
+) -> anyhow::Result<()> {
+    let Some(plan) = db::transfer_plan_by_id(conn, plan_id)? else {
+        state.set_status(
+            ActivityLevel::Error,
+            format!("transfer plan not found: {plan_id}"),
+        );
+        return Ok(());
+    };
+    load_transfer_plan_row(conn, plan, state)
+}
+
+fn load_transfer_plan_row(
+    conn: &Connection,
+    plan: db::TransferPlanRow,
+    state: &mut AppState,
+) -> anyhow::Result<()> {
+    let summary = db::transfer_plan_action_summary(conn, &plan.id)?;
+    let entries = db::transfer_plan_entries(conn, &plan.id)?;
+    state.last_plan = Some(PlanSnapshot {
+        plan_id: plan.id.clone(),
+        source_root_id: plan.source_root_id.clone(),
+        status: plan.status.clone(),
+        source_name: display_name_from_path(&plan.source_path),
+        dest_name: display_name_from_path(&plan.dest_path),
+        summary,
+        entries,
+    });
+    state.collection_result = None;
+    state.plan_offset = 0;
+    state.focus = FocusPane::Plan;
+    state.status = format!("loaded transfer plan {}", short_id(&plan.id));
+    Ok(())
+}
