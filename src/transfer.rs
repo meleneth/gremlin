@@ -302,7 +302,7 @@ pub fn run_transfer_plan(
 
     for entry in entries {
         let source_path = endpoint_join(&source_endpoint, &entry.relative_path)?;
-        let dest_path = endpoint_join(&dest_endpoint, &entry.relative_path)?;
+        let dest_path = endpoint_join(&dest_endpoint, &entry.dest_relative_path)?;
         let source_display = source_path.display_path();
         let dest_display = dest_path.display_path();
         let current = entry.relative_path.as_str();
@@ -750,16 +750,16 @@ fn insert_dest_observation(
     entry: &db::TransferPlanEntryRow,
     content_id: Option<&str>,
 ) -> rusqlite::Result<()> {
-    let base =
-        basename(Path::new(&entry.relative_path)).unwrap_or_else(|_| entry.relative_path.clone());
+    let base = basename(Path::new(&entry.dest_relative_path))
+        .unwrap_or_else(|_| entry.dest_relative_path.clone());
     db::insert_path_observation(
         conn,
         db::PathObservationInput {
             machine_id: &dest_root.machine_id,
             root_id: &dest_root.id,
-            relative_path: &entry.relative_path,
+            relative_path: &entry.dest_relative_path,
             basename: &base,
-            parent_path: &parent_path(&entry.relative_path),
+            parent_path: &parent_path(&entry.dest_relative_path),
             size_bytes: entry.size_bytes,
             modified_at: None,
             content_id,
@@ -1023,6 +1023,7 @@ fn build_transfer_plan(
                 db::TransferPlanEntryInput {
                     plan_id: &plan_id,
                     relative_path,
+                    dest_relative_path: None,
                     size_bytes: 0,
                     source_content_id: None,
                     dest_content_id: None,
@@ -1093,6 +1094,7 @@ fn build_transfer_plan(
             db::TransferPlanEntryInput {
                 plan_id: &plan_id,
                 relative_path: &source.relative_path,
+                dest_relative_path: None,
                 size_bytes: source.size_bytes,
                 source_content_id: source.content_id.as_deref(),
                 dest_content_id,
@@ -1435,6 +1437,68 @@ mod tests {
         let job = db::job_by_id(&conn, &result.job_id).unwrap().unwrap();
         assert_eq!(job.kind, "transfer_copy");
         assert_eq!(job.status, "completed");
+    }
+
+    #[test]
+    fn runs_copy_entries_to_retargeted_destination_paths() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        std::fs::write(source_dir.path().join("a.txt"), b"hello").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+        let source_path = source_dir.path().to_string_lossy().to_string();
+        let dest_path = dest_dir.path().to_string_lossy().to_string();
+        let source_id = db::ensure_root(&conn, &machine_id, &source_path).unwrap();
+        let dest_id = db::ensure_root(&conn, &machine_id, &dest_path).unwrap();
+        let content_id = db::ensure_content_object(
+            &conn,
+            5,
+            blake3::hash(b"hello").to_hex().as_ref(),
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        )
+        .unwrap();
+        observe(
+            &conn,
+            &machine_id,
+            &source_id,
+            "a.txt",
+            5,
+            Some(&content_id),
+        );
+        db::toggle_selection_entry(&conn, &source_id, "a.txt").unwrap();
+        let source = db::root_by_id(&conn, &source_id).unwrap().unwrap();
+        let dest = db::root_by_id(&conn, &dest_id).unwrap().unwrap();
+        let plan = plan_selected_files(&conn, &source, &dest).unwrap();
+        db::insert_transfer_plan_entry(
+            &conn,
+            db::TransferPlanEntryInput {
+                plan_id: &plan.plan_id,
+                relative_path: "a.txt",
+                dest_relative_path: Some("renamed/a-copy.txt"),
+                size_bytes: 5,
+                source_content_id: Some(&content_id),
+                dest_content_id: None,
+                action: "copy",
+                reason: "review retargeted for copy",
+                metadata_json: serde_json::json!({ "decision": "retarget" }),
+            },
+        )
+        .unwrap();
+
+        let result = run_transfer_plan(&conn, &plan.plan_id, false).unwrap();
+
+        assert_eq!(result.copied, 1);
+        assert_eq!(
+            std::fs::read(dest_dir.path().join("renamed/a-copy.txt")).unwrap(),
+            b"hello"
+        );
+        assert!(!dest_dir.path().join("a.txt").exists());
+        let dest_obs = db::path_observation_for_root_path(&conn, &dest_id, "renamed/a-copy.txt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(dest_obs.content_id.as_deref(), Some(content_id.as_str()));
     }
 
     #[test]

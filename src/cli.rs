@@ -166,6 +166,8 @@ pub enum TransferCommands {
         relative_path: String,
         #[arg(long, value_enum)]
         decision: TransferDecision,
+        #[arg(long)]
+        dest: Option<String>,
     },
     Run {
         plan_id: String,
@@ -178,6 +180,7 @@ pub enum TransferCommands {
 pub enum TransferDecision {
     Accept,
     Drop,
+    Retarget,
 }
 
 impl TransferDecision {
@@ -185,6 +188,7 @@ impl TransferDecision {
         match self {
             Self::Accept => "accept",
             Self::Drop => "drop",
+            Self::Retarget => "retarget",
         }
     }
 
@@ -192,6 +196,7 @@ impl TransferDecision {
         match self {
             Self::Accept => "copy",
             Self::Drop => "skip",
+            Self::Retarget => "copy",
         }
     }
 
@@ -199,6 +204,7 @@ impl TransferDecision {
         match self {
             Self::Accept => "review accepted for copy",
             Self::Drop => "review dropped by user",
+            Self::Retarget => "review retargeted for copy",
         }
     }
 }

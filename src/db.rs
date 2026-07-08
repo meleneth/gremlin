@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Component, Path};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
@@ -81,6 +81,7 @@ pub struct TransferPlanRow {
 pub struct TransferPlanEntryInput<'a> {
     pub plan_id: &'a str,
     pub relative_path: &'a str,
+    pub dest_relative_path: Option<&'a str>,
     pub size_bytes: u64,
     pub source_content_id: Option<&'a str>,
     pub dest_content_id: Option<&'a str>,
@@ -92,6 +93,7 @@ pub struct TransferPlanEntryInput<'a> {
 #[derive(Debug, Clone)]
 pub struct TransferPlanEntryRow {
     pub relative_path: String,
+    pub dest_relative_path: String,
     pub size_bytes: u64,
     pub source_content_id: Option<String>,
     pub dest_content_id: Option<String>,
@@ -460,6 +462,12 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         "transfer_plans",
         "job_id",
         "ALTER TABLE transfer_plans ADD COLUMN job_id TEXT",
+    )?;
+    ensure_column(
+        conn,
+        "transfer_plan_entries",
+        "dest_relative_path",
+        "ALTER TABLE transfer_plan_entries ADD COLUMN dest_relative_path TEXT",
     )?;
     Ok(())
 }
@@ -1075,10 +1083,11 @@ pub fn insert_transfer_plan_entry(
     conn.execute(
         r#"
         INSERT INTO transfer_plan_entries
-            (id, plan_id, relative_path, size_bytes, source_content_id, dest_content_id,
+            (id, plan_id, relative_path, dest_relative_path, size_bytes, source_content_id, dest_content_id,
              action, reason, metadata_json)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
         ON CONFLICT(plan_id, relative_path) DO UPDATE SET
+            dest_relative_path = excluded.dest_relative_path,
             size_bytes = excluded.size_bytes,
             source_content_id = excluded.source_content_id,
             dest_content_id = excluded.dest_content_id,
@@ -1090,6 +1099,7 @@ pub fn insert_transfer_plan_entry(
             new_id("planentry"),
             input.plan_id,
             input.relative_path,
+            input.dest_relative_path.unwrap_or(input.relative_path),
             input.size_bytes as i64,
             input.source_content_id,
             input.dest_content_id,
@@ -1116,7 +1126,7 @@ pub fn transfer_plan_entries_filtered(
     if let Some(action) = action {
         let mut stmt = conn.prepare(
             r#"
-            SELECT relative_path, size_bytes, source_content_id, dest_content_id,
+            SELECT relative_path, COALESCE(dest_relative_path, relative_path), size_bytes, source_content_id, dest_content_id,
                    action, reason, metadata_json
             FROM transfer_plan_entries
             WHERE plan_id = ?1 AND action = ?2
@@ -1129,7 +1139,7 @@ pub fn transfer_plan_entries_filtered(
 
     let mut stmt = conn.prepare(
         r#"
-        SELECT relative_path, size_bytes, source_content_id, dest_content_id,
+        SELECT relative_path, COALESCE(dest_relative_path, relative_path), size_bytes, source_content_id, dest_content_id,
                action, reason, metadata_json
         FROM transfer_plan_entries
         WHERE plan_id = ?1
@@ -1169,16 +1179,80 @@ pub fn decide_review_transfer_plan_entry(
     Ok(updated > 0)
 }
 
+pub fn retarget_review_transfer_plan_entry(
+    conn: &Connection,
+    plan_id: &str,
+    relative_path: &str,
+    dest_relative_path: &str,
+) -> rusqlite::Result<bool> {
+    if !is_safe_relative_transfer_path(dest_relative_path) {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "unsafe destination relative path: {dest_relative_path}"
+        )));
+    }
+    let duplicate_count: i64 = conn.query_row(
+        r#"
+        SELECT COUNT(*)
+        FROM transfer_plan_entries
+        WHERE plan_id = ?1
+          AND relative_path != ?2
+          AND COALESCE(dest_relative_path, relative_path) = ?3
+          AND action IN ('copy', 'review')
+        "#,
+        params![plan_id, relative_path, dest_relative_path],
+        |row| row.get(0),
+    )?;
+    if duplicate_count > 0 {
+        return Err(rusqlite::Error::InvalidParameterName(format!(
+            "destination path is already used in this transfer plan: {dest_relative_path}"
+        )));
+    }
+    let updated = conn.execute(
+        r#"
+        UPDATE transfer_plan_entries
+        SET dest_relative_path = ?3,
+            action = 'copy',
+            reason = 'review retargeted for copy',
+            metadata_json = ?4
+        WHERE plan_id = ?1
+          AND relative_path = ?2
+          AND action = 'review'
+        "#,
+        params![
+            plan_id,
+            relative_path,
+            dest_relative_path,
+            serde_json::json!({
+                "decision": "retarget",
+                "dest_relative_path": dest_relative_path,
+                "decided_at": now_rfc3339(),
+            })
+            .to_string()
+        ],
+    )?;
+    Ok(updated > 0)
+}
+
+fn is_safe_relative_transfer_path(relative_path: &str) -> bool {
+    let path = Path::new(relative_path);
+    !relative_path.is_empty()
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
+}
+
 fn transfer_plan_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TransferPlanEntryRow> {
-    let size: i64 = row.get(1)?;
+    let size: i64 = row.get(2)?;
     Ok(TransferPlanEntryRow {
         relative_path: row.get(0)?,
+        dest_relative_path: row.get(1)?,
         size_bytes: size as u64,
-        source_content_id: row.get(2)?,
-        dest_content_id: row.get(3)?,
-        action: row.get(4)?,
-        reason: row.get(5)?,
-        metadata_json: row.get(6)?,
+        source_content_id: row.get(3)?,
+        dest_content_id: row.get(4)?,
+        action: row.get(5)?,
+        reason: row.get(6)?,
+        metadata_json: row.get(7)?,
     })
 }
 
@@ -2106,6 +2180,7 @@ mod tests {
             TransferPlanEntryInput {
                 plan_id: &plan_id,
                 relative_path: "a.txt",
+                dest_relative_path: None,
                 size_bytes: 10,
                 source_content_id: None,
                 dest_content_id: None,
@@ -2120,6 +2195,7 @@ mod tests {
             TransferPlanEntryInput {
                 plan_id: &plan_id,
                 relative_path: "b.txt",
+                dest_relative_path: None,
                 size_bytes: 20,
                 source_content_id: None,
                 dest_content_id: None,
@@ -2162,6 +2238,33 @@ mod tests {
             serde_json::json!({ "decision": "accept" }),
         )
         .unwrap());
+
+        insert_transfer_plan_entry(
+            &conn,
+            TransferPlanEntryInput {
+                plan_id: &plan_id,
+                relative_path: "c.txt",
+                dest_relative_path: None,
+                size_bytes: 30,
+                source_content_id: None,
+                dest_content_id: None,
+                action: "review",
+                reason: "possible duplicate",
+                metadata_json: serde_json::json!({}),
+            },
+        )
+        .unwrap();
+        assert!(
+            retarget_review_transfer_plan_entry(&conn, &plan_id, "c.txt", "renamed/c.txt").unwrap()
+        );
+        let retargeted = transfer_plan_entries_filtered(&conn, &plan_id, Some("copy")).unwrap();
+        assert!(retargeted
+            .iter()
+            .any(|entry| entry.relative_path == "c.txt"
+                && entry.dest_relative_path == "renamed/c.txt"));
+        assert!(
+            retarget_review_transfer_plan_entry(&conn, &plan_id, "missing.txt", "../bad").is_err()
+        );
     }
 
     #[test]

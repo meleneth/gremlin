@@ -119,6 +119,7 @@ struct AppState {
     status: String,
     transfer_source_root_id: Option<String>,
     transfer_run_plan_id: Option<String>,
+    retarget_draft: Option<RetargetDraft>,
     last_plan: Option<PlanSnapshot>,
 }
 
@@ -168,6 +169,13 @@ struct TransferProgressSnapshot {
     file_bytes_total: u64,
     bytes_per_second: f64,
     errors: u64,
+}
+
+#[derive(Debug, Clone)]
+struct RetargetDraft {
+    plan_id: String,
+    relative_path: String,
+    value: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -412,6 +420,10 @@ async fn run_loop(
 
         if event::poll(Duration::from_millis(250))? {
             if let Event::Key(key) = event::read()? {
+                if state.retarget_draft.is_some() {
+                    handle_retarget_input(conn, &mut state, key.code)?;
+                    continue;
+                }
                 match key.code {
                     KeyCode::Char('q') => break,
                     KeyCode::Tab => state.focus = state.focus.next(),
@@ -488,6 +500,9 @@ async fn run_loop(
                             "review dropped by user",
                         )?;
                     }
+                    KeyCode::Char('e') => {
+                        start_retarget_current_plan_entry(&mut state);
+                    }
                     KeyCode::Enter => {
                         create_transfer_plan_from_selection(conn, &roots, &mut state)?;
                     }
@@ -520,7 +535,7 @@ fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "  q quit | Tab panes | arrows move | Space mark | s scan | h hash | c cancel | t plan | Enter | p load | r run | a accept | d drop",
+            "  q quit | Tab panes | arrows move | Space mark | s scan | h hash | c cancel | t plan | Enter | p load | r run | a accept | d drop | e retarget",
             theme::muted(),
         ),
     ]))
@@ -756,6 +771,17 @@ fn render_info_bar(
             )
         })
         .unwrap_or_else(|| "-".to_string());
+    let status = state
+        .retarget_draft
+        .as_ref()
+        .map(|draft| {
+            format!(
+                "retarget {} -> {}",
+                truncate(&draft.relative_path, 18),
+                draft.value
+            )
+        })
+        .unwrap_or_else(|| state.status.clone());
     let text = format!(
         "focus {:?} | roots {} | marked {} | plan {} | root {} | file {} | {} | {}",
         state.focus,
@@ -765,7 +791,7 @@ fn render_info_bar(
         truncate(root, 24),
         truncate(file, 20),
         truncate(&event, 24),
-        state.status
+        status
     );
     frame.render_widget(
         Paragraph::new(text)
@@ -965,11 +991,16 @@ fn plan_entry_header() -> String {
 }
 
 fn plan_entry_row(marker: &str, entry: &db::TransferPlanEntryRow) -> String {
+    let path = if entry.dest_relative_path == entry.relative_path {
+        entry.relative_path.clone()
+    } else {
+        format!("{} -> {}", entry.relative_path, entry.dest_relative_path)
+    };
     format!(
         "{:<2} {:<10} {:<18} {:>9} {}",
         marker,
         truncate(&entry.action, 10),
-        truncate(&entry.relative_path, 18),
+        truncate(&path, 18),
         human_size(entry.size_bytes),
         truncate(&plan_entry_hint(entry), 26)
     )
@@ -1523,6 +1554,95 @@ fn decide_current_plan_entry(
     Ok(())
 }
 
+fn start_retarget_current_plan_entry(state: &mut AppState) {
+    if state.focus != FocusPane::Plan {
+        state.status = "Move focus to Plan before retargeting entries".to_string();
+        return;
+    }
+    let Some(plan) = state.last_plan.as_ref() else {
+        state.status = "No transfer plan to retarget".to_string();
+        return;
+    };
+    let Some(entry) = plan.entries.get(state.plan_offset) else {
+        state.status = "No plan entry selected".to_string();
+        return;
+    };
+    if entry.action != "review" {
+        state.status = format!(
+            "{} is {}; only review entries can be retargeted",
+            entry.relative_path, entry.action
+        );
+        return;
+    }
+    state.retarget_draft = Some(RetargetDraft {
+        plan_id: plan.plan_id.clone(),
+        relative_path: entry.relative_path.clone(),
+        value: entry.dest_relative_path.clone(),
+    });
+    state.status = "Edit destination path, Enter applies, Esc cancels".to_string();
+}
+
+fn handle_retarget_input(
+    conn: &Connection,
+    state: &mut AppState,
+    code: KeyCode,
+) -> anyhow::Result<()> {
+    match code {
+        KeyCode::Esc => {
+            state.retarget_draft = None;
+            state.status = "retarget canceled".to_string();
+        }
+        KeyCode::Enter => {
+            let Some(draft) = state.retarget_draft.take() else {
+                return Ok(());
+            };
+            let dest = draft.value.trim().to_string();
+            if dest.is_empty() {
+                state.status = "Destination path cannot be empty".to_string();
+                state.retarget_draft = Some(RetargetDraft {
+                    value: dest,
+                    ..draft
+                });
+                return Ok(());
+            }
+            match db::retarget_review_transfer_plan_entry(
+                conn,
+                &draft.plan_id,
+                &draft.relative_path,
+                &dest,
+            ) {
+                Ok(true) => {
+                    refresh_last_plan(conn, state, &draft.plan_id)?;
+                    state.status = format!("{} -> {}", draft.relative_path, dest);
+                }
+                Ok(false) => {
+                    refresh_last_plan(conn, state, &draft.plan_id)?;
+                    state.status = format!("{} is no longer a review entry", draft.relative_path);
+                }
+                Err(err) => {
+                    state.status = format!("retarget failed: {err}");
+                    state.retarget_draft = Some(RetargetDraft {
+                        value: dest,
+                        ..draft
+                    });
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(draft) = state.retarget_draft.as_mut() {
+                draft.value.pop();
+            }
+        }
+        KeyCode::Char(value) if !value.is_control() => {
+            if let Some(draft) = state.retarget_draft.as_mut() {
+                draft.value.push(value);
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn refresh_last_plan(conn: &Connection, state: &mut AppState, plan_id: &str) -> anyhow::Result<()> {
     if let Some(plan) = state
         .last_plan
@@ -1712,6 +1832,7 @@ mod tests {
     fn formats_plan_review_hint_and_count() {
         let review = db::TransferPlanEntryRow {
             relative_path: "incoming/foo.png".to_string(),
+            dest_relative_path: "incoming/foo.png".to_string(),
             size_bytes: 10,
             source_content_id: Some("content_src".to_string()),
             dest_content_id: Some("content_dest".to_string()),
