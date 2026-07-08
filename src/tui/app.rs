@@ -98,7 +98,7 @@ pub(super) async fn run_loop(
         let persisted_browse_dir = selected
             .map(|root| current_persisted_root_dir(&state, &root.id))
             .map(str::to_string);
-        let (files, detail_key) = {
+        let (all_files, detail_key) = {
             let selected_temporary = selected_temporary_browse(&state);
             let files = match (selected, selected_temporary) {
                 (Some(root), _) => db::cached_directory_entries(
@@ -125,6 +125,8 @@ pub(super) async fn run_loop(
                 ),
             )
         };
+        let files = filtered_file_rows(&all_files, &state.file_filter);
+        normalize_file_offset(&mut state, files.len());
         let event_root_id = state.last_plan.as_ref().and_then(|plan| {
             (state.focus == FocusPane::Plan).then_some(plan.source_root_id.as_str())
         });
@@ -170,6 +172,10 @@ pub(super) async fn run_loop(
 
         if event::poll(Duration::from_millis(250))? {
             if let Event::Key(key) = event::read()? {
+                if state.file_filter_editing {
+                    handle_file_filter_input(&mut state, key.code);
+                    continue;
+                }
                 if state.retarget_draft.is_some() {
                     handle_retarget_input(conn, &mut state, key.code)?;
                     continue;
@@ -209,6 +215,21 @@ pub(super) async fn run_loop(
                         break;
                     }
                     KeyCode::Tab => state.focus = state.focus.next(),
+                    KeyCode::Char('/') if state.focus == FocusPane::Files => {
+                        state.file_filter_editing = true;
+                        state.status = if state.file_filter.is_empty() {
+                            "file filter: type text, Enter keep, Esc clear".to_string()
+                        } else {
+                            format!("file filter: {}", state.file_filter)
+                        };
+                    }
+                    KeyCode::Esc
+                        if state.focus == FocusPane::Files && !state.file_filter.is_empty() =>
+                    {
+                        state.file_filter.clear();
+                        state.file_offset = 0;
+                        state.status = "file filter cleared".to_string();
+                    }
                     KeyCode::Char('f') => {
                         state.file_view = state.file_view.next();
                         state.status = format!("file fields: {}", state.file_view.label());
@@ -228,6 +249,24 @@ pub(super) async fn run_loop(
                         );
                     }
                     KeyCode::Up => move_up(&mut state),
+                    KeyCode::PageDown => {
+                        let plan_count = state
+                            .last_plan
+                            .as_ref()
+                            .map(|plan| plan.entries.len())
+                            .unwrap_or(0);
+                        move_page_down(
+                            &mut state,
+                            root_count,
+                            files.len(),
+                            plan_count,
+                            events.len(),
+                            visible_file_page_len(terminal.size()?.height),
+                        );
+                    }
+                    KeyCode::PageUp => {
+                        move_page_up(&mut state, visible_file_page_len(terminal.size()?.height));
+                    }
                     KeyCode::Char('s') => {
                         queue_or_prompt_selected_root(
                             conn,

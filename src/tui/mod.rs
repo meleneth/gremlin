@@ -33,6 +33,8 @@ struct AppState {
     file_view: FileView,
     selected_root: usize,
     file_offset: usize,
+    file_filter: String,
+    file_filter_editing: bool,
     detail_file_offset: usize,
     detail_pending_file_offset: usize,
     detail_selection_key: Option<String>,
@@ -404,7 +406,7 @@ impl FocusPane {
         }
     }
 
-    fn title(self, title: &'static str, active: Self) -> String {
+    fn title(self, title: &str, active: Self) -> String {
         if self == active {
             format!("{title} *")
         } else {
@@ -432,8 +434,9 @@ fn panel_block(title: &'static str, active: bool) -> Block<'static> {
         .title_style(title_style)
 }
 
-fn focus_block(title: &'static str, pane: FocusPane, active: FocusPane) -> Block<'static> {
+fn focus_block(title: impl Into<String>, pane: FocusPane, active: FocusPane) -> Block<'static> {
     let focused = pane == active;
+    let title = title.into();
     let border = if focused {
         theme::BORDER_ACTIVE
     } else {
@@ -445,7 +448,7 @@ fn focus_block(title: &'static str, pane: FocusPane, active: FocusPane) -> Block
         theme::inactive_title()
     };
     Block::default()
-        .title(pane.title(title, active))
+        .title(pane.title(&title, active))
         .borders(Borders::ALL)
         .style(theme::panel())
         .border_style(Style::default().fg(border).bg(theme::PANEL))
@@ -453,16 +456,17 @@ fn focus_block(title: &'static str, pane: FocusPane, active: FocusPane) -> Block
 }
 
 fn attention_focus_block(
-    title: &'static str,
+    title: impl Into<String>,
     pane: FocusPane,
     active: FocusPane,
     attention: bool,
 ) -> Block<'static> {
+    let title = title.into();
     if !attention {
         return focus_block(title, pane, active);
     }
     Block::default()
-        .title(pane.title(title, active))
+        .title(pane.title(&title, active))
         .borders(Borders::ALL)
         .style(theme::attention())
         .border_style(Style::default().fg(theme::ACCENT).bg(theme::ATTENTION))

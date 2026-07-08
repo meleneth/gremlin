@@ -46,6 +46,35 @@ pub(super) fn selected_root_name(
         .or_else(|| root.map(root_display_name))
 }
 
+pub(super) fn filtered_file_rows(files: &[FileViewRow], filter: &str) -> Vec<FileViewRow> {
+    let needle = filter.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return files.to_vec();
+    }
+    files
+        .iter()
+        .filter(|file| file_matches_filter(file, &needle))
+        .cloned()
+        .collect()
+}
+
+fn file_matches_filter(file: &FileViewRow, needle: &str) -> bool {
+    file.relative_path.to_ascii_lowercase().contains(needle)
+        || file.status.to_ascii_lowercase().contains(needle)
+        || file
+            .modified_at
+            .as_deref()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .contains(needle)
+        || file
+            .content_id
+            .as_deref()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .contains(needle)
+}
+
 pub(super) fn detail_selection_key(
     root: Option<&db::RootRow>,
     browse: Option<&TemporaryBrowse>,
@@ -271,5 +300,114 @@ pub(super) fn move_up(state: &mut AppState) {
         FocusPane::Events => {
             state.event_offset = state.event_offset.saturating_sub(1);
         }
+    }
+}
+
+pub(super) fn move_page_down(
+    state: &mut AppState,
+    root_count: usize,
+    file_count: usize,
+    plan_count: usize,
+    event_count: usize,
+    page_len: usize,
+) {
+    let jump = page_len.max(1);
+    match state.focus {
+        FocusPane::Roots => {
+            state.selected_root = page_target(state.selected_root, root_count, jump);
+            state.file_offset = 0;
+            state.event_offset = 0;
+        }
+        FocusPane::Files => {
+            state.file_offset = page_target(state.file_offset, file_count, jump);
+        }
+        FocusPane::Plan => {
+            state.plan_offset = page_target(state.plan_offset, plan_count, jump);
+        }
+        FocusPane::Events => {
+            state.event_offset = page_target(state.event_offset, event_count, jump);
+        }
+    }
+}
+
+pub(super) fn move_page_up(state: &mut AppState, page_len: usize) {
+    let jump = page_len.max(1);
+    match state.focus {
+        FocusPane::Roots => {
+            state.selected_root = state.selected_root.saturating_sub(jump);
+            state.file_offset = 0;
+            state.event_offset = 0;
+        }
+        FocusPane::Files => {
+            state.file_offset = state.file_offset.saturating_sub(jump);
+        }
+        FocusPane::Plan => {
+            state.plan_offset = state.plan_offset.saturating_sub(jump);
+        }
+        FocusPane::Events => {
+            state.event_offset = state.event_offset.saturating_sub(jump);
+        }
+    }
+}
+
+fn page_target(current: usize, count: usize, jump: usize) -> usize {
+    if count == 0 {
+        0
+    } else {
+        current.saturating_add(jump).min(count - 1)
+    }
+}
+
+pub(super) fn visible_file_page_len(area_height: u16) -> usize {
+    area_height.saturating_sub(32).max(1) as usize
+}
+
+pub(super) fn normalize_file_offset(state: &mut AppState, file_count: usize) {
+    if file_count == 0 {
+        state.file_offset = 0;
+    } else if state.file_offset >= file_count {
+        state.file_offset = file_count - 1;
+    }
+}
+
+pub(super) fn handle_file_filter_input(state: &mut AppState, key: KeyCode) -> bool {
+    match key {
+        KeyCode::Enter => {
+            state.file_filter_editing = false;
+            if state.file_filter.trim().is_empty() {
+                state.file_filter.clear();
+                state.status = "file filter cleared".to_string();
+            } else {
+                state.status = format!("file filter: {}", state.file_filter);
+            }
+            true
+        }
+        KeyCode::Esc => {
+            state.file_filter_editing = false;
+            state.file_filter.clear();
+            state.file_offset = 0;
+            state.status = "file filter cleared".to_string();
+            true
+        }
+        KeyCode::Backspace => {
+            state.file_filter.pop();
+            state.file_offset = 0;
+            state.status = if state.file_filter.is_empty() {
+                "file filter cleared".to_string()
+            } else {
+                format!("file filter: {}", state.file_filter)
+            };
+            true
+        }
+        KeyCode::Char(ch) => {
+            if !ch.is_control() {
+                state.file_filter.push(ch);
+                state.file_offset = 0;
+                state.status = format!("file filter: {}", state.file_filter);
+                return true;
+            }
+            false
+        }
+        _ => false,
     }
 }

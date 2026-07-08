@@ -35,6 +35,9 @@ pub(super) fn command_hint_lines(
 }
 
 pub(super) fn active_command_hint(state: &AppState, has_temporary_browse: bool) -> &'static str {
+    if state.file_filter_editing {
+        return "type filter text  Backspace edit  Enter keep  Esc clear";
+    }
     if state.retarget_draft.is_some() {
         return "type destination path  Enter apply  Esc cancel";
     }
@@ -55,14 +58,14 @@ pub(super) fn active_command_hint(state: &AppState, has_temporary_browse: bool) 
     }
     match state.focus {
         FocusPane::Roots if has_temporary_browse && state.selected_root == 0 => {
-            "Tab files  i import browsed path  t copy from browsed path  Backspace up from Files"
+            "Tab files  i import browsed path  t copy from browsed path  PgUp/PgDn jump"
         }
         FocusPane::Roots => "Space mark in Files  s scan  h hash  v verify  t choose source  p load plan  x remove root",
         FocusPane::Files if has_temporary_browse && state.selected_root == 0 => {
-            "Enter open directory  Backspace parent  i import selected/current  t copy selected/current"
+            "/ filter  PgUp/PgDn jump  Enter open dir  Backspace parent  i import  t copy"
         }
         FocusPane::Files => {
-            "Enter open directory  Backspace parent  Space mark file/dir  v verify root  t choose source  f fields"
+            "/ filter  PgUp/PgDn jump  Enter open dir  Backspace parent  Space mark  f fields"
         }
         FocusPane::Plan => "r run copy entries  a accept review  d drop review  e retarget review",
         FocusPane::Events => "c request cancel for selected job  Tab return to roots",

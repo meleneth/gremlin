@@ -10,7 +10,9 @@ impl Widget for FilesPane<'_> {
         let visible = self.files.iter().enumerate().skip(self.state.file_offset);
         let needs_attention = self.state.pending_import.is_some();
         let items = if self.files.is_empty() {
-            let message = if selected_temporary_browse(self.state).is_some() {
+            let message = if !self.state.file_filter.is_empty() {
+                "No files match the active filter"
+            } else if selected_temporary_browse(self.state).is_some() {
                 "No files in this remote directory"
             } else {
                 "No indexed files for this root"
@@ -44,12 +46,22 @@ impl Widget for FilesPane<'_> {
                 theme::panel()
             })
             .block(attention_focus_block(
-                "Files",
+                files_title(self.state),
                 FocusPane::Files,
                 self.state.focus,
                 needs_attention,
             ))
             .render(area, buf);
+    }
+}
+
+pub(super) fn files_title(state: &AppState) -> String {
+    if state.file_filter.is_empty() {
+        "Files".to_string()
+    } else if state.file_filter_editing {
+        format!("Files /{}", state.file_filter)
+    } else {
+        format!("Files filter:{}", state.file_filter)
     }
 }
 

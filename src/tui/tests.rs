@@ -155,7 +155,7 @@ fn command_hints_explain_temporary_file_browse_actions() {
 
     assert_eq!(
         active_command_hint(&state, true),
-        "Enter open directory  Backspace parent  i import selected/current  t copy selected/current"
+        "/ filter  PgUp/PgDn jump  Enter open dir  Backspace parent  i import  t copy"
     );
 }
 
@@ -193,6 +193,72 @@ fn command_hints_explain_scoped_job_choice() {
         active_command_hint(&state, false),
         "a all files in root  m marked paths only  Esc cancel"
     );
+}
+
+#[test]
+fn file_filter_matches_paths_and_status() {
+    let files = vec![
+        FileViewRow {
+            relative_path: "photos/cat.png".to_string(),
+            size_bytes: 10,
+            modified_at: None,
+            content_id: None,
+            status: "present".to_string(),
+            kind: FileKind::File,
+        },
+        FileViewRow {
+            relative_path: "docs/readme.md".to_string(),
+            size_bytes: 5,
+            modified_at: None,
+            content_id: None,
+            status: "remote".to_string(),
+            kind: FileKind::File,
+        },
+    ];
+
+    let path_matches = filtered_file_rows(&files, "CAT");
+    assert_eq!(path_matches.len(), 1);
+    assert_eq!(path_matches[0].relative_path, "photos/cat.png");
+
+    let status_matches = filtered_file_rows(&files, "remote");
+    assert_eq!(status_matches.len(), 1);
+    assert_eq!(status_matches[0].relative_path, "docs/readme.md");
+}
+
+#[test]
+fn file_filter_input_edits_and_clears_filter() {
+    let mut state = AppState {
+        file_filter_editing: true,
+        file_offset: 7,
+        ..AppState::default()
+    };
+
+    assert!(handle_file_filter_input(&mut state, KeyCode::Char('p')));
+    assert_eq!(state.file_filter, "p");
+    assert_eq!(state.file_offset, 0);
+    assert!(handle_file_filter_input(&mut state, KeyCode::Char('n')));
+    assert_eq!(state.file_filter, "pn");
+    assert!(handle_file_filter_input(&mut state, KeyCode::Backspace));
+    assert_eq!(state.file_filter, "p");
+    assert!(handle_file_filter_input(&mut state, KeyCode::Esc));
+    assert_eq!(state.file_filter, "");
+    assert!(!state.file_filter_editing);
+}
+
+#[test]
+fn page_navigation_jumps_within_active_pane() {
+    let mut state = AppState {
+        focus: FocusPane::Files,
+        file_offset: 2,
+        ..AppState::default()
+    };
+
+    move_page_down(&mut state, 0, 25, 0, 0, 10);
+    assert_eq!(state.file_offset, 12);
+    move_page_down(&mut state, 0, 25, 0, 0, 20);
+    assert_eq!(state.file_offset, 24);
+    move_page_up(&mut state, 10);
+    assert_eq!(state.file_offset, 14);
 }
 
 #[test]
