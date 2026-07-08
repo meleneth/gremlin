@@ -1,0 +1,466 @@
+use super::*;
+use std::sync::Mutex;
+
+#[test]
+fn truncates_long_values() {
+    assert_eq!(truncate("abcdef", 4), "abc~");
+    assert_eq!(truncate("abc", 4), "abc");
+}
+
+#[test]
+fn root_display_name_uses_basename_when_label_is_path() {
+    let root = db::RootRow {
+        id: "root_1".to_string(),
+        machine_id: "machine_1".to_string(),
+        path: "/tmp/archive/photos".to_string(),
+        label: Some("/tmp/archive/photos".to_string()),
+        current_size_bytes: 0,
+        latest_job_kind: None,
+        latest_job_status: None,
+        latest_job_phase: None,
+    };
+    assert_eq!(root_display_name(&root), "photos");
+}
+
+#[test]
+fn temporary_browse_enter_directory_loads_child_entries() {
+    let requested_paths = Arc::new(Mutex::new(Vec::<String>::new()));
+    let provider_paths = requested_paths.clone();
+    let provider: BrowseProvider = Arc::new(move |path| {
+        provider_paths.lock().unwrap().push(path.to_string());
+        Ok(vec![InitialBrowseEntry {
+            kind: "file".to_string(),
+            name: "inside.txt".to_string(),
+            size_bytes: 5,
+            modified_at: None,
+        }])
+    });
+    let mut state = AppState {
+        temporary_browse: Some(TemporaryBrowse {
+            label: "nas01:".to_string(),
+            machine_id: "machine_remote".to_string(),
+            root_path: "~".to_string(),
+            current_path: "~".to_string(),
+            entries: vec![InitialBrowseEntry {
+                kind: "dir".to_string(),
+                name: "photos".to_string(),
+                size_bytes: 0,
+                modified_at: None,
+            }],
+            browse_provider: Some(provider),
+            import_provider: None,
+        }),
+        ..AppState::default()
+    };
+    let selected =
+        FileViewRow::from_temporary_entry(&state.temporary_browse.as_ref().unwrap().entries[0]);
+
+    open_temporary_file_entry(&mut state, Some(&selected));
+
+    let browse = state.temporary_browse.as_ref().unwrap();
+    assert_eq!(browse.current_path, "~/photos");
+    assert_eq!(browse.entries.len(), 1);
+    assert_eq!(browse.entries[0].name, "inside.txt");
+    assert_eq!(requested_paths.lock().unwrap().as_slice(), ["~/photos"]);
+}
+
+#[test]
+fn temporary_import_prompt_targets_selected_file() {
+    let mut state = AppState {
+        focus: FocusPane::Files,
+        temporary_browse: Some(TemporaryBrowse {
+            label: "nas01:".to_string(),
+            machine_id: "machine_remote".to_string(),
+            root_path: "~".to_string(),
+            current_path: "~/photos".to_string(),
+            entries: vec![InitialBrowseEntry {
+                kind: "file".to_string(),
+                name: "image.png".to_string(),
+                size_bytes: 10,
+                modified_at: None,
+            }],
+            browse_provider: None,
+            import_provider: Some(Arc::new(|_, _| unreachable!())),
+        }),
+        ..AppState::default()
+    };
+    let selected =
+        FileViewRow::from_temporary_entry(&state.temporary_browse.as_ref().unwrap().entries[0]);
+
+    start_temporary_import_prompt(&mut state, Some(&selected));
+
+    assert_eq!(
+        state.pending_import.as_ref().unwrap().remote_path,
+        "~/photos/image.png"
+    );
+    assert!(state.status.contains("remote file ~/photos/image.png"));
+}
+
+#[test]
+fn temporary_import_prompt_defaults_to_current_directory() {
+    let mut state = AppState {
+        focus: FocusPane::Roots,
+        temporary_browse: Some(TemporaryBrowse {
+            label: "nas01:".to_string(),
+            machine_id: "machine_remote".to_string(),
+            root_path: "~".to_string(),
+            current_path: "~/photos".to_string(),
+            entries: Vec::new(),
+            browse_provider: None,
+            import_provider: Some(Arc::new(|_, _| unreachable!())),
+        }),
+        ..AppState::default()
+    };
+
+    start_temporary_import_prompt(&mut state, None);
+
+    assert_eq!(
+        state.pending_import.as_ref().unwrap().remote_path,
+        "~/photos"
+    );
+    assert!(state.status.contains("remote directory ~/photos"));
+}
+
+#[test]
+fn command_hints_prioritize_modal_prompts() {
+    let state = AppState {
+        pending_import: Some(PendingTemporaryImport {
+            remote_path: "~/photos".to_string(),
+        }),
+        ..AppState::default()
+    };
+
+    assert_eq!(
+        active_command_hint(&state, true),
+        "n root only  f fast stat import  h SHA-256 hash import  Esc cancel"
+    );
+}
+
+#[test]
+fn command_hints_explain_temporary_file_browse_actions() {
+    let state = AppState {
+        focus: FocusPane::Files,
+        selected_root: 0,
+        temporary_browse: Some(TemporaryBrowse {
+            label: "nas01:".to_string(),
+            machine_id: "machine_remote".to_string(),
+            root_path: "~".to_string(),
+            current_path: "~/photos".to_string(),
+            entries: Vec::new(),
+            browse_provider: None,
+            import_provider: None,
+        }),
+        ..AppState::default()
+    };
+
+    assert_eq!(
+        active_command_hint(&state, true),
+        "Enter open directory  Backspace parent  i import selected/current  t copy selected/current"
+    );
+}
+
+#[test]
+fn command_hints_explain_destination_selection() {
+    let state = AppState {
+        transfer_source_root_id: Some("root_1".to_string()),
+        ..AppState::default()
+    };
+
+    assert_eq!(
+        active_command_hint(&state, false),
+        "choose destination root  Enter create plan  Esc cancel source"
+    );
+}
+
+#[test]
+fn persisted_root_enter_and_backspace_navigate_directories() {
+    let mut state = AppState::default();
+    let dir = FileViewRow {
+        relative_path: "photos/2026".to_string(),
+        size_bytes: 10,
+        modified_at: None,
+        content_id: None,
+        status: "dir:1".to_string(),
+        kind: FileKind::Directory,
+    };
+
+    open_persisted_file_entry(&mut state, Some("root_1"), Some(&dir));
+    assert_eq!(current_persisted_root_dir(&state, "root_1"), "photos/2026");
+    assert_eq!(state.file_offset, 0);
+
+    open_persisted_parent(&mut state, Some("root_1"));
+    assert_eq!(current_persisted_root_dir(&state, "root_1"), "photos");
+
+    open_persisted_parent(&mut state, Some("root_1"));
+    assert_eq!(current_persisted_root_dir(&state, "root_1"), ".");
+}
+
+#[test]
+fn directory_rows_mark_descendant_files() {
+    let conn = Connection::open_in_memory().unwrap();
+    db::init_schema(&conn).unwrap();
+    let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+    let root_id = db::ensure_root(&conn, &machine_id, "/tmp/root").unwrap();
+    for path in ["photos/a.png", "photos/nested/b.png"] {
+        db::insert_path_observation(
+            &conn,
+            db::PathObservationInput {
+                machine_id: &machine_id,
+                root_id: &root_id,
+                relative_path: path,
+                basename: path.rsplit('/').next().unwrap(),
+                parent_path: ".",
+                size_bytes: 1,
+                modified_at: None,
+                content_id: None,
+            },
+        )
+        .unwrap();
+    }
+    let root = db::root_by_id(&conn, &root_id).unwrap().unwrap();
+    let dir = FileViewRow {
+        relative_path: "photos".to_string(),
+        size_bytes: 2,
+        modified_at: None,
+        content_id: None,
+        status: "dir:2".to_string(),
+        kind: FileKind::Directory,
+    };
+    let mut state = AppState::default();
+
+    toggle_selected_file_mark(&conn, Some(&root), Some(&dir), &mut state).unwrap();
+
+    assert_eq!(
+        db::selected_paths_for_root(&conn, &root_id).unwrap(),
+        BTreeSet::from([
+            "photos/a.png".to_string(),
+            "photos/nested/b.png".to_string()
+        ])
+    );
+    assert!(state.status.contains("marked 2 files under photos"));
+    assert!(file_row_selected(
+        &dir,
+        &db::selected_paths_for_root(&conn, &root_id).unwrap()
+    ));
+}
+
+#[test]
+fn temporary_transfer_source_targets_selected_file() {
+    let browse = TemporaryBrowse {
+        label: "nas01:".to_string(),
+        machine_id: "machine_remote".to_string(),
+        root_path: "~".to_string(),
+        current_path: "~/photos".to_string(),
+        entries: Vec::new(),
+        browse_provider: None,
+        import_provider: None,
+    };
+    let selected = FileViewRow {
+        relative_path: "image.png".to_string(),
+        size_bytes: 10,
+        modified_at: None,
+        content_id: None,
+        status: "remote".to_string(),
+        kind: FileKind::File,
+    };
+
+    let target = temporary_transfer_import_target(FocusPane::Files, &browse, Some(&selected));
+
+    assert_eq!(target.remote_path, "~/photos/image.png");
+    assert_eq!(target.selected_relative_path.as_deref(), Some("image.png"));
+    assert!(!target.mark_all);
+}
+
+#[test]
+fn temporary_transfer_source_marks_all_for_directory_target() {
+    let browse = TemporaryBrowse {
+        label: "nas01:".to_string(),
+        machine_id: "machine_remote".to_string(),
+        root_path: "~".to_string(),
+        current_path: "~/photos".to_string(),
+        entries: Vec::new(),
+        browse_provider: None,
+        import_provider: None,
+    };
+    let selected = FileViewRow {
+        relative_path: "albums".to_string(),
+        size_bytes: 0,
+        modified_at: None,
+        content_id: None,
+        status: "dir".to_string(),
+        kind: FileKind::Directory,
+    };
+
+    let target = temporary_transfer_import_target(FocusPane::Files, &browse, Some(&selected));
+
+    assert_eq!(target.remote_path, "~/photos/albums");
+    assert_eq!(target.selected_relative_path, None);
+    assert!(target.mark_all);
+}
+
+#[test]
+fn mark_imported_transfer_source_marks_selected_or_all_paths() {
+    let conn = Connection::open_in_memory().unwrap();
+    db::init_schema(&conn).unwrap();
+    let machine_id = db::ensure_machine_hint(&conn, "nas01", Some("ssh")).unwrap();
+    let root_id = db::ensure_root(&conn, &machine_id, "/srv/photos").unwrap();
+    for path in ["a.png", "b.png"] {
+        db::insert_path_observation(
+            &conn,
+            db::PathObservationInput {
+                machine_id: &machine_id,
+                root_id: &root_id,
+                relative_path: path,
+                basename: path,
+                parent_path: ".",
+                size_bytes: 1,
+                modified_at: None,
+                content_id: None,
+            },
+        )
+        .unwrap();
+    }
+
+    mark_imported_transfer_source(&conn, &root_id, Some("a.png"), false).unwrap();
+    assert_eq!(
+        db::selected_paths_for_root(&conn, &root_id).unwrap(),
+        BTreeSet::from(["a.png".to_string()])
+    );
+
+    mark_imported_transfer_source(&conn, &root_id, None, true).unwrap();
+    assert_eq!(
+        db::selected_paths_for_root(&conn, &root_id).unwrap(),
+        BTreeSet::from(["a.png".to_string(), "b.png".to_string()])
+    );
+}
+
+#[test]
+fn formats_plan_summary_line() {
+    let summary = vec![db::TransferPlanActionSummary {
+        action: "copy".to_string(),
+        files: 2,
+        bytes: 2048,
+    }];
+    assert_eq!(plan_summary_line(&summary), "copy 2 2.00 KiB");
+}
+
+#[test]
+fn formats_byte_progress_summary() {
+    let payload = serde_json::json!({
+        "type": "job_progress",
+        "bytes_done": 512,
+        "bytes_total": 1024,
+        "bytes_per_second": 1048576.0
+    });
+    assert_eq!(
+        byte_progress_summary(&payload.to_string()).unwrap(),
+        "▕███████░░░░░░░▏  50% 1.0 MiB/s"
+    );
+}
+
+#[test]
+fn progress_bar_uses_partial_blocks_at_static_width() {
+    assert_eq!(progress_bar(1, 4, 4), "▕█░░░▏");
+    assert_eq!(progress_bar(1, 8, 4), "▕▌░░░▏");
+    assert_eq!(progress_bar(4, 4, 4), "▕████▏");
+}
+
+#[test]
+fn formats_transfer_progress_detail() {
+    let payload = serde_json::json!({
+        "type": "job_progress",
+        "current_path": "incoming/photos/foo.png",
+        "files_done": 2,
+        "files_total": 4,
+        "bytes_done": 512,
+        "bytes_total": 1024,
+        "file_bytes_done": 128,
+        "file_bytes_total": 256,
+        "bytes_per_second": 2.0 * 1024.0 * 1024.0,
+        "errors": 1
+    });
+    let progress = transfer_progress_snapshot(&payload.to_string()).unwrap();
+    let lines = transfer_progress_lines(&progress);
+
+    assert!(lines.contains("Overall ▕██████████████░░░░░░░░░░░░░░▏  50%"));
+    assert!(lines.contains("@ 2.0 MiB/s"));
+    assert!(lines.contains("Current ▕██████████████░░░░░░░░░░░░░░▏  50%"));
+    assert!(lines.contains("files 2/4 | errors 1"));
+}
+
+#[test]
+fn finds_latest_transfer_progress_event() {
+    let complete = db::JobEventRow {
+        job_id: "job_1".to_string(),
+        job_kind: "transfer_copy".to_string(),
+        status: "completed".to_string(),
+        phase: Some("copying".to_string()),
+        current_path: None,
+        files_seen: 1,
+        files_done: 1,
+        files_skipped: 0,
+        errors: 0,
+        cancel_requested: false,
+        sequence: 2,
+        event_kind: "job_completed".to_string(),
+        payload_json: serde_json::json!({"type": "job", "message": "completed"}).to_string(),
+    };
+    let progress = db::JobEventRow {
+        sequence: 1,
+        event_kind: "job_progress".to_string(),
+        payload_json: serde_json::json!({
+            "type": "job_progress",
+            "current_path": "a.bin",
+            "files_done": 0,
+            "files_total": 1,
+            "bytes_done": 5,
+            "bytes_total": 10,
+            "file_bytes_done": 5,
+            "file_bytes_total": 10,
+            "bytes_per_second": 512.0,
+            "errors": 0
+        })
+        .to_string(),
+        ..complete.clone()
+    };
+
+    let found = latest_transfer_progress(&[complete, progress]).unwrap();
+    assert_eq!(found.current_path, "a.bin");
+    assert_eq!(found.bytes_done, 5);
+}
+
+#[test]
+fn formats_plan_review_hint_and_count() {
+    let review = db::TransferPlanEntryRow {
+        relative_path: "incoming/foo.png".to_string(),
+        dest_relative_path: "incoming/foo.png".to_string(),
+        size_bytes: 10,
+        source_content_id: Some("content_src".to_string()),
+        dest_content_id: Some("content_dest".to_string()),
+        action: "review".to_string(),
+        reason: "collision".to_string(),
+        metadata_json: serde_json::json!({
+            "hash_collisions": [{"relative_path": "existing/foo.png"}],
+            "filename_size_date_collisions": [{"relative_path": "other/foo.png"}]
+        })
+        .to_string(),
+    };
+    let copy = db::TransferPlanEntryRow {
+        action: "copy".to_string(),
+        reason: "destination path is not indexed".to_string(),
+        ..review.clone()
+    };
+    let plan = PlanSnapshot {
+        plan_id: "plan_1".to_string(),
+        source_root_id: "source_root".to_string(),
+        status: "planned".to_string(),
+        source_name: "source".to_string(),
+        dest_name: "dest".to_string(),
+        summary: Vec::new(),
+        entries: vec![review.clone(), copy],
+    };
+
+    assert_eq!(plan_entry_hint(&review), "review hash=1 name=1");
+    assert_eq!(plan_review_count(&plan), 1);
+    assert_eq!(plan_copy_count(&plan), 1);
+}
