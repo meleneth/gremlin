@@ -10,7 +10,7 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Terminal;
@@ -26,7 +26,6 @@ use crate::util::human_size;
 mod theme {
     use ratatui::style::{Color, Modifier, Style};
 
-    // Lospec500: https://lospec.com/palette-list/lospec500
     pub const BG: Color = Color::Rgb(0x10, 0x12, 0x1c);
     pub const PANEL: Color = Color::Rgb(0x2c, 0x1e, 0x31);
     pub const PANEL_DARK: Color = Color::Rgb(0x1e, 0x40, 0x44);
@@ -39,7 +38,6 @@ mod theme {
     pub const LIME: Color = Color::Rgb(0x9d, 0xe6, 0x4e);
     pub const CYAN: Color = Color::Rgb(0x6d, 0xea, 0xd6);
     pub const BLUE: Color = Color::Rgb(0x33, 0x88, 0xde);
-    pub const PINK: Color = Color::Rgb(0xc8, 0x78, 0xaf);
     pub const RED: Color = Color::Rgb(0xec, 0x27, 0x3f);
     pub const ORANGE: Color = Color::Rgb(0xe9, 0x85, 0x37);
     pub const SELECT: Color = Color::Rgb(0x6b, 0x26, 0x43);
@@ -58,7 +56,7 @@ mod theme {
 
     pub fn active_title() -> Style {
         Style::default()
-            .fg(PINK)
+            .fg(ACCENT)
             .bg(PANEL)
             .add_modifier(Modifier::BOLD)
     }
@@ -528,19 +526,12 @@ async fn run_loop(
 fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect) {
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
-            "Gremlin",
-            Style::default()
-                .fg(theme::ACCENT)
-                .bg(theme::PANEL)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
             "  q quit | Tab panes | arrows move | Space mark | s scan | h hash | c cancel | t plan | Enter | p load | r run | a accept | d drop | e retarget",
             theme::muted(),
         ),
     ]))
     .style(theme::panel())
-    .block(panel_block("Lospec500", false));
+    .block(panel_block("Gremlin", true));
     frame.render_widget(header, area);
 }
 

@@ -16,6 +16,7 @@ use cli::{
     Cli, Commands, ConfigCommands, JobCommands, TargetCommands, TransferCommands, WorkerCommands,
 };
 use serde::Serialize;
+use std::process::Command;
 use targets::{ParsedTarget, TargetKind};
 
 #[tokio::main]
@@ -317,6 +318,23 @@ async fn main() -> anyhow::Result<()> {
                 let parsed = targets::parse_target(&target, kind)?;
                 let (machine_id, root_path) =
                     resolve_target_identity(&conn, &parsed, machine_label.as_deref())?;
+                if parsed.kind == TargetKind::Ssh {
+                    let scan_path = remote_child_path(&root_path, &path);
+                    match fast_scan_ssh_directory(&parsed, &scan_path) {
+                        Ok(entries) => {
+                            if entries.is_empty() {
+                                println!("empty:\t{path}");
+                            }
+                            for entry in entries {
+                                print_fast_directory_entry(&entry);
+                            }
+                            return Ok(());
+                        }
+                        Err(err) => {
+                            eprintln!("warning:\tSSH fastscan failed: {err}");
+                        }
+                    }
+                }
                 let root = db::find_root_by_machine_path(&conn, &machine_id, &root_path)?
                     .ok_or_else(|| {
                         anyhow::anyhow!(
@@ -493,9 +511,9 @@ fn run_default_target(
     db::init_schema(&conn)?;
     let parsed = targets::parse_target(target, None)?;
     let (machine_id, root_path) = resolve_target_identity(&conn, &parsed, machine_label)?;
-    let root_id = db::ensure_root(&conn, &machine_id, &root_path)?;
     match parsed.kind {
         TargetKind::LocalPath | TargetKind::FileUrl => {
+            let root_id = db::ensure_root(&conn, &machine_id, &root_path)?;
             println!("db:\t{}", db_path.display());
             println!("target:\t{}", parsed.original);
             println!("root:\t{root_id}");
@@ -512,17 +530,37 @@ fn run_default_target(
                 db_path.display()
             );
         }
-        TargetKind::Ssh | TargetKind::Url => {
+        TargetKind::Ssh => {
             println!("db:\t{}", db_path.display());
             println!(
-                "target {:?}\tmachine={}\troot={}\tpath={}",
-                parsed.kind, machine_id, root_id, root_path
+                "target {:?}\tmachine={}\troot=temporary\tpath={}",
+                parsed.kind, machine_id, root_path
             );
-            match db::target_status(&conn, &machine_id, &root_path)? {
-                Some(status) => print_target_status(&parsed, status, false),
-                None => println!("known:\tregistered"),
+            match fast_scan_ssh_directory(&parsed, &root_path) {
+                Ok(entries) => {
+                    if entries.is_empty() {
+                        println!("empty:\t.");
+                    }
+                    for entry in entries {
+                        print_fast_directory_entry(&entry);
+                    }
+                }
+                Err(err) => {
+                    println!("warning:\tSSH fastscan failed: {err}");
+                }
             }
-            println!("next:\tremote worker/import is not implemented yet");
+            println!(
+                "next:\tuse `gremlin target add {}` to persist this root",
+                parsed.original
+            );
+        }
+        TargetKind::Url => {
+            println!("db:\t{}", db_path.display());
+            println!(
+                "target {:?}\tmachine={}\troot=temporary\tpath={}",
+                parsed.kind, machine_id, root_path
+            );
+            println!("next:\tURL browsing is not implemented yet");
         }
     }
     Ok(db_path)
@@ -730,6 +768,108 @@ fn print_cached_directory_entry(entry: &db::CachedDirectoryEntry) {
                 .map(short_id)
                 .unwrap_or("stat-only")
         );
+    }
+}
+
+#[derive(Debug)]
+struct FastDirectoryEntry {
+    kind: String,
+    name: String,
+    size_bytes: u64,
+    modified_at: Option<String>,
+}
+
+fn fast_scan_ssh_directory(
+    parsed: &ParsedTarget,
+    remote_path: &str,
+) -> anyhow::Result<Vec<FastDirectoryEntry>> {
+    let host = parsed
+        .machine_hint
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("SSH target missing machine hint"))?;
+    let command = format!(
+        "cd {} && find . -mindepth 1 -maxdepth 1 -printf '%y\\t%s\\t%T+\\t%P\\n'",
+        remote_shell_path(remote_path)
+    );
+    let output = Command::new("ssh")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ConnectTimeout=2")
+        .arg(host)
+        .arg(command)
+        .output()
+        .with_context(|| format!("listing SSH target {host}:{remote_path}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "ssh listing failed for {host}:{remote_path}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut entries = Vec::new();
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let parts = line.splitn(4, '\t').collect::<Vec<_>>();
+        if parts.len() != 4 {
+            continue;
+        }
+        let kind = if parts[0] == "d" { "dir" } else { "file" };
+        entries.push(FastDirectoryEntry {
+            kind: kind.to_string(),
+            name: parts[3].to_string(),
+            size_bytes: parts[1].parse::<u64>().unwrap_or(0),
+            modified_at: Some(parts[2].to_string()),
+        });
+    }
+    entries.sort_by(|left, right| {
+        left.kind
+            .cmp(&right.kind)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Ok(entries)
+}
+
+fn print_fast_directory_entry(entry: &FastDirectoryEntry) {
+    if entry.kind == "dir" {
+        println!(
+            "dir:\t{}\t{}\t{}",
+            entry.name,
+            entry.modified_at.as_deref().unwrap_or("-"),
+            util::human_size(entry.size_bytes)
+        );
+    } else {
+        println!(
+            "file:\t{}\t{}\t{}",
+            entry.name,
+            util::human_size(entry.size_bytes),
+            entry.modified_at.as_deref().unwrap_or("-")
+        );
+    }
+}
+
+fn remote_child_path(root_path: &str, child_path: &str) -> String {
+    let child = child_path.trim().trim_matches('/');
+    if child.is_empty() || child == "." {
+        return root_path.to_string();
+    }
+    if root_path == "~" {
+        format!("~/{child}")
+    } else {
+        format!("{}/{}", root_path.trim_end_matches('/'), child)
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn remote_shell_path(path: &str) -> String {
+    if path == "~" {
+        "$HOME".to_string()
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        format!("$HOME/{}", shell_quote(rest))
+    } else {
+        shell_quote(path)
     }
 }
 

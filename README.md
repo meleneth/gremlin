@@ -58,7 +58,7 @@ gremlin transfer run PLAN_ID --paranoid --db ./gremlin.db
 gremlin tui --db ./gremlin.db
 ```
 
-`--db` is a global override and may appear before or after a subcommand. If it is omitted, Gremlin checks `GREMLIN_DB`, then `default_db` in the config file. Positional target flows open the TUI by default; use `--no-tui` when you want only the command-line registration/status output.
+`--db` is a global override and may appear before or after a subcommand. If it is omitted, Gremlin checks `GREMLIN_DB`, then `default_db` in the config file. Positional target flows open the TUI by default; use `--no-tui` when you want only the command-line registration/status output. Passing `host:` or `host:/path` as a positional target starts from a temporary SSH browse target; it does not persist a root unless you explicitly import observations for that target or run `target add`.
 
 For the smooth target flow, Gremlin can also auto-create a default database at:
 
@@ -130,9 +130,9 @@ gremlin target inspect nas01:/mnt/archive
 gremlin target inspect https://example.invalid/listing.json
 ```
 
-Use `--kind local-path|file-url|ssh|url` only when you want to force interpretation. `target add` creates or reuses the matching machine/root record, and `status TARGET` gives a fast projected summary when that root is already known. SSH targets may be written as `host:/path` or `host:`; `host:` means the login default directory and is stored as `~`.
+Use `--kind local-path|file-url|ssh|url` only when you want to force interpretation. `target add` creates or reuses the matching machine/root record, and `status TARGET` gives a fast projected summary when that root is already known. SSH targets may be written as `host:/path` or `host:`; `host:` means the login default directory and is stored as `~`. Positional SSH targets are temporary until promoted with `target add` or populated through an import command.
 
-`target ls TARGET` lists cached child directories and files for a known root without touching the filesystem or network. Use `--path DIR` to list a cached subdirectory. This is currently backed by projected file observations, so it becomes useful after local scans/hashes or target-aware worker imports.
+`target ls TARGET` live-lists SSH directories with a bounded `ssh` probe before falling back to cached observations for a persisted root. Use `--path DIR` to list a child directory. Local and file URL targets are backed by projected file observations, so they become useful after local scans/hashes or target-aware worker imports.
 
 Most scan/hash/verify commands print a compact summary plus capped highlights. Use `--details` and `--limit N` to control result detail. `--json` is available for `status`, `scan`, `hash`, and `verify`.
 
@@ -141,7 +141,7 @@ Most scan/hash/verify commands print a compact summary plus capped highlights. U
 Future seams deliberately left open:
 
 - SSH remote scan/hash dispatch: run `gremlin worker hash ... --jsonl --out ...` remotely, stream progress, and import results without manual file shuffling.
-- Remote browsing: cache directory observations, let `host:` start at the default remote location, navigate from there, and promote browsed directories into tracked roots.
+- Remote browsing: bring live temporary SSH listings into the TUI navigation model, cache directory observations after promotion, and let browsed directories become tracked roots only when the user says to import/add them.
 - Manifest reconciliation: use imported SFV/CFV/PAR2 checksum collections as verification baselines where possible.
 - SMB path mapping: add machine/root mapping without changing content identity.
 - Transfer planning/copying: persisted dry-run root-to-root plans, job events, CLI inspection, TUI persisted-plan loading, TUI plan browsing/run/review/retarget controls, detailed local-copy progress, streamed hash-checked local copy execution, optional local root chunk hashes, and optional paranoid readback exist for TUI selections; next slices should add checksum collection comparisons and resumable copy checkpoints.

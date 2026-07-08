@@ -221,5 +221,18 @@ fn positional_ssh_target_can_run_without_tui() {
         .clone();
     let output = String::from_utf8(output).unwrap();
     assert!(output.contains("target Ssh"));
+    assert!(output.contains("root=temporary"));
     assert!(output.contains("path=~"));
+
+    let status = command_json(&[
+        "--no-config",
+        "--db",
+        db.to_str().unwrap(),
+        "--json",
+        "status",
+        "nas01:",
+    ]);
+    assert_eq!(status["known"], false);
+    assert_eq!(status["kind"], "ssh");
+    assert_eq!(status["path"], "~");
 }
