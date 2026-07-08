@@ -154,6 +154,20 @@ struct DetailData<'a> {
     file: Option<&'a db::FileRow>,
     selected_paths: &'a BTreeSet<String>,
     plan: Option<&'a PlanSnapshot>,
+    transfer_progress: Option<TransferProgressSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+struct TransferProgressSnapshot {
+    current_path: String,
+    files_done: u64,
+    files_total: u64,
+    bytes_done: u64,
+    bytes_total: u64,
+    file_bytes_done: u64,
+    file_bytes_total: u64,
+    bytes_per_second: f64,
+    errors: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -340,6 +354,7 @@ async fn run_loop(
             Some(root) => db::selected_paths_for_root(conn, &root.id)?,
             None => BTreeSet::new(),
         };
+        let transfer_progress = latest_transfer_progress(&events);
 
         terminal.draw(|frame| {
             let area = frame.size();
@@ -349,9 +364,9 @@ async fn run_loop(
                 .constraints([
                     Constraint::Length(3),
                     Constraint::Min(5),
-                    Constraint::Length(11),
+                    Constraint::Length(14),
                     Constraint::Length(3),
-                    Constraint::Length(5),
+                    Constraint::Length(6),
                 ])
                 .split(area);
             let middle = Layout::default()
@@ -376,6 +391,7 @@ async fn run_loop(
                     file: files.get(state.file_offset),
                     selected_paths: &selected_paths,
                     plan: state.last_plan.as_ref(),
+                    transfer_progress: transfer_progress.clone(),
                 },
             );
             render_plan_review(frame, lower[1], state.last_plan.as_ref(), &state);
@@ -699,7 +715,12 @@ fn render_detail_panel(frame: &mut ratatui::Frame<'_>, area: Rect, data: DetailD
         "Plan: -\nPress t on a source root, choose a destination root, Enter plans marked files"
             .to_string()
     };
-    let text = format!("{root_lines}\n{file_lines}\n{plan_lines}");
+    let transfer_lines = data
+        .transfer_progress
+        .as_ref()
+        .map(transfer_progress_lines)
+        .unwrap_or_else(|| "Transfer: -".to_string());
+    let text = format!("{root_lines}\n{file_lines}\n{plan_lines}\n{transfer_lines}");
     frame.render_widget(
         Paragraph::new(text)
             .style(theme::panel_dark())
@@ -1069,6 +1090,74 @@ fn progress_count(row: &db::JobEventRow) -> String {
     }
 }
 
+fn latest_transfer_progress(events: &[db::JobEventRow]) -> Option<TransferProgressSnapshot> {
+    events
+        .iter()
+        .filter(|row| row.job_kind == "transfer_copy")
+        .find_map(|row| transfer_progress_snapshot(&row.payload_json))
+}
+
+fn transfer_progress_snapshot(payload_json: &str) -> Option<TransferProgressSnapshot> {
+    let payload: serde_json::Value = serde_json::from_str(payload_json).ok()?;
+    if payload.get("type")?.as_str()? != "job_progress" {
+        return None;
+    }
+    Some(TransferProgressSnapshot {
+        current_path: payload
+            .get("current_path")
+            .and_then(|value| value.as_str())
+            .unwrap_or("-")
+            .to_string(),
+        files_done: payload
+            .get("files_done")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0),
+        files_total: payload
+            .get("files_total")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0),
+        bytes_done: payload.get("bytes_done")?.as_u64()?,
+        bytes_total: payload.get("bytes_total")?.as_u64()?,
+        file_bytes_done: payload
+            .get("file_bytes_done")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0),
+        file_bytes_total: payload
+            .get("file_bytes_total")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0),
+        bytes_per_second: payload
+            .get("bytes_per_second")
+            .and_then(|value| value.as_f64())
+            .unwrap_or(0.0),
+        errors: payload
+            .get("errors")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0),
+    })
+}
+
+fn transfer_progress_lines(progress: &TransferProgressSnapshot) -> String {
+    let overall_percent = progress_percent(progress.bytes_done, progress.bytes_total);
+    let file_percent = progress_percent(progress.file_bytes_done, progress.file_bytes_total);
+    format!(
+        "Transfer: {} {}% {}/{} @ {}/s\nFile: {} {}% {}/{}\nNow: {} | files {}/{} | errors {}",
+        progress_bar(progress.bytes_done, progress.bytes_total, 12),
+        overall_percent,
+        human_size(progress.bytes_done),
+        human_size(progress.bytes_total),
+        transfer_rate(progress.bytes_per_second),
+        progress_bar(progress.file_bytes_done, progress.file_bytes_total, 12),
+        file_percent,
+        human_size(progress.file_bytes_done),
+        human_size(progress.file_bytes_total),
+        truncate(&progress.current_path, 36),
+        progress.files_done,
+        progress.files_total,
+        progress.errors
+    )
+}
+
 fn byte_progress_summary(payload_json: &str) -> Option<String> {
     let payload: serde_json::Value = serde_json::from_str(payload_json).ok()?;
     if payload.get("type")?.as_str()? != "job_progress" {
@@ -1089,6 +1178,14 @@ fn byte_progress_summary(payload_json: &str) -> Option<String> {
         ((done.saturating_mul(100)) / total).min(100),
         transfer_rate(rate)
     ))
+}
+
+fn progress_percent(done: u64, total: u64) -> u64 {
+    done.min(total)
+        .saturating_mul(100)
+        .checked_div(total)
+        .unwrap_or(0)
+        .min(100)
 }
 
 fn progress_bar(done: u64, total: u64, width: usize) -> String {
@@ -1545,6 +1642,70 @@ mod tests {
             byte_progress_summary(&payload.to_string()).unwrap(),
             "[####----]  50% 1.0 MiB/s"
         );
+    }
+
+    #[test]
+    fn formats_transfer_progress_detail() {
+        let payload = serde_json::json!({
+            "type": "job_progress",
+            "current_path": "incoming/photos/foo.png",
+            "files_done": 2,
+            "files_total": 4,
+            "bytes_done": 512,
+            "bytes_total": 1024,
+            "file_bytes_done": 128,
+            "file_bytes_total": 256,
+            "bytes_per_second": 2.0 * 1024.0 * 1024.0,
+            "errors": 1
+        });
+        let progress = transfer_progress_snapshot(&payload.to_string()).unwrap();
+        let lines = transfer_progress_lines(&progress);
+
+        assert!(lines.contains("Transfer: [######------] 50%"));
+        assert!(lines.contains("@ 2.0 MiB/s"));
+        assert!(lines.contains("File: [######------] 50%"));
+        assert!(lines.contains("files 2/4 | errors 1"));
+    }
+
+    #[test]
+    fn finds_latest_transfer_progress_event() {
+        let complete = db::JobEventRow {
+            job_id: "job_1".to_string(),
+            job_kind: "transfer_copy".to_string(),
+            status: "completed".to_string(),
+            phase: Some("copying".to_string()),
+            current_path: None,
+            files_seen: 1,
+            files_done: 1,
+            files_skipped: 0,
+            errors: 0,
+            cancel_requested: false,
+            sequence: 2,
+            event_kind: "job_completed".to_string(),
+            payload_json: serde_json::json!({"type": "job", "message": "completed"}).to_string(),
+        };
+        let progress = db::JobEventRow {
+            sequence: 1,
+            event_kind: "job_progress".to_string(),
+            payload_json: serde_json::json!({
+                "type": "job_progress",
+                "current_path": "a.bin",
+                "files_done": 0,
+                "files_total": 1,
+                "bytes_done": 5,
+                "bytes_total": 10,
+                "file_bytes_done": 5,
+                "file_bytes_total": 10,
+                "bytes_per_second": 512.0,
+                "errors": 0
+            })
+            .to_string(),
+            ..complete.clone()
+        };
+
+        let found = latest_transfer_progress(&[complete, progress]).unwrap();
+        assert_eq!(found.current_path, "a.bin");
+        assert_eq!(found.bytes_done, 5);
     }
 
     #[test]
