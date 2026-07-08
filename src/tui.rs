@@ -837,7 +837,7 @@ fn active_command_hint(state: &AppState, has_temporary_browse: bool) -> &'static
             "Enter open directory  Backspace parent  i import selected/current  t copy selected/current"
         }
         FocusPane::Files => {
-            "Enter open directory  Backspace parent  Space mark file  t choose source  v columns"
+            "Enter open directory  Backspace parent  Space mark file/dir  t choose source  v columns"
         }
         FocusPane::Plan => "r run copy entries  a accept review  d drop review  e retarget review",
         FocusPane::Events => "c request cancel for selected job  Tab return to roots",
@@ -1169,7 +1169,7 @@ fn render_files(
         let mut rows = vec![ListItem::new(file_header(state.file_view)).style(theme::header())];
         rows.extend(visible.map(|(idx, file)| {
             let marker = if idx == state.file_offset { "> " } else { "  " };
-            let selected = selected_paths.contains(&file.relative_path);
+            let selected = file_row_selected(file, selected_paths);
             let style = if idx == state.file_offset {
                 theme::selected()
             } else if selected {
@@ -1189,6 +1189,15 @@ fn render_files(
         )),
         area,
     );
+}
+
+fn file_row_selected(file: &FileViewRow, selected_paths: &BTreeSet<String>) -> bool {
+    if file.kind == FileKind::Directory {
+        let prefix = format!("{}/", file.relative_path);
+        selected_paths.iter().any(|path| path.starts_with(&prefix))
+    } else {
+        selected_paths.contains(&file.relative_path)
+    }
 }
 
 fn file_header(view: FileView) -> String {
@@ -1928,10 +1937,24 @@ fn toggle_selected_file_mark(
         return Ok(());
     };
     if file.kind == FileKind::Directory {
-        state.status = format!(
-            "{} is a directory; press Enter to open it",
-            file.relative_path
-        );
+        let change = db::toggle_selection_directory(conn, &root.id, &file.relative_path)?;
+        state.status = if change.files_changed == 0 {
+            format!("{} has no indexed files to mark", file.relative_path)
+        } else if change.selected {
+            format!(
+                "marked {} files under {} ({})",
+                change.files_changed,
+                file.relative_path,
+                human_size(change.bytes_changed)
+            )
+        } else {
+            format!(
+                "unmarked {} files under {} ({})",
+                change.files_changed,
+                file.relative_path,
+                human_size(change.bytes_changed)
+            )
+        };
         return Ok(());
     }
     let marked = db::toggle_selection_entry(conn, &root.id, &file.relative_path)?;
@@ -2718,28 +2741,52 @@ mod tests {
     }
 
     #[test]
-    fn directories_are_not_marked_as_files() {
+    fn directory_rows_mark_descendant_files() {
         let conn = Connection::open_in_memory().unwrap();
         db::init_schema(&conn).unwrap();
         let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
         let root_id = db::ensure_root(&conn, &machine_id, "/tmp/root").unwrap();
+        for path in ["photos/a.png", "photos/nested/b.png"] {
+            db::insert_path_observation(
+                &conn,
+                db::PathObservationInput {
+                    machine_id: &machine_id,
+                    root_id: &root_id,
+                    relative_path: path,
+                    basename: path.rsplit('/').next().unwrap(),
+                    parent_path: ".",
+                    size_bytes: 1,
+                    modified_at: None,
+                    content_id: None,
+                },
+            )
+            .unwrap();
+        }
         let root = db::root_by_id(&conn, &root_id).unwrap().unwrap();
         let dir = FileViewRow {
             relative_path: "photos".to_string(),
-            size_bytes: 10,
+            size_bytes: 2,
             modified_at: None,
             content_id: None,
-            status: "dir:1".to_string(),
+            status: "dir:2".to_string(),
             kind: FileKind::Directory,
         };
         let mut state = AppState::default();
 
         toggle_selected_file_mark(&conn, Some(&root), Some(&dir), &mut state).unwrap();
 
-        assert!(db::selected_paths_for_root(&conn, &root_id)
-            .unwrap()
-            .is_empty());
-        assert!(state.status.contains("press Enter to open"));
+        assert_eq!(
+            db::selected_paths_for_root(&conn, &root_id).unwrap(),
+            BTreeSet::from([
+                "photos/a.png".to_string(),
+                "photos/nested/b.png".to_string()
+            ])
+        );
+        assert!(state.status.contains("marked 2 files under photos"));
+        assert!(file_row_selected(
+            &dir,
+            &db::selected_paths_for_root(&conn, &root_id).unwrap()
+        ));
     }
 
     #[test]

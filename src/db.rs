@@ -76,6 +76,13 @@ pub struct SelectionSummary {
     pub marked_bytes: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectorySelectionChange {
+    pub selected: bool,
+    pub files_changed: usize,
+    pub bytes_changed: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct TransferPlanRow {
     pub id: String,
@@ -1342,6 +1349,93 @@ pub fn toggle_selection_entry(
         )?;
         Ok(true)
     }
+}
+
+pub fn toggle_selection_directory(
+    conn: &Connection,
+    root_id: &str,
+    directory_path: &str,
+) -> rusqlite::Result<DirectorySelectionChange> {
+    let files = files_under_directory(conn, root_id, directory_path)?;
+    if files.is_empty() {
+        return Ok(DirectorySelectionChange {
+            selected: false,
+            files_changed: 0,
+            bytes_changed: 0,
+        });
+    }
+    let set_id = ensure_default_selection_set(conn, root_id)?;
+    let selected = selected_paths_for_root(conn, root_id)?;
+    let all_selected = files
+        .iter()
+        .all(|file| selected.contains(&file.relative_path));
+    let now = now_rfc3339();
+    let bytes_changed = files.iter().map(|file| file.size_bytes as u64).sum();
+    if all_selected {
+        for file in &files {
+            conn.execute(
+                "DELETE FROM selection_entries WHERE selection_set_id = ?1 AND relative_path = ?2",
+                params![set_id, &file.relative_path],
+            )?;
+        }
+    } else {
+        for file in &files {
+            if selected.contains(&file.relative_path) {
+                continue;
+            }
+            conn.execute(
+                r#"
+                INSERT INTO selection_entries
+                    (id, selection_set_id, root_id, relative_path, created_at)
+                VALUES (?1, ?2, ?3, ?4, ?5)
+                "#,
+                params![new_id("mark"), set_id, root_id, &file.relative_path, now],
+            )?;
+        }
+    }
+    conn.execute(
+        "UPDATE selection_sets SET updated_at = ?2 WHERE id = ?1",
+        params![set_id, now],
+    )?;
+    Ok(DirectorySelectionChange {
+        selected: !all_selected,
+        files_changed: files.len(),
+        bytes_changed,
+    })
+}
+
+fn files_under_directory(
+    conn: &Connection,
+    root_id: &str,
+    directory_path: &str,
+) -> rusqlite::Result<Vec<FileRow>> {
+    let prefix = normalize_cached_parent(directory_path);
+    let like = format!("{}/%", escape_like_pattern(&prefix));
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT relative_path, size_bytes, modified_at, content_id, status
+        FROM path_observations
+        WHERE root_id = ?1 AND relative_path LIKE ?2 ESCAPE '\'
+        ORDER BY relative_path ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(params![root_id, like], |row| {
+        Ok(FileRow {
+            relative_path: row.get(0)?,
+            size_bytes: row.get(1)?,
+            modified_at: row.get(2)?,
+            content_id: row.get(3)?,
+            status: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+fn escape_like_pattern(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 pub fn selected_paths_for_root(
@@ -2654,6 +2748,49 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("dir", "dir/nested", 3), ("file", "dir/a.txt", 2)]
         );
+    }
+
+    #[test]
+    fn toggles_directory_selection_for_descendant_files() {
+        let conn = Connection::open_in_memory().unwrap();
+        configure(&conn).unwrap();
+        init_schema(&conn).unwrap();
+        let machine_id = ensure_local_machine_with_label(&conn, None).unwrap();
+        let root_id = ensure_root(&conn, &machine_id, "/tmp/root").unwrap();
+        for (path, size) in [
+            ("dir/a.txt", 2_u64),
+            ("dir/nested/b.txt", 3),
+            ("other/c.txt", 4),
+        ] {
+            insert_path_observation(
+                &conn,
+                PathObservationInput {
+                    machine_id: &machine_id,
+                    root_id: &root_id,
+                    relative_path: path,
+                    basename: path.rsplit('/').next().unwrap(),
+                    parent_path: ".",
+                    size_bytes: size,
+                    modified_at: None,
+                    content_id: None,
+                },
+            )
+            .unwrap();
+        }
+
+        let marked = toggle_selection_directory(&conn, &root_id, "dir").unwrap();
+        assert!(marked.selected);
+        assert_eq!(marked.files_changed, 2);
+        assert_eq!(marked.bytes_changed, 5);
+        assert_eq!(
+            selected_paths_for_root(&conn, &root_id).unwrap(),
+            BTreeSet::from(["dir/a.txt".to_string(), "dir/nested/b.txt".to_string()])
+        );
+
+        let unmarked = toggle_selection_directory(&conn, &root_id, "dir").unwrap();
+        assert!(!unmarked.selected);
+        assert_eq!(unmarked.files_changed, 2);
+        assert!(selected_paths_for_root(&conn, &root_id).unwrap().is_empty());
     }
 
     #[test]
