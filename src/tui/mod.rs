@@ -380,6 +380,7 @@ mod plan_actions;
 mod plan_view;
 mod root_actions;
 mod roots;
+mod screen;
 mod theme;
 mod transfer_source;
 
@@ -396,6 +397,7 @@ use plan_actions::*;
 use plan_view::*;
 use root_actions::*;
 use roots::*;
+use screen::*;
 use transfer_source::*;
 
 #[cfg(test)]

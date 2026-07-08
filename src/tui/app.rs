@@ -113,92 +113,21 @@ pub(super) async fn run_loop(
         let transfer_progress = latest_transfer_progress(&events);
 
         terminal.draw(|frame| {
-            let area = frame.area();
-            frame.render_widget(Block::default().style(theme::base()), area);
-            let vertical = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(4),
-                    Constraint::Min(5),
-                    Constraint::Length(14),
-                    Constraint::Length(3),
-                    Constraint::Length(6),
-                ])
-                .split(area);
-            let middle = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(34), Constraint::Percentage(66)])
-                .split(vertical[1]);
-            let lower = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-                .split(vertical[2]);
-
             frame.render_widget(
-                HeaderPane {
+                AppScreen {
                     state: &state,
-                    has_temporary_browse: selected_temporary.is_some(),
-                },
-                vertical[0],
-            );
-            frame.render_widget(
-                RootsPane {
                     roots: &roots,
-                    state: &state,
-                },
-                middle[0],
-            );
-            frame.render_widget(
-                FilesPane {
                     files: &files,
                     selected_paths: &selected_paths,
-                    state: &state,
-                },
-                middle[1],
-            );
-            frame.render_widget(
-                DetailPane {
-                    data: DetailData {
-                        root: selected,
-                        temporary_browse: selected_temporary,
-                        persisted_browse_dir: selected
-                            .map(|root| current_persisted_root_dir(&state, &root.id)),
-                        summary: summary.as_ref(),
-                        selection: selection_summary.as_ref(),
-                        file: files.get(state.file_offset),
-                        selected_paths: &selected_paths,
-                        plan: state.last_plan.as_ref(),
-                        transfer_progress: transfer_progress.clone(),
-                    },
-                },
-                lower[0],
-            );
-            frame.render_widget(
-                PlanReviewPane {
-                    plan: state.last_plan.as_ref(),
-                    state: &state,
-                },
-                lower[1],
-            );
-            frame.render_widget(
-                InfoBar {
-                    data: InfoBarData {
-                        root_name: selected_root_name(selected, selected_temporary),
-                        file: files.get(state.file_offset),
-                        selection: selection_summary.as_ref(),
-                        event: events.get(state.event_offset),
-                        root_count,
-                    },
-                    state: &state,
-                },
-                vertical[3],
-            );
-            frame.render_widget(
-                EventsPane {
+                    selected_root: selected,
+                    selected_temporary,
+                    summary: summary.as_ref(),
+                    selection: selection_summary.as_ref(),
                     events: &events,
-                    state: &state,
+                    root_count,
+                    transfer_progress,
                 },
-                vertical[4],
+                frame.area(),
             );
         })?;
 

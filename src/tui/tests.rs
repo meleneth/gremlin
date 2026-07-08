@@ -464,3 +464,35 @@ fn formats_plan_review_hint_and_count() {
     assert_eq!(plan_review_count(&plan), 1);
     assert_eq!(plan_copy_count(&plan), 1);
 }
+
+#[test]
+fn app_screen_renders_empty_state_widgets() {
+    let state = AppState::default();
+    let selected_paths = BTreeSet::new();
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 100, 32));
+
+    AppScreen {
+        state: &state,
+        roots: &[],
+        files: &[],
+        selected_paths: &selected_paths,
+        selected_root: None,
+        selected_temporary: None,
+        summary: None,
+        selection: None,
+        events: &[],
+        root_count: 0,
+        transfer_progress: None,
+    }
+    .render(buffer.area, &mut buffer);
+
+    let text = buffer
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("Commands"));
+    assert!(text.contains("No roots yet"));
+    assert!(text.contains("No indexed files"));
+    assert!(text.contains("No transfer plan yet"));
+}
