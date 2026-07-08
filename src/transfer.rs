@@ -1,5 +1,6 @@
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use anyhow::Context;
@@ -89,10 +90,6 @@ impl TransferEndpoint {
             Self::Local(path) => path.display().to_string(),
             Self::Ssh { host, path } => format!("{host}:{path}"),
         }
-    }
-
-    fn scp_arg(&self) -> String {
-        self.display_path()
     }
 }
 
@@ -549,6 +546,7 @@ fn copy_one_entry(
                 entry,
                 source_path,
                 dest,
+                on_progress,
             )
         }
         (TransferEndpoint::Local(source), TransferEndpoint::Ssh { .. }) => {
@@ -562,6 +560,7 @@ fn copy_one_entry(
                 entry,
                 source,
                 dest_path,
+                on_progress,
             )
         }
         (TransferEndpoint::Ssh { .. }, TransferEndpoint::Ssh { .. }) => {
@@ -688,6 +687,7 @@ fn copy_ssh_to_local(
     entry: &db::TransferPlanEntryRow,
     source: &TransferEndpoint,
     dest_path: &Path,
+    on_progress: &mut dyn FnMut(u64, u64, f64) -> anyhow::Result<()>,
 ) -> anyhow::Result<CopyOutcome> {
     if std::fs::metadata(dest_path).is_ok() {
         anyhow::bail!("destination exists: {}", dest_path.display());
@@ -697,23 +697,19 @@ fn copy_ssh_to_local(
         "gremlin-copy-{}.tmp",
         uuid::Uuid::new_v4().simple()
     ));
-    let scp_result = run_command(
-        Command::new("scp")
-            .arg(source.scp_arg())
-            .arg(temp_path.as_os_str()),
-    )
-    .with_context(|| {
-        format!(
-            "copying {} to {}",
-            source.display_path(),
-            dest_path.display()
-        )
-    });
-    if let Err(err) = scp_result {
+    let copy_result = copy_ssh_to_local_chunked(source, &temp_path, entry.size_bytes, on_progress)
+        .with_context(|| {
+            format!(
+                "copying {} to {}",
+                source.display_path(),
+                dest_path.display()
+            )
+        });
+    if let Err(err) = copy_result {
         let _ = std::fs::remove_file(&temp_path);
         return Err(err);
     }
-    let copy_hash = hash_existing_file(&temp_path)?;
+    let copy_hash = copy_result?;
     if copy_hash.bytes != entry.size_bytes {
         let _ = std::fs::remove_file(&temp_path);
         anyhow::bail!(
@@ -759,6 +755,7 @@ fn copy_local_to_ssh(
     entry: &db::TransferPlanEntryRow,
     source_path: &Path,
     dest: &TransferEndpoint,
+    on_progress: &mut dyn FnMut(u64, u64, f64) -> anyhow::Result<()>,
 ) -> anyhow::Result<CopyOutcome> {
     let source_meta = std::fs::metadata(source_path)
         .with_context(|| format!("reading source {}", source_path.display()))?;
@@ -786,18 +783,15 @@ fn copy_local_to_ssh(
         remote_shell_path(&parent)
     )))
     .with_context(|| format!("preparing remote destination {host}:{path}"))?;
-    run_command(
-        Command::new("scp")
-            .arg(source_path.as_os_str())
-            .arg(dest.scp_arg()),
-    )
-    .with_context(|| {
-        format!(
-            "copying {} to {}",
-            source_path.display(),
-            dest.display_path()
-        )
-    })?;
+    copy_local_to_ssh_chunked(source_path, dest, entry.size_bytes, on_progress).with_context(
+        || {
+            format!(
+                "copying {} to {}",
+                source_path.display(),
+                dest.display_path()
+            )
+        },
+    )?;
     let content_id = db::ensure_content_object(
         conn,
         source_hash.bytes,
@@ -822,6 +816,208 @@ fn copy_local_to_ssh(
         },
     )?;
     Ok(CopyOutcome::Copied(source_hash.bytes))
+}
+
+fn copy_ssh_to_local_chunked(
+    source: &TransferEndpoint,
+    temp_path: &Path,
+    total: u64,
+    on_progress: &mut dyn FnMut(u64, u64, f64) -> anyhow::Result<()>,
+) -> anyhow::Result<CopyHashResult> {
+    let TransferEndpoint::Ssh { host, path } = source else {
+        anyhow::bail!("source is not SSH");
+    };
+    let mut dest = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temp_path)
+        .with_context(|| format!("creating {}", temp_path.display()))?;
+    let mut blake3_hasher = blake3::Hasher::new();
+    let mut sha256_hasher = Sha256::new();
+    let mut copied = 0_u64;
+    let started_at = Instant::now();
+    for chunk in transfer_chunks(total) {
+        let remote_md5 = remote_chunk_md5(host, path, chunk.index)?;
+        let bytes = remote_chunk_bytes(host, path, chunk.index)?;
+        if bytes.len() as u64 != chunk.size {
+            anyhow::bail!(
+                "remote chunk size mismatch for {} chunk {}: expected {}, got {}",
+                path,
+                chunk.index,
+                chunk.size,
+                bytes.len()
+            );
+        }
+        let local_md5 = format!("{:x}", md5::compute(&bytes));
+        if local_md5 != remote_md5 {
+            anyhow::bail!(
+                "MD5 chunk mismatch for {} chunk {}: remote {}, copied {}",
+                path,
+                chunk.index,
+                remote_md5,
+                local_md5
+            );
+        }
+        dest.write_all(&bytes)
+            .with_context(|| format!("writing {}", temp_path.display()))?;
+        blake3_hasher.update(&bytes);
+        sha256_hasher.update(&bytes);
+        copied += bytes.len() as u64;
+        on_progress(copied, total, rate_per_second(copied, started_at))?;
+    }
+    dest.sync_all()
+        .with_context(|| format!("syncing {}", temp_path.display()))?;
+    Ok(CopyHashResult {
+        bytes: copied,
+        blake3: blake3_hasher.finalize().to_hex().to_string(),
+        sha256: format!("{:x}", sha256_hasher.finalize()),
+    })
+}
+
+fn copy_local_to_ssh_chunked(
+    source_path: &Path,
+    dest: &TransferEndpoint,
+    total: u64,
+    on_progress: &mut dyn FnMut(u64, u64, f64) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let TransferEndpoint::Ssh { host, path } = dest else {
+        anyhow::bail!("destination is not SSH");
+    };
+    if total == 0 {
+        run_command(
+            Command::new("ssh")
+                .arg(host)
+                .arg(format!(": > {}", remote_shell_path(path))),
+        )
+        .with_context(|| format!("creating empty remote file {host}:{path}"))?;
+        on_progress(0, 0, 0.0)?;
+        return Ok(());
+    }
+    let mut source = std::fs::File::open(source_path)
+        .with_context(|| format!("opening source {}", source_path.display()))?;
+    let mut copied = 0_u64;
+    let started_at = Instant::now();
+    for chunk in transfer_chunks(total) {
+        let mut bytes = vec![0_u8; chunk.size as usize];
+        source
+            .read_exact(&mut bytes)
+            .with_context(|| format!("reading {}", source_path.display()))?;
+        let local_md5 = format!("{:x}", md5::compute(&bytes));
+        write_remote_chunk(host, path, chunk.index, &bytes)?;
+        let remote_md5 = remote_chunk_md5(host, path, chunk.index)?;
+        if remote_md5 != local_md5 {
+            anyhow::bail!(
+                "MD5 chunk mismatch after SSH write for {} chunk {}: local {}, remote {}",
+                path,
+                chunk.index,
+                local_md5,
+                remote_md5
+            );
+        }
+        copied += chunk.size;
+        on_progress(copied, total, rate_per_second(copied, started_at))?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TransferChunk {
+    index: u64,
+    size: u64,
+}
+
+fn transfer_chunks(total: u64) -> Vec<TransferChunk> {
+    let chunk_size = crate::fswork::DEFAULT_CHUNK_SIZE_BYTES;
+    let mut chunks = Vec::new();
+    let mut offset = 0_u64;
+    let mut index = 0_u64;
+    while offset < total {
+        let size = (total - offset).min(chunk_size);
+        chunks.push(TransferChunk { index, size });
+        offset += size;
+        index += 1;
+    }
+    chunks
+}
+
+fn remote_chunk_md5(host: &str, path: &str, chunk_index: u64) -> anyhow::Result<String> {
+    let output = remote_chunk_command(host, path, chunk_index, " | md5sum")?;
+    let text = String::from_utf8(output).context("remote md5sum output was not UTF-8")?;
+    text.split_whitespace()
+        .next()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("remote md5sum produced no digest for {host}:{path}"))
+}
+
+fn remote_chunk_bytes(host: &str, path: &str, chunk_index: u64) -> anyhow::Result<Vec<u8>> {
+    remote_chunk_command(host, path, chunk_index, "")
+}
+
+fn remote_chunk_command(
+    host: &str,
+    path: &str,
+    chunk_index: u64,
+    suffix: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let chunk_size = crate::fswork::DEFAULT_CHUNK_SIZE_BYTES;
+    let command = format!(
+        "dd if={} bs={} skip={} count=1 iflag=fullblock status=none{}",
+        remote_shell_path(path),
+        chunk_size,
+        chunk_index,
+        suffix
+    );
+    let output = Command::new("ssh")
+        .arg(host)
+        .arg(command)
+        .output()
+        .with_context(|| format!("reading remote chunk {chunk_index} from {host}:{path}"))?;
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        anyhow::bail!(
+            "remote chunk command failed for {host}:{path} chunk {}: {}",
+            chunk_index,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+}
+
+fn write_remote_chunk(
+    host: &str,
+    path: &str,
+    chunk_index: u64,
+    bytes: &[u8],
+) -> anyhow::Result<()> {
+    let command = format!(
+        "dd of={} bs={} seek={} count=1 conv=notrunc status=none",
+        remote_shell_path(path),
+        crate::fswork::DEFAULT_CHUNK_SIZE_BYTES,
+        chunk_index
+    );
+    let mut child = Command::new("ssh")
+        .arg(host)
+        .arg(command)
+        .stdin(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("starting remote chunk write to {host}:{path}"))?;
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("failed to open ssh stdin"))?;
+        stdin
+            .write_all(bytes)
+            .with_context(|| format!("writing chunk {} to {host}:{path}", chunk_index))?;
+    }
+    let status = child
+        .wait()
+        .with_context(|| format!("waiting for remote chunk write to {host}:{path}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        anyhow::bail!("remote chunk write failed for {host}:{path} chunk {chunk_index}");
+    }
 }
 
 fn ensure_dest_parent(dest_path: &Path) -> anyhow::Result<Option<PathBuf>> {
@@ -1753,6 +1949,19 @@ mod tests {
         assert_eq!(shell_quote("/srv/it's"), "'/srv/it'\\''s'");
         assert_eq!(remote_shell_path("~"), "$HOME");
         assert_eq!(remote_shell_path("~/dir/it's"), "$HOME/'dir/it'\\''s'");
+    }
+
+    #[test]
+    fn transfer_chunks_use_fixed_size_offsets_with_remainder() {
+        let chunk_size = crate::fswork::DEFAULT_CHUNK_SIZE_BYTES;
+        let chunks = transfer_chunks(chunk_size * 2 + 7);
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].index, 0);
+        assert_eq!(chunks[0].size, chunk_size);
+        assert_eq!(chunks[1].index, 1);
+        assert_eq!(chunks[1].size, chunk_size);
+        assert_eq!(chunks[2].index, 2);
+        assert_eq!(chunks[2].size, 7);
     }
 
     #[test]

@@ -52,12 +52,12 @@
 
 - Add compare flow between two roots or checksum collections.
 - Add more transfer plan filters and output formats after the copy runner requirements settle.
-- Model copy chunks or per-file transfer checkpoints beyond the current whole-file copy runner.
-- Use stored path-observation chunk hashes to resume transfer plans and isolate corrupt chunks.
+- Persist copy chunk checkpoints beyond the current in-process chunk-verified one-sided SSH runner.
+- Use stored path-observation chunk hashes to resume transfer plans instead of restarting incomplete files.
 - Make resume distinguish size-only skips from hash-verified skips.
 - Add remote-to-remote transfer execution after one-sided SSH copies settle.
 - Add SSH paranoid readback/hash verification after remote writes.
-- Replace `scp` transfer execution with owned streams so SSH copies can emit live byte/rate progress.
+- Replace shell `ssh dd` transfer execution with owned SSH streams so SSH copies can emit smoother live byte/rate progress and avoid per-chunk process startup.
 
 ## Metadata Extractors
 
