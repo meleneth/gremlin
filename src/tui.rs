@@ -120,7 +120,7 @@ struct AppState {
     transfer_run_plan_id: Option<String>,
     retarget_draft: Option<RetargetDraft>,
     pending_delete_root_id: Option<String>,
-    pending_import_prompt: bool,
+    pending_import: Option<PendingTemporaryImport>,
     last_plan: Option<PlanSnapshot>,
     temporary_browse: Option<TemporaryBrowse>,
 }
@@ -295,6 +295,11 @@ struct RetargetDraft {
     plan_id: String,
     relative_path: String,
     value: String,
+}
+
+#[derive(Debug, Clone)]
+struct PendingTemporaryImport {
+    remote_path: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -570,7 +575,7 @@ async fn run_loop(
                     handle_delete_root_confirmation(conn, &mut state, key.code)?;
                     continue;
                 }
-                if state.pending_import_prompt {
+                if state.pending_import.is_some() {
                     handle_temporary_import_choice(&mut state, key.code, job_tx.clone());
                     continue;
                 }
@@ -641,7 +646,8 @@ async fn run_loop(
                         );
                     }
                     KeyCode::Char('i') => {
-                        start_temporary_import_prompt(&mut state);
+                        let file = files.get(state.file_offset);
+                        start_temporary_import_prompt(&mut state, file);
                     }
                     KeyCode::Char('r') => {
                         run_current_transfer_plan(db_path, job_tx.clone(), &mut state);
@@ -1889,7 +1895,7 @@ fn handle_delete_root_confirmation(
     Ok(())
 }
 
-fn start_temporary_import_prompt(state: &mut AppState) {
+fn start_temporary_import_prompt(state: &mut AppState, selected_file: Option<&FileViewRow>) {
     let Some(browse) = selected_temporary_browse(state) else {
         state.status = "Select a temporary SSH browse root to import".to_string();
         return;
@@ -1898,10 +1904,25 @@ fn start_temporary_import_prompt(state: &mut AppState) {
         state.status = "Import is unavailable for this temporary root".to_string();
         return;
     }
-    state.pending_import_prompt = true;
-    state.status =
-        "Import current remote directory? n=root only, f=fast recursive stat, h=remote hash, Esc cancels"
-            .to_string();
+    let selected_entry = selected_file.filter(|_| state.focus == FocusPane::Files);
+    let remote_path = selected_entry
+        .map(|file| remote_child_path(&browse.current_path, &file.relative_path))
+        .unwrap_or_else(|| browse.current_path.clone());
+    let target_kind = selected_entry
+        .map(|file| {
+            if file.kind == FileKind::Directory {
+                "directory"
+            } else {
+                "file"
+            }
+        })
+        .unwrap_or("directory");
+    state.pending_import = Some(PendingTemporaryImport {
+        remote_path: remote_path.clone(),
+    });
+    state.status = format!(
+        "Import remote {target_kind} {remote_path}? n=root only, f=fast recursive stat, h=remote hash, Esc cancels"
+    );
 }
 
 fn handle_temporary_import_choice(
@@ -1914,7 +1935,7 @@ fn handle_temporary_import_choice(
         KeyCode::Char('f') | KeyCode::Char('F') => Some(ImportMode::Fast),
         KeyCode::Char('h') | KeyCode::Char('H') => Some(ImportMode::Hash),
         KeyCode::Esc => {
-            state.pending_import_prompt = false;
+            state.pending_import = None;
             state.status = "import canceled".to_string();
             return;
         }
@@ -1926,18 +1947,17 @@ fn handle_temporary_import_choice(
     let Some(mode) = mode else {
         return;
     };
-    let Some(browse) = selected_temporary_browse(state) else {
-        state.pending_import_prompt = false;
+    let Some(pending) = state.pending_import.take() else {
+        state.status = "No pending import".to_string();
+        return;
+    };
+    let Some(provider) =
+        selected_temporary_browse(state).and_then(|browse| browse.import_provider.clone())
+    else {
         state.status = "No temporary root selected".to_string();
         return;
     };
-    let Some(provider) = browse.import_provider.clone() else {
-        state.pending_import_prompt = false;
-        state.status = "Import is unavailable for this temporary root".to_string();
-        return;
-    };
-    let remote_path = browse.current_path.clone();
-    state.pending_import_prompt = false;
+    let remote_path = pending.remote_path;
     state.status = format!("importing {remote_path} ({})", import_mode_label(mode));
     task::spawn_blocking(move || {
         let status = match provider(mode, &remote_path) {
@@ -2278,6 +2298,63 @@ mod tests {
         assert_eq!(browse.entries.len(), 1);
         assert_eq!(browse.entries[0].name, "inside.txt");
         assert_eq!(requested_paths.lock().unwrap().as_slice(), ["~/photos"]);
+    }
+
+    #[test]
+    fn temporary_import_prompt_targets_selected_file() {
+        let mut state = AppState {
+            focus: FocusPane::Files,
+            temporary_browse: Some(TemporaryBrowse {
+                label: "nas01:".to_string(),
+                machine_id: "machine_remote".to_string(),
+                root_path: "~".to_string(),
+                current_path: "~/photos".to_string(),
+                entries: vec![InitialBrowseEntry {
+                    kind: "file".to_string(),
+                    name: "image.png".to_string(),
+                    size_bytes: 10,
+                    modified_at: None,
+                }],
+                browse_provider: None,
+                import_provider: Some(Arc::new(|_, _| unreachable!())),
+            }),
+            ..AppState::default()
+        };
+        let selected =
+            FileViewRow::from_temporary_entry(&state.temporary_browse.as_ref().unwrap().entries[0]);
+
+        start_temporary_import_prompt(&mut state, Some(&selected));
+
+        assert_eq!(
+            state.pending_import.as_ref().unwrap().remote_path,
+            "~/photos/image.png"
+        );
+        assert!(state.status.contains("remote file ~/photos/image.png"));
+    }
+
+    #[test]
+    fn temporary_import_prompt_defaults_to_current_directory() {
+        let mut state = AppState {
+            focus: FocusPane::Roots,
+            temporary_browse: Some(TemporaryBrowse {
+                label: "nas01:".to_string(),
+                machine_id: "machine_remote".to_string(),
+                root_path: "~".to_string(),
+                current_path: "~/photos".to_string(),
+                entries: Vec::new(),
+                browse_provider: None,
+                import_provider: Some(Arc::new(|_, _| unreachable!())),
+            }),
+            ..AppState::default()
+        };
+
+        start_temporary_import_prompt(&mut state, None);
+
+        assert_eq!(
+            state.pending_import.as_ref().unwrap().remote_path,
+            "~/photos"
+        );
+        assert!(state.status.contains("remote directory ~/photos"));
     }
 
     #[test]

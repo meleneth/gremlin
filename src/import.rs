@@ -95,12 +95,26 @@ fn import_events_file_for_target_inner(
             ..
         } = &event.payload
         {
+            let projected_relative_path = target
+                .filter(|_| relative_path == ".")
+                .map(|target| remote_or_path_basename(&target.root_path))
+                .unwrap_or_else(|| relative_path.clone());
+            let projected_basename = if projected_relative_path == *relative_path {
+                basename.clone()
+            } else {
+                projected_relative_path.clone()
+            };
+            let projected_parent_path = if projected_relative_path == *relative_path {
+                parent_path.clone()
+            } else {
+                crate::util::parent_path(&projected_relative_path)
+            };
             db::insert_checksum_entry(
                 conn,
                 db::ChecksumEntryInput {
                     collection_id: &collection_id,
-                    relative_path,
-                    basename,
+                    relative_path: &projected_relative_path,
+                    basename: &projected_basename,
                     size_bytes: *size_bytes,
                     modified_at: modified_at.as_deref(),
                     blake3: Some(blake3),
@@ -118,9 +132,9 @@ fn import_events_file_for_target_inner(
                     db::PathObservationInput {
                         machine_id: &target.machine_id,
                         root_id: &target.root_id,
-                        relative_path,
-                        basename,
-                        parent_path,
+                        relative_path: &projected_relative_path,
+                        basename: &projected_basename,
+                        parent_path: &projected_parent_path,
                         size_bytes: *size_bytes,
                         modified_at: modified_at.as_deref(),
                         content_id: Some(&content_id),
@@ -146,6 +160,15 @@ fn import_events_file_for_target_inner(
         }
     }
     Ok(())
+}
+
+fn remote_or_path_basename(path: &str) -> String {
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty() && *name != "~")
+        .unwrap_or(path)
+        .to_string()
 }
 
 fn create_import_job(
@@ -608,6 +631,46 @@ mod tests {
         assert_eq!(status.total_bytes, 5);
         assert_eq!(status.latest_job.unwrap().kind, "import_events");
         let observation = db::path_observation_for_root_path(&conn, &root_id, "folder/a.txt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(observation.size_bytes, 5);
+        assert!(observation.content_id.is_some());
+    }
+
+    #[test]
+    fn target_import_maps_root_file_hash_dot_to_basename() {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl = dir.path().join("remote-file.jsonl");
+        let event = EventEnvelope {
+            event_kind: EventKind::HashCompleted,
+            job_id: Some("job_remote".to_string()),
+            sequence: Some(1),
+            created_at: now_rfc3339(),
+            payload: EventPayload::HashCompleted {
+                relative_path: ".".to_string(),
+                basename: "ignored".to_string(),
+                parent_path: ".".to_string(),
+                size_bytes: 5,
+                modified_at: None,
+                blake3: "b".repeat(64),
+                sha256: "s".repeat(64),
+            },
+        };
+        std::fs::write(&jsonl, format!("{}\n", event.to_json_line().unwrap())).unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        let machine_id = db::ensure_machine_hint(&conn, "nas01", Some("ssh")).unwrap();
+        let root_id = db::ensure_root(&conn, &machine_id, "/srv/archive/foo.png").unwrap();
+        let target = EventImportTarget {
+            machine_id,
+            root_id: root_id.clone(),
+            root_path: "/srv/archive/foo.png".to_string(),
+        };
+
+        import_events_file_for_target(&conn, &jsonl, Some(&target)).unwrap();
+
+        let observation = db::path_observation_for_root_path(&conn, &root_id, "foo.png")
             .unwrap()
             .unwrap();
         assert_eq!(observation.size_bytes, 5);

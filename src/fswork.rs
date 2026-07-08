@@ -1612,8 +1612,11 @@ fn file_meta(root: &Path, path: &Path) -> anyhow::Result<FileMeta> {
     let metadata = path
         .metadata()
         .with_context(|| format!("reading metadata for {}", path.display()))?;
-    let relative_path = relative_path(root, path)?;
     let basename = basename(path)?;
+    let relative_path = match relative_path(root, path)?.as_str() {
+        "." => basename.clone(),
+        other => other.to_string(),
+    };
     let parent_path = parent_path(&relative_path);
     let modified_at = metadata.modified().ok().map(system_time_rfc3339);
     Ok(FileMeta {
@@ -1828,6 +1831,19 @@ mod tests {
         assert_eq!(result.size_bytes, 5);
         assert_eq!(result.blake3.len(), 64);
         assert_eq!(result.sha256.len(), 64);
+    }
+
+    #[test]
+    fn hashes_single_file_root_with_basename_relative_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hello.txt");
+        std::fs::write(&file, b"hello").unwrap();
+
+        let result = hash_file(&file, &file).unwrap();
+
+        assert_eq!(result.relative_path, "hello.txt");
+        assert_eq!(result.basename, "hello.txt");
+        assert_eq!(result.parent_path, ".");
     }
 
     #[test]

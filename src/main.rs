@@ -1027,11 +1027,16 @@ fn fast_scan_ssh_tree(
     let mut entries = Vec::new();
     for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
         let parts = line.splitn(3, '\t').collect::<Vec<_>>();
-        if parts.len() != 3 || parts[0].is_empty() {
+        if parts.len() != 3 {
             continue;
         }
+        let relative_path = if parts[0].is_empty() {
+            remote_path_basename(remote_path)
+        } else {
+            parts[0].to_string()
+        };
         entries.push(RemoteStatEntry {
-            relative_path: parts[0].to_string(),
+            relative_path,
             size_bytes: parts[1].parse::<u64>().unwrap_or(0),
             modified_at: Some(parts[2].to_string()),
         });
@@ -1042,6 +1047,15 @@ fn fast_scan_ssh_tree(
 
 fn remote_basename(relative_path: &str) -> &str {
     relative_path.rsplit('/').next().unwrap_or(relative_path)
+}
+
+fn remote_path_basename(path: &str) -> String {
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty() && *name != "~")
+        .unwrap_or(path)
+        .to_string()
 }
 
 fn remote_parent(relative_path: &str) -> String {
