@@ -12,6 +12,7 @@ pub(super) struct AppScreen<'a> {
     pub(super) events: &'a [db::JobEventRow],
     pub(super) root_count: usize,
     pub(super) transfer_progress: Option<TransferProgressSnapshot>,
+    pub(super) detail_file_offset: usize,
 }
 
 impl Widget for AppScreen<'_> {
@@ -65,7 +66,7 @@ impl Widget for AppScreen<'_> {
                     .map(|root| current_persisted_root_dir(self.state, &root.id)),
                 summary: self.summary,
                 selection: self.selection,
-                file: self.files.get(self.state.file_offset),
+                file: self.files.get(self.detail_file_offset),
                 selected_paths: self.selected_paths,
                 plan: self.state.last_plan.as_ref(),
                 transfer_progress: self.transfer_progress,

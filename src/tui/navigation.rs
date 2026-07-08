@@ -46,6 +46,25 @@ pub(super) fn selected_root_name(
         .or_else(|| root.map(root_display_name))
 }
 
+pub(super) fn detail_selection_key(
+    root: Option<&db::RootRow>,
+    browse: Option<&TemporaryBrowse>,
+    persisted_dir: Option<&str>,
+) -> String {
+    if let Some(browse) = browse {
+        format!("temporary:{}:{}", browse.machine_id, browse.current_path)
+    } else if let Some(root) = root {
+        format!(
+            "root:{}:{}:{}",
+            root.id,
+            persisted_dir.unwrap_or("."),
+            root.latest_job_status.as_deref().unwrap_or("-")
+        )
+    } else {
+        "none".to_string()
+    }
+}
+
 pub(super) fn current_persisted_root_dir<'a>(state: &'a AppState, root_id: &str) -> &'a str {
     state
         .root_browse_dirs

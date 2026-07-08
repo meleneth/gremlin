@@ -95,22 +95,35 @@ pub(super) async fn run_loop(
         let root_count = visible_root_count(&state, roots.len());
         normalize_selection(&mut state, root_count);
         let selected = selected_persisted_root(&roots, &state);
-        let selected_temporary = selected_temporary_browse(&state);
-        let files = match (selected, selected_temporary) {
-            (Some(root), _) => db::cached_directory_entries(
-                conn,
-                &root.id,
-                current_persisted_root_dir(&state, &root.id),
-            )?
-            .iter()
-            .map(FileViewRow::from_cached_directory_entry)
-            .collect(),
-            (None, Some(browse)) => browse
-                .entries
+        let persisted_browse_dir = selected
+            .map(|root| current_persisted_root_dir(&state, &root.id))
+            .map(str::to_string);
+        let (files, detail_key) = {
+            let selected_temporary = selected_temporary_browse(&state);
+            let files = match (selected, selected_temporary) {
+                (Some(root), _) => db::cached_directory_entries(
+                    conn,
+                    &root.id,
+                    persisted_browse_dir.as_deref().unwrap_or("."),
+                )?
                 .iter()
-                .map(FileViewRow::from_temporary_entry)
+                .map(FileViewRow::from_cached_directory_entry)
                 .collect(),
-            (None, None) => Vec::new(),
+                (None, Some(browse)) => browse
+                    .entries
+                    .iter()
+                    .map(FileViewRow::from_temporary_entry)
+                    .collect(),
+                (None, None) => Vec::new(),
+            };
+            (
+                files,
+                detail_selection_key(
+                    selected,
+                    selected_temporary,
+                    persisted_browse_dir.as_deref(),
+                ),
+            )
         };
         let event_root_id = state.last_plan.as_ref().and_then(|plan| {
             (state.focus == FocusPane::Plan).then_some(plan.source_root_id.as_str())
@@ -132,6 +145,8 @@ pub(super) async fn run_loop(
             None => BTreeSet::new(),
         };
         let transfer_progress = latest_transfer_progress(&events);
+        state.sync_detail_selection(detail_key, files.len(), Instant::now());
+        let selected_temporary = selected_temporary_browse(&state);
 
         terminal.draw(|frame| {
             frame.render_widget(
@@ -147,6 +162,7 @@ pub(super) async fn run_loop(
                     events: &events,
                     root_count,
                     transfer_progress,
+                    detail_file_offset: state.detail_file_offset,
                 },
                 frame.area(),
             );

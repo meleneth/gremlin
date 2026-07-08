@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event, KeyCode};
 use crossterm::execute;
@@ -25,12 +25,18 @@ use crate::fswork::{self, OutputOptions};
 use crate::transfer;
 use crate::util::human_size;
 
+const DETAIL_DEBOUNCE: Duration = Duration::from_millis(250);
+
 #[derive(Default)]
 struct AppState {
     focus: FocusPane,
     file_view: FileView,
     selected_root: usize,
     file_offset: usize,
+    detail_file_offset: usize,
+    detail_pending_file_offset: usize,
+    detail_selection_key: Option<String>,
+    detail_selection_changed_at: Option<Instant>,
     plan_offset: usize,
     event_offset: usize,
     status: String,
@@ -48,6 +54,37 @@ struct AppState {
 }
 
 impl AppState {
+    fn sync_detail_selection(&mut self, selection_key: String, file_count: usize, now: Instant) {
+        if self.detail_selection_key.as_deref() != Some(selection_key.as_str()) {
+            self.detail_selection_key = Some(selection_key);
+            self.detail_file_offset = self.file_offset.min(file_count.saturating_sub(1));
+            self.detail_pending_file_offset = self.detail_file_offset;
+            self.detail_selection_changed_at = None;
+            return;
+        }
+
+        let current = self.file_offset.min(file_count.saturating_sub(1));
+        if current == self.detail_file_offset {
+            self.detail_pending_file_offset = current;
+            self.detail_selection_changed_at = None;
+            return;
+        }
+
+        if current != self.detail_pending_file_offset {
+            self.detail_pending_file_offset = current;
+            self.detail_selection_changed_at = Some(now);
+            return;
+        }
+
+        if self
+            .detail_selection_changed_at
+            .is_some_and(|changed_at| now.duration_since(changed_at) >= DETAIL_DEBOUNCE)
+        {
+            self.detail_file_offset = current;
+            self.detail_selection_changed_at = None;
+        }
+    }
+
     fn set_status(&mut self, level: ActivityLevel, message: impl Into<String>) {
         let message = message.into();
         self.status = message.clone();

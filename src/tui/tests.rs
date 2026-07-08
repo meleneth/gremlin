@@ -196,6 +196,60 @@ fn command_hints_explain_scoped_job_choice() {
 }
 
 #[test]
+fn detail_selection_waits_for_stable_file_offset() {
+    let start = Instant::now();
+    let mut state = AppState {
+        file_offset: 1,
+        ..AppState::default()
+    };
+
+    state.sync_detail_selection("root:one:.".to_string(), 10, start);
+    assert_eq!(state.detail_file_offset, 1);
+
+    state.file_offset = 4;
+    state.sync_detail_selection(
+        "root:one:.".to_string(),
+        10,
+        start + Duration::from_millis(100),
+    );
+    assert_eq!(state.detail_file_offset, 1);
+
+    state.sync_detail_selection(
+        "root:one:.".to_string(),
+        10,
+        start + Duration::from_millis(349),
+    );
+    assert_eq!(state.detail_file_offset, 1);
+
+    state.sync_detail_selection(
+        "root:one:.".to_string(),
+        10,
+        start + Duration::from_millis(350),
+    );
+    assert_eq!(state.detail_file_offset, 4);
+}
+
+#[test]
+fn detail_selection_resets_immediately_for_new_list() {
+    let start = Instant::now();
+    let mut state = AppState {
+        file_offset: 3,
+        ..AppState::default()
+    };
+    state.sync_detail_selection("root:one:.".to_string(), 10, start);
+    assert_eq!(state.detail_file_offset, 3);
+
+    state.file_offset = 0;
+    state.sync_detail_selection(
+        "root:two:.".to_string(),
+        2,
+        start + Duration::from_millis(10),
+    );
+    assert_eq!(state.detail_file_offset, 0);
+    assert_eq!(state.detail_pending_file_offset, 0);
+}
+
+#[test]
 fn transfer_plan_selection_moves_focus_to_roots() {
     let root = db::RootRow {
         id: "root_1".to_string(),
@@ -622,6 +676,7 @@ fn app_screen_renders_empty_state_widgets() {
         events: &[],
         root_count: 0,
         transfer_progress: None,
+        detail_file_offset: 0,
     }
     .render(buffer.area, &mut buffer);
 
