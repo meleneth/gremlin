@@ -11,7 +11,7 @@
 
 - Add richer job/event payload detail beyond the current one-line preview.
 - Add root filtering/search once large root lists are realistic.
-- Add job progress and cancellation states for TUI-started jobs.
+- Add richer TUI job progress state displays for long-running jobs.
 - Improve layout for narrow terminals and long paths.
 
 ## Scan, Hash, Verify

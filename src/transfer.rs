@@ -68,6 +68,7 @@ pub struct TransferRunResult {
     pub skipped: u64,
     pub errors: u64,
     pub bytes_copied: u64,
+    pub canceled: bool,
 }
 
 struct CopyHashResult {
@@ -301,6 +302,17 @@ pub fn run_transfer_plan(
     let total_bytes = entries.iter().map(|entry| entry.size_bytes).sum::<u64>();
 
     for entry in entries {
+        if complete_transfer_if_canceled(
+            conn,
+            &job_id,
+            plan_id,
+            &source_root.path,
+            total,
+            total_bytes,
+            &mut result,
+        )? {
+            return Ok(result);
+        }
         let source_path = endpoint_join(&source_endpoint, &entry.relative_path)?;
         let dest_path = endpoint_join(&dest_endpoint, &entry.dest_relative_path)?;
         let source_display = source_path.display_path();
@@ -404,6 +416,17 @@ pub fn run_transfer_plan(
             },
         };
         db::persist_event(conn, &progress)?;
+        if complete_transfer_if_canceled(
+            conn,
+            &job_id,
+            plan_id,
+            &source_root.path,
+            total,
+            total_bytes,
+            &mut result,
+        )? {
+            return Ok(result);
+        }
     }
 
     let status = if result.errors == 0 {
@@ -430,6 +453,72 @@ pub fn run_transfer_plan(
         },
     )?;
     Ok(result)
+}
+
+fn complete_transfer_if_canceled(
+    conn: &Connection,
+    job_id: &str,
+    plan_id: &str,
+    source_path: &str,
+    total_files: u64,
+    total_bytes: u64,
+    result: &mut TransferRunResult,
+) -> anyhow::Result<bool> {
+    if !db::job_cancel_requested(conn, job_id)? {
+        return Ok(false);
+    }
+    let files_seen = result.copied + result.skipped + result.errors;
+    db::update_job_progress(
+        conn,
+        job_id,
+        db::JobProgressInput {
+            phase: "canceling",
+            current_path: None,
+            files_total: Some(total_files),
+            files_seen,
+            files_done: result.copied,
+            files_skipped: result.skipped,
+            errors: result.errors,
+        },
+    )?;
+    let progress = EventEnvelope {
+        event_kind: EventKind::JobProgress,
+        job_id: Some(job_id.to_string()),
+        sequence: None,
+        created_at: now_rfc3339(),
+        payload: EventPayload::JobProgress {
+            phase: "canceling".to_string(),
+            current_path: None,
+            files_total: Some(total_files),
+            files_seen,
+            files_done: result.copied,
+            files_skipped: result.skipped,
+            errors: result.errors,
+            bytes_done: Some(result.bytes_copied),
+            bytes_total: Some(total_bytes),
+            file_bytes_done: None,
+            file_bytes_total: None,
+            bytes_per_second: None,
+            message: Some("cancel requested".to_string()),
+        },
+    };
+    db::persist_event(conn, &progress)?;
+    persist_job_event(
+        conn,
+        job_id,
+        JobEventInput {
+            event_kind: EventKind::JobCanceled,
+            kind: "transfer_copy",
+            path: Some(source_path),
+            message: "canceled between files",
+            files_seen: Some(files_seen),
+            errors: result.errors,
+        },
+    )?;
+    db::complete_job(conn, job_id, "canceled")?;
+    db::update_transfer_plan_status(conn, plan_id, "canceled")?;
+    result.canceled = true;
+    Ok(true)
 }
 
 enum CopyOutcome {
@@ -1437,6 +1526,62 @@ mod tests {
         let job = db::job_by_id(&conn, &result.job_id).unwrap().unwrap();
         assert_eq!(job.kind, "transfer_copy");
         assert_eq!(job.status, "completed");
+    }
+
+    #[test]
+    fn transfer_copy_checkpoint_honors_cancel_request() {
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+        let source_id = db::ensure_root(&conn, &machine_id, "/tmp/source").unwrap();
+        let dest_id = db::ensure_root(&conn, &machine_id, "/tmp/dest").unwrap();
+        let plan_id = db::create_transfer_plan(
+            &conn,
+            None,
+            &source_id,
+            &dest_id,
+            None,
+            serde_json::json!({}),
+        )
+        .unwrap();
+        let job_id = db::create_job(
+            &conn,
+            "transfer_copy",
+            Some(&machine_id),
+            Some(&source_id),
+            serde_json::json!({ "plan_id": plan_id }),
+        )
+        .unwrap();
+        db::start_job(&conn, &job_id).unwrap();
+        assert!(db::request_job_cancel(&conn, &job_id).unwrap());
+        let mut result = TransferRunResult {
+            job_id: job_id.clone(),
+            plan_id: plan_id.clone(),
+            copied: 1,
+            bytes_copied: 5,
+            ..TransferRunResult::default()
+        };
+
+        assert!(complete_transfer_if_canceled(
+            &conn,
+            &job_id,
+            &plan_id,
+            "/tmp/source",
+            2,
+            10,
+            &mut result
+        )
+        .unwrap());
+
+        assert!(result.canceled);
+        let job = db::job_by_id(&conn, &job_id).unwrap().unwrap();
+        assert_eq!(job.status, "canceled");
+        let plan = db::transfer_plan_by_id(&conn, &plan_id).unwrap().unwrap();
+        assert_eq!(plan.status, "canceled");
+        let events = db::events_for_job(&conn, &job_id).unwrap();
+        assert!(events
+            .iter()
+            .any(|event| event.event_kind == "job_canceled"));
     }
 
     #[test]

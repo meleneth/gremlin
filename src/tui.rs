@@ -1701,14 +1701,26 @@ fn spawn_transfer_runner(
             transfer::run_transfer_plan(&conn, &plan_id, false)
         })();
         let status = match result {
-            Ok(result) => format!(
-                "completed transfer {}: copied {} ({}) skipped {} errors {}",
-                short_id(&result.plan_id),
-                result.copied,
-                human_size(result.bytes_copied),
-                result.skipped,
-                result.errors
-            ),
+            Ok(result) if result.canceled => {
+                format!(
+                    "canceled transfer {}: copied {} ({}) skipped {} errors {}",
+                    short_id(&result.plan_id),
+                    result.copied,
+                    human_size(result.bytes_copied),
+                    result.skipped,
+                    result.errors
+                )
+            }
+            Ok(result) => {
+                format!(
+                    "completed transfer {}: copied {} ({}) skipped {} errors {}",
+                    short_id(&result.plan_id),
+                    result.copied,
+                    human_size(result.bytes_copied),
+                    result.skipped,
+                    result.errors
+                )
+            }
             Err(err) => format!("failed transfer {}: {err}", short_id(&plan_id)),
         };
         let _ = job_tx.send(TuiMessage::TransferFinished { plan_id, status });

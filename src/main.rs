@@ -409,6 +409,7 @@ async fn main() -> anyhow::Result<()> {
                 );
                 println!("skipped:\t{}", result.skipped);
                 println!("errors:\t{}", result.errors);
+                println!("canceled:\t{}", result.canceled);
             }
         },
         Some(Commands::Status { target, kind }) => {
