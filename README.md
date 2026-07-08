@@ -40,6 +40,17 @@ Before finalizing code changes:
 cargo fmt
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test
+bundle exec rspec
+```
+
+The RSpec suite in `spec/` is a black-box CLI integration suite. It builds or uses
+the `gremlin` binary, creates disposable fixture directories and database files,
+removes the test database before each example, and verifies behavior only through
+command exit status, stdout/stderr, JSON output, and filesystem effects. To use a
+specific binary:
+
+```bash
+GREMLIN_BIN=./target/release/gremlin bundle exec rspec
 ```
 
 Coverage uses `cargo-llvm-cov`:
