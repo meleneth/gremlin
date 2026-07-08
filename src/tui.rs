@@ -254,8 +254,17 @@ struct PlanSnapshot {
 #[derive(Debug)]
 enum TuiMessage {
     Status(String),
-    TransferFinished { plan_id: String, status: String },
+    TransferFinished {
+        plan_id: String,
+        status: String,
+    },
     ImportFinished(String),
+    TemporaryTransferSourceImported {
+        root_id: String,
+        selected_relative_path: Option<String>,
+        mark_all: bool,
+        status: String,
+    },
 }
 
 struct InfoBarData<'a> {
@@ -470,6 +479,22 @@ async fn run_loop(
                     state.status = status;
                 }
                 TuiMessage::ImportFinished(status) => state.status = status,
+                TuiMessage::TemporaryTransferSourceImported {
+                    root_id,
+                    selected_relative_path,
+                    mark_all,
+                    status,
+                } => {
+                    mark_imported_transfer_source(
+                        conn,
+                        &root_id,
+                        selected_relative_path.as_deref(),
+                        mark_all,
+                    )?;
+                    state.transfer_source_root_id = Some(root_id);
+                    state.focus = FocusPane::Roots;
+                    state.status = status;
+                }
             }
         }
         let roots = db::roots(conn)?;
@@ -627,10 +652,19 @@ async fn run_loop(
                         request_selected_cancel(conn, events.get(state.event_offset), &mut state)?;
                     }
                     KeyCode::Char('t') => {
-                        start_transfer_plan_selection(
-                            selected_persisted_root(&roots, &state),
-                            &mut state,
-                        );
+                        if selected_temporary_browse(&state).is_some() {
+                            let file = files.get(state.file_offset).cloned();
+                            start_temporary_transfer_source_import(
+                                &mut state,
+                                file.as_ref(),
+                                job_tx.clone(),
+                            );
+                        } else {
+                            start_transfer_plan_selection(
+                                selected_persisted_root(&roots, &state),
+                                &mut state,
+                            );
+                        }
                     }
                     KeyCode::Char('p') => {
                         load_latest_transfer_plan(
@@ -1762,6 +1796,98 @@ fn start_transfer_plan_selection(root: Option<&db::RootRow>, state: &mut AppStat
     );
 }
 
+fn start_temporary_transfer_source_import(
+    state: &mut AppState,
+    selected_file: Option<&FileViewRow>,
+    job_tx: mpsc::UnboundedSender<TuiMessage>,
+) {
+    let Some(browse) = selected_temporary_browse(state) else {
+        state.status = "Select a temporary SSH browse root first".to_string();
+        return;
+    };
+    let Some(provider) = browse.import_provider.clone() else {
+        state.status = "Import is unavailable for this temporary root".to_string();
+        return;
+    };
+    let target = temporary_transfer_import_target(state.focus, browse, selected_file);
+    state.status = format!("importing transfer source {} (fast)", target.remote_path);
+    task::spawn_blocking(move || {
+        let message = match provider(ImportMode::Fast, &target.remote_path) {
+            Ok(result) => {
+                if result.files_imported == 0 {
+                    TuiMessage::Status(format!(
+                        "imported {} but found no files to mark for transfer",
+                        result.root_path
+                    ))
+                } else {
+                    TuiMessage::TemporaryTransferSourceImported {
+                        root_id: result.root_id,
+                        selected_relative_path: target.selected_relative_path,
+                        mark_all: target.mark_all,
+                        status: format!(
+                            "transfer source imported {}; choose destination root and press Enter",
+                            result.root_path
+                        ),
+                    }
+                }
+            }
+            Err(err) => TuiMessage::Status(format!("transfer source import failed: {err}")),
+        };
+        let _ = job_tx.send(message);
+    });
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TemporaryTransferImportTarget {
+    remote_path: String,
+    selected_relative_path: Option<String>,
+    mark_all: bool,
+}
+
+fn temporary_transfer_import_target(
+    focus: FocusPane,
+    browse: &TemporaryBrowse,
+    selected_file: Option<&FileViewRow>,
+) -> TemporaryTransferImportTarget {
+    let selected_entry = selected_file.filter(|_| focus == FocusPane::Files);
+    let remote_path = selected_entry
+        .map(|file| remote_child_path(&browse.current_path, &file.relative_path))
+        .unwrap_or_else(|| browse.current_path.clone());
+    let selected_relative_path = selected_entry
+        .filter(|file| file.kind == FileKind::File)
+        .map(|file| file.relative_path.clone());
+    TemporaryTransferImportTarget {
+        remote_path,
+        selected_relative_path,
+        mark_all: selected_entry
+            .map(|file| file.kind == FileKind::Directory)
+            .unwrap_or(true),
+    }
+}
+
+fn mark_imported_transfer_source(
+    conn: &Connection,
+    root_id: &str,
+    selected_relative_path: Option<&str>,
+    mark_all: bool,
+) -> anyhow::Result<()> {
+    let mut already_selected = db::selected_paths_for_root(conn, root_id)?;
+    if let Some(path) = selected_relative_path {
+        if !already_selected.contains(path) {
+            db::toggle_selection_entry(conn, root_id, path)?;
+        }
+        return Ok(());
+    }
+    if mark_all {
+        for file in db::recent_files_for_root(conn, root_id, i64::MAX)? {
+            if already_selected.insert(file.relative_path.clone()) {
+                db::toggle_selection_entry(conn, root_id, &file.relative_path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn cancel_transfer_plan_selection(state: &mut AppState) {
     if state.transfer_source_root_id.take().is_some() {
         state.status = "transfer planning canceled".to_string();
@@ -2355,6 +2481,96 @@ mod tests {
             "~/photos"
         );
         assert!(state.status.contains("remote directory ~/photos"));
+    }
+
+    #[test]
+    fn temporary_transfer_source_targets_selected_file() {
+        let browse = TemporaryBrowse {
+            label: "nas01:".to_string(),
+            machine_id: "machine_remote".to_string(),
+            root_path: "~".to_string(),
+            current_path: "~/photos".to_string(),
+            entries: Vec::new(),
+            browse_provider: None,
+            import_provider: None,
+        };
+        let selected = FileViewRow {
+            relative_path: "image.png".to_string(),
+            size_bytes: 10,
+            modified_at: None,
+            content_id: None,
+            status: "remote".to_string(),
+            kind: FileKind::File,
+        };
+
+        let target = temporary_transfer_import_target(FocusPane::Files, &browse, Some(&selected));
+
+        assert_eq!(target.remote_path, "~/photos/image.png");
+        assert_eq!(target.selected_relative_path.as_deref(), Some("image.png"));
+        assert!(!target.mark_all);
+    }
+
+    #[test]
+    fn temporary_transfer_source_marks_all_for_directory_target() {
+        let browse = TemporaryBrowse {
+            label: "nas01:".to_string(),
+            machine_id: "machine_remote".to_string(),
+            root_path: "~".to_string(),
+            current_path: "~/photos".to_string(),
+            entries: Vec::new(),
+            browse_provider: None,
+            import_provider: None,
+        };
+        let selected = FileViewRow {
+            relative_path: "albums".to_string(),
+            size_bytes: 0,
+            modified_at: None,
+            content_id: None,
+            status: "dir".to_string(),
+            kind: FileKind::Directory,
+        };
+
+        let target = temporary_transfer_import_target(FocusPane::Files, &browse, Some(&selected));
+
+        assert_eq!(target.remote_path, "~/photos/albums");
+        assert_eq!(target.selected_relative_path, None);
+        assert!(target.mark_all);
+    }
+
+    #[test]
+    fn mark_imported_transfer_source_marks_selected_or_all_paths() {
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        let machine_id = db::ensure_machine_hint(&conn, "nas01", Some("ssh")).unwrap();
+        let root_id = db::ensure_root(&conn, &machine_id, "/srv/photos").unwrap();
+        for path in ["a.png", "b.png"] {
+            db::insert_path_observation(
+                &conn,
+                db::PathObservationInput {
+                    machine_id: &machine_id,
+                    root_id: &root_id,
+                    relative_path: path,
+                    basename: path,
+                    parent_path: ".",
+                    size_bytes: 1,
+                    modified_at: None,
+                    content_id: None,
+                },
+            )
+            .unwrap();
+        }
+
+        mark_imported_transfer_source(&conn, &root_id, Some("a.png"), false).unwrap();
+        assert_eq!(
+            db::selected_paths_for_root(&conn, &root_id).unwrap(),
+            BTreeSet::from(["a.png".to_string()])
+        );
+
+        mark_imported_transfer_source(&conn, &root_id, None, true).unwrap();
+        assert_eq!(
+            db::selected_paths_for_root(&conn, &root_id).unwrap(),
+            BTreeSet::from(["a.png".to_string(), "b.png".to_string()])
+        );
     }
 
     #[test]
