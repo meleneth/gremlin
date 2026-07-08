@@ -171,6 +171,8 @@ pub enum TransferCommands {
     Plan {
         source: String,
         dest: String,
+        #[arg(long)]
+        all: bool,
         #[arg(long, value_enum)]
         source_kind: Option<TargetKind>,
         #[arg(long, value_enum)]

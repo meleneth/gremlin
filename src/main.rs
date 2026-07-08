@@ -405,6 +405,7 @@ async fn main() -> anyhow::Result<()> {
             TransferCommands::Plan {
                 source,
                 dest,
+                all,
                 source_kind,
                 dest_kind,
             } => {
@@ -414,7 +415,11 @@ async fn main() -> anyhow::Result<()> {
                     resolve_registered_root(&conn, &source, source_kind, machine_label.as_deref())?;
                 let dest_root =
                     resolve_registered_root(&conn, &dest, dest_kind, machine_label.as_deref())?;
-                let result = transfer::plan_selected_files(&conn, &source_root, &dest_root)?;
+                let result = if all {
+                    transfer::plan_all_files(&conn, &source_root, &dest_root)?
+                } else {
+                    transfer::plan_selected_files(&conn, &source_root, &dest_root)?
+                };
                 print_transfer_plan(&conn, &source_root, &dest_root, result, output)?;
             }
             TransferCommands::Show { plan_id, action } => {

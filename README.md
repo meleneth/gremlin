@@ -110,6 +110,7 @@ gremlin target ls nas01: --db ./gremlin.db
 gremlin target ls nas01: --path folder --db ./gremlin.db
 gremlin status TARGET --db ./gremlin.db
 gremlin transfer plan SOURCE DEST --db ./gremlin.db
+gremlin transfer plan SOURCE DEST --all --db ./gremlin.db
 gremlin transfer list --db ./gremlin.db
 gremlin transfer show PLAN_ID --db ./gremlin.db
 gremlin transfer run PLAN_ID --db ./gremlin.db
@@ -182,7 +183,7 @@ Press `p` on a root to load its most recent persisted transfer plan. Canceled, q
 
 During transfer runs, Details shows the active transfer file, job and current-file progress bars, copied bytes, file counts, errors, transfer rate, and SSH chunk checkpoint state when available. The Events pane follows the plan's source root while Plan is focused so durable progress events stay visible too. Pressing Ctrl-C or Ctrl-D in the TUI requests cancellation for active database jobs, marks active transfer plans canceled, restores the terminal, and exits immediately with code 130. Cooperative transfer cancellation stops between files; an immediate TUI exit can leave resumable per-plan chunk checkpoints for the next run of the same plan.
 
-`transfer plan SOURCE DEST` reads the source root's default TUI selection set, compares those marked paths against the destination root's current indexed observations, stores a durable transfer plan, records a `transfer_plan` job with append-only events, and prints a dry-run summary. It never copies or overwrites files. Actions are `copy`, `review`, `skip`, `verify_needed`, `conflict`, and `unavailable`. `review` means the destination path may be empty, but the destination root already has matching content hash elsewhere or another file with the same filename/size/modified-time signature; use `transfer show PLAN_ID --action review` to inspect collision metadata before deciding what to copy.
+`transfer plan SOURCE DEST` reads the source root's default TUI selection set, compares those marked paths against the destination root's current indexed observations, stores a durable transfer plan, records a `transfer_plan` job with append-only events, and prints a dry-run summary. Use `--all` to plan every currently indexed `present` file in the source root without changing the TUI selection set. Planning never copies or overwrites files. Actions are `copy`, `review`, `skip`, `verify_needed`, `conflict`, and `unavailable`. `review` means the destination path may be empty, but the destination root already has matching content hash elsewhere or another file with the same filename/size/modified-time signature; use `transfer show PLAN_ID --action review` to inspect collision metadata before deciding what to copy.
 
 `transfer list` shows recent dry-run plans. `transfer show PLAN_ID` prints the plan summary and capped file entries; use `--action copy`, `--action conflict`, or another action name to filter entries. `transfer decide PLAN_ID RELATIVE_PATH --decision accept` changes a `review` row into a runnable `copy` row; `--decision drop` changes it into `skip`; `--decision retarget --dest NEW/PATH` changes the destination path and makes the row runnable as `copy`. Other actions are not changed by this decision path.
 

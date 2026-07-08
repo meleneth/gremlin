@@ -14,6 +14,42 @@ pub fn plan_selected_files(
         anyhow::bail!("source root has no marked files; mark files in the TUI with Space first");
     }
 
+    plan_files(conn, source_root, dest_root, selection, selected)
+}
+
+pub fn plan_all_files(
+    conn: &Connection,
+    source_root: &RootRow,
+    dest_root: &RootRow,
+) -> anyhow::Result<TransferPlanResult> {
+    if source_root.id == dest_root.id {
+        anyhow::bail!("source and destination roots are the same root");
+    }
+
+    let files = db::present_files_for_root(conn, &source_root.id)?;
+    if files.is_empty() {
+        anyhow::bail!("source root has no indexed files; scan or hash it first");
+    }
+    let selected = files
+        .iter()
+        .map(|file| file.relative_path.clone())
+        .collect::<BTreeSet<_>>();
+    let selection = db::SelectionSummary {
+        set_id: db::ensure_default_selection_set(conn, &source_root.id)?,
+        marked_count: files.len() as i64,
+        marked_bytes: files.iter().map(|file| file.size_bytes).sum(),
+    };
+
+    plan_files(conn, source_root, dest_root, selection, selected)
+}
+
+fn plan_files(
+    conn: &Connection,
+    source_root: &RootRow,
+    dest_root: &RootRow,
+    selection: db::SelectionSummary,
+    selected: BTreeSet<String>,
+) -> anyhow::Result<TransferPlanResult> {
     let job_id = db::create_job(
         conn,
         "transfer_plan",

@@ -2192,6 +2192,27 @@ pub fn recent_files_for_root(
     rows.collect()
 }
 
+pub fn present_files_for_root(conn: &Connection, root_id: &str) -> rusqlite::Result<Vec<FileRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT relative_path, size_bytes, modified_at, content_id, status
+        FROM path_observations
+        WHERE root_id = ?1 AND status = 'present'
+        ORDER BY relative_path ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(params![root_id], |row| {
+        Ok(FileRow {
+            relative_path: row.get(0)?,
+            size_bytes: row.get(1)?,
+            modified_at: row.get(2)?,
+            content_id: row.get(3)?,
+            status: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
 pub fn cached_directory_entries(
     conn: &Connection,
     root_id: &str,

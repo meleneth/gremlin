@@ -8,13 +8,15 @@ RSpec.describe "Gremlin local file CLI integration" do
       @workspace = dir
       @db_path = File.join(dir, "gremlin-test.db")
       @fixture_root = File.join(dir, "fixture-root")
+      @dest_root = File.join(dir, "dest-root")
       FileUtils.mkdir_p(@fixture_root)
+      FileUtils.mkdir_p(@dest_root)
       reset_db!
       example.run
     end
   end
 
-  attr_reader :db_path, :fixture_root
+  attr_reader :db_path, :fixture_root, :dest_root
 
   let(:base_time) { Time.utc(2026, 7, 8, 12, 0, 0) }
 
@@ -22,6 +24,10 @@ RSpec.describe "Gremlin local file CLI integration" do
     write_fixture("root.txt", "root file\n", mtime: base_time)
     write_fixture("alpha/one.txt", "alpha one\n", mtime: base_time + 1)
     write_fixture("alpha/nested/two.bin", "two\x00bin\n", mtime: base_time + 2)
+  end
+
+  def transfer_plan_id(stdout)
+    stdout[/^transfer_plan:\t(.+)$/, 1] or raise "missing transfer_plan line:\n#{stdout}"
   end
 
   it "fast imports a directory tree with stat metadata only" do
@@ -107,5 +113,40 @@ RSpec.describe "Gremlin local file CLI integration" do
       "alpha/one.txt",
       "root.txt"
     )
+  end
+
+  it "copies local files through a planned transfer while preserving paths and mtimes" do
+    build_fixture_tree
+    gremlin!("init")
+    gremlin_json!("hash", fixture_root, "--all")
+    gremlin!("target", "add", dest_root)
+
+    plan = gremlin!("--details", "transfer", "plan", fixture_root, dest_root, "--all")
+    expect(plan.stdout).to include("copy:\t3")
+    plan_id = transfer_plan_id(plan.stdout)
+
+    run = gremlin!("transfer", "run", plan_id)
+    expect(run.stdout).to include("copied:\t3")
+    expect(run.stdout).to include("skipped:\t0")
+    expect(run.stdout).to include("errors:\t0")
+    expect(run.stdout).to include("canceled:\tfalse")
+
+    expect(File.binread(File.join(dest_root, "root.txt"))).to eq("root file\n")
+    expect(File.binread(File.join(dest_root, "alpha", "one.txt"))).to eq("alpha one\n")
+    expect(File.binread(File.join(dest_root, "alpha", "nested", "two.bin"))).to eq("two\x00bin\n")
+    expect(File.mtime(File.join(dest_root, "root.txt")).to_i).to eq(
+      File.mtime(File.join(fixture_root, "root.txt")).to_i
+    )
+
+    status = gremlin_json!("status", dest_root)
+    expect(status.fetch("known")).to eq(true)
+    expect(status.fetch("files")).to eq(3)
+    expect(status.fetch("content_objects")).to eq(3)
+
+    verify = gremlin_json!("verify", dest_root)
+    expect(verify.fetch("ok")).to eq(3)
+    expect(verify.fetch("changed")).to eq(0)
+    expect(verify.fetch("missing")).to eq(0)
+    expect(verify.fetch("errors")).to eq(0)
   end
 end

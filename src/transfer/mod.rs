@@ -152,7 +152,7 @@ mod plan;
 mod run;
 mod ssh;
 
-pub use plan::plan_selected_files;
+pub use plan::{plan_all_files, plan_selected_files};
 pub use run::run_transfer_plan;
 
 use events::*;
