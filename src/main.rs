@@ -15,6 +15,7 @@ use clap::Parser;
 use cli::{
     Cli, Commands, ConfigCommands, JobCommands, TargetCommands, TransferCommands, WorkerCommands,
 };
+use serde::Serialize;
 use targets::{ParsedTarget, TargetKind};
 
 #[tokio::main]
@@ -26,6 +27,7 @@ async fn main() -> anyhow::Result<()> {
         details: cli.details,
         limit: cli.limit,
         quiet: false,
+        json: cli.json,
     };
 
     match cli.command {
@@ -313,14 +315,9 @@ async fn main() -> anyhow::Result<()> {
             let (machine_id, root_path) =
                 resolve_target_identity(&conn, &parsed, machine_label.as_deref())?;
             match db::target_status(&conn, &machine_id, &root_path)? {
-                Some(status) => print_target_status(&parsed, status),
+                Some(status) => print_target_status(&parsed, status, output.json),
                 None => {
-                    println!("target:\t{}", parsed.original);
-                    println!("kind:\t{:?}", parsed.kind);
-                    println!("machine:\t{}", parsed.display_machine_label());
-                    println!("path:\t{}", root_path);
-                    println!("known:\tno");
-                    println!("next:\tgremlin target add {} --db <db>", parsed.original);
+                    print_unknown_target_status(&parsed, &root_path, output.json)?;
                 }
             }
         }
@@ -357,6 +354,10 @@ fn run_default_target(
     machine_label: Option<&str>,
     output: fswork::OutputOptions,
 ) -> anyhow::Result<()> {
+    let text_output = fswork::OutputOptions {
+        json: false,
+        ..output
+    };
     let db_path = config_ctx.resolve_db_or_default(cli_db)?;
     let conn = db::open_or_create(&db_path)?;
     db::init_schema(&conn)?;
@@ -371,9 +372,9 @@ fn run_default_target(
             let local_path = parsed
                 .local_path()
                 .ok_or_else(|| anyhow::anyhow!("target is not local file-like"))?;
-            fswork::scan_to_db(&conn, &local_path, &db_path, machine_label, output)?;
+            fswork::scan_to_db(&conn, &local_path, &db_path, machine_label, text_output)?;
             if let Some(status) = db::target_status(&conn, &machine_id, &root_path)? {
-                print_target_status(&parsed, status);
+                print_target_status(&parsed, status, false);
             }
             println!(
                 "next:\tgremlin hash {} --db {}",
@@ -388,7 +389,7 @@ fn run_default_target(
                 parsed.kind, machine_id, root_id, root_path
             );
             match db::target_status(&conn, &machine_id, &root_path)? {
-                Some(status) => print_target_status(&parsed, status),
+                Some(status) => print_target_status(&parsed, status, false),
                 None => println!("known:\tregistered"),
             }
             println!("next:\tremote worker/import is not implemented yet");
@@ -431,7 +432,66 @@ fn resolve_target_identity(
     }
 }
 
-fn print_target_status(parsed: &ParsedTarget, status: db::TargetStatus) {
+#[derive(Debug, Serialize)]
+struct TargetStatusJson<'a> {
+    target: &'a str,
+    kind: TargetKind,
+    known: bool,
+    machine_id: &'a str,
+    root_id: &'a str,
+    path: &'a str,
+    files: i64,
+    bytes: i64,
+    content_objects: i64,
+    latest_event: Option<&'a str>,
+    latest_job: Option<JobStatusJson<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct UnknownTargetStatusJson<'a> {
+    target: &'a str,
+    kind: TargetKind,
+    known: bool,
+    machine: String,
+    path: &'a str,
+    next: String,
+}
+
+#[derive(Debug, Serialize)]
+struct JobStatusJson<'a> {
+    id: &'a str,
+    kind: &'a str,
+    status: &'a str,
+}
+
+fn print_target_status(parsed: &ParsedTarget, status: db::TargetStatus, json: bool) {
+    if json {
+        let latest_event = status.latest_event_at.as_deref();
+        let latest_job = status.latest_job.as_ref().map(|job| JobStatusJson {
+            id: &job.id,
+            kind: &job.kind,
+            status: &job.status,
+        });
+        let payload = TargetStatusJson {
+            target: &parsed.original,
+            kind: parsed.kind,
+            known: true,
+            machine_id: &status.root.machine_id,
+            root_id: &status.root.id,
+            path: &status.root.path,
+            files: status.file_count,
+            bytes: status.total_bytes,
+            content_objects: status.content_count,
+            latest_event,
+            latest_job,
+        };
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).expect("serializing status should not fail")
+        );
+        return;
+    }
+
     println!("target:\t{}", parsed.original);
     println!("kind:\t{:?}", parsed.kind);
     println!("known:\tyes");
@@ -450,6 +510,34 @@ fn print_target_status(parsed: &ParsedTarget, status: db::TargetStatus) {
     } else {
         println!("latest_job:\t-");
     }
+}
+
+fn print_unknown_target_status(
+    parsed: &ParsedTarget,
+    root_path: &str,
+    json: bool,
+) -> anyhow::Result<()> {
+    let next = format!("gremlin target add {} --db <db>", parsed.original);
+    if json {
+        let payload = UnknownTargetStatusJson {
+            target: &parsed.original,
+            kind: parsed.kind,
+            known: false,
+            machine: parsed.display_machine_label(),
+            path: root_path,
+            next,
+        };
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    println!("target:\t{}", parsed.original);
+    println!("kind:\t{:?}", parsed.kind);
+    println!("machine:\t{}", parsed.display_machine_label());
+    println!("path:\t{}", root_path);
+    println!("known:\tno");
+    println!("next:\t{next}");
+    Ok(())
 }
 
 fn print_transfer_plan(

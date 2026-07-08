@@ -23,6 +23,8 @@ pub struct Cli {
     pub machine_label: Option<String>,
     #[arg(long, global = true)]
     pub details: bool,
+    #[arg(long, global = true)]
+    pub json: bool,
     #[arg(long, global = true, default_value_t = 20)]
     pub limit: usize,
     #[command(subcommand)]

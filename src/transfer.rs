@@ -878,7 +878,7 @@ mod tests {
         let content_id = db::ensure_content_object(
             &conn,
             5,
-            &blake3::hash(b"hello").to_hex().to_string(),
+            blake3::hash(b"hello").to_hex().as_ref(),
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
         )
         .unwrap();

@@ -622,42 +622,6 @@ fn plan_summary_line(summary: &[db::TransferPlanActionSummary]) -> String {
         .join(" | ")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn truncates_long_values() {
-        assert_eq!(truncate("abcdef", 4), "abc~");
-        assert_eq!(truncate("abc", 4), "abc");
-    }
-
-    #[test]
-    fn root_display_name_uses_basename_when_label_is_path() {
-        let root = db::RootRow {
-            id: "root_1".to_string(),
-            machine_id: "machine_1".to_string(),
-            path: "/tmp/archive/photos".to_string(),
-            label: Some("/tmp/archive/photos".to_string()),
-            current_size_bytes: 0,
-            latest_job_kind: None,
-            latest_job_status: None,
-            latest_job_phase: None,
-        };
-        assert_eq!(root_display_name(&root), "photos");
-    }
-
-    #[test]
-    fn formats_plan_summary_line() {
-        let summary = vec![db::TransferPlanActionSummary {
-            action: "copy".to_string(),
-            files: 2,
-            bytes: 2048,
-        }];
-        assert_eq!(plan_summary_line(&summary), "copy 2 2.00 KiB");
-    }
-}
-
 fn render_events(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
@@ -945,4 +909,40 @@ fn spawn_job_runner(
         };
         let _ = job_tx.send(message);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncates_long_values() {
+        assert_eq!(truncate("abcdef", 4), "abc~");
+        assert_eq!(truncate("abc", 4), "abc");
+    }
+
+    #[test]
+    fn root_display_name_uses_basename_when_label_is_path() {
+        let root = db::RootRow {
+            id: "root_1".to_string(),
+            machine_id: "machine_1".to_string(),
+            path: "/tmp/archive/photos".to_string(),
+            label: Some("/tmp/archive/photos".to_string()),
+            current_size_bytes: 0,
+            latest_job_kind: None,
+            latest_job_status: None,
+            latest_job_phase: None,
+        };
+        assert_eq!(root_display_name(&root), "photos");
+    }
+
+    #[test]
+    fn formats_plan_summary_line() {
+        let summary = vec![db::TransferPlanActionSummary {
+            action: "copy".to_string(),
+            files: 2,
+            bytes: 2048,
+        }];
+        assert_eq!(plan_summary_line(&summary), "copy 2 2.00 KiB");
+    }
 }

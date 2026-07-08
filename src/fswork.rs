@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use rusqlite::Connection;
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
@@ -20,6 +21,7 @@ pub struct OutputOptions {
     pub details: bool,
     pub limit: usize,
     pub quiet: bool,
+    pub json: bool,
 }
 
 impl Default for OutputOptions {
@@ -28,11 +30,13 @@ impl Default for OutputOptions {
             details: false,
             limit: 20,
             quiet: false,
+            json: false,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DeltaKind {
     New,
     Changed,
@@ -51,7 +55,7 @@ impl DeltaKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ScanDelta {
     pub kind: DeltaKind,
     pub relative_path: String,
@@ -61,7 +65,7 @@ pub struct ScanDelta {
     pub previous_modified_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ScanSummary {
     pub job_id: String,
     pub files_seen: u64,
@@ -73,7 +77,7 @@ pub struct ScanSummary {
     pub deltas: Vec<ScanDelta>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct HashSummary {
     pub job_id: String,
     pub files_hashed: u64,
@@ -82,7 +86,8 @@ pub struct HashSummary {
     pub hashed_paths: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum VerifyKind {
     Ok,
     Changed,
@@ -103,7 +108,7 @@ impl VerifyKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct VerifyFinding {
     pub kind: VerifyKind,
     pub relative_path: String,
@@ -118,7 +123,7 @@ pub struct VerifyFinding {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct VerifySummary {
     pub job_id: String,
     pub ok: usize,
@@ -1354,6 +1359,10 @@ fn print_scan_summary(summary: &ScanSummary, options: OutputOptions) {
     if options.quiet {
         return;
     }
+    if options.json {
+        print_json_summary(summary);
+        return;
+    }
     println!(
         "scan job {}: {} files, {} new, {} changed, {} missing, {} errors",
         summary.job_id,
@@ -1368,6 +1377,10 @@ fn print_scan_summary(summary: &ScanSummary, options: OutputOptions) {
 
 fn print_hash_summary(summary: &HashSummary, options: OutputOptions) {
     if options.quiet {
+        return;
+    }
+    if options.json {
+        print_json_summary(summary);
         return;
     }
     println!(
@@ -1386,6 +1399,10 @@ fn print_hash_summary(summary: &HashSummary, options: OutputOptions) {
 
 fn print_verify_summary(summary: &VerifySummary, options: OutputOptions) {
     if options.quiet {
+        return;
+    }
+    if options.json {
+        print_json_summary(summary);
         return;
     }
     println!(
@@ -1411,6 +1428,13 @@ fn print_verify_summary(summary: &VerifySummary, options: OutputOptions) {
     for finding in notable.into_iter().take(limit) {
         println!("{}\t{}", finding.kind.as_str(), finding.relative_path);
     }
+}
+
+fn print_json_summary(summary: &impl Serialize) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(summary).expect("serializing summary should not fail")
+    );
 }
 
 fn print_scan_deltas(deltas: &[ScanDelta], options: OutputOptions) {
