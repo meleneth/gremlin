@@ -837,7 +837,7 @@ fn fast_scan_ssh_directory(
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("SSH target missing machine hint"))?;
     let command = format!(
-        "cd {} && find . -mindepth 1 -maxdepth 1 -printf '%y\\t%s\\t%T+\\t%P\\n'",
+        "find -L {} -mindepth 1 -maxdepth 1 -printf '%y\\t%s\\t%T+\\t%P\\n'",
         remote_shell_path(remote_path)
     );
     let output = Command::new("ssh")

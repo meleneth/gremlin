@@ -2049,6 +2049,7 @@ fn spawn_transfer_runner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     #[test]
     fn truncates_long_values() {
@@ -2069,6 +2070,47 @@ mod tests {
             latest_job_phase: None,
         };
         assert_eq!(root_display_name(&root), "photos");
+    }
+
+    #[test]
+    fn temporary_browse_enter_directory_loads_child_entries() {
+        let requested_paths = Arc::new(Mutex::new(Vec::<String>::new()));
+        let provider_paths = requested_paths.clone();
+        let provider: BrowseProvider = Arc::new(move |path| {
+            provider_paths.lock().unwrap().push(path.to_string());
+            Ok(vec![InitialBrowseEntry {
+                kind: "file".to_string(),
+                name: "inside.txt".to_string(),
+                size_bytes: 5,
+                modified_at: None,
+            }])
+        });
+        let mut state = AppState {
+            temporary_browse: Some(TemporaryBrowse {
+                label: "nas01:".to_string(),
+                machine_id: "machine_remote".to_string(),
+                root_path: "~".to_string(),
+                current_path: "~".to_string(),
+                entries: vec![InitialBrowseEntry {
+                    kind: "dir".to_string(),
+                    name: "photos".to_string(),
+                    size_bytes: 0,
+                    modified_at: None,
+                }],
+                browse_provider: Some(provider),
+            }),
+            ..AppState::default()
+        };
+        let selected =
+            FileViewRow::from_temporary_entry(&state.temporary_browse.as_ref().unwrap().entries[0]);
+
+        open_temporary_file_entry(&mut state, Some(&selected));
+
+        let browse = state.temporary_browse.as_ref().unwrap();
+        assert_eq!(browse.current_path, "~/photos");
+        assert_eq!(browse.entries.len(), 1);
+        assert_eq!(browse.entries[0].name, "inside.txt");
+        assert_eq!(requested_paths.lock().unwrap().as_slice(), ["~/photos"]);
     }
 
     #[test]
