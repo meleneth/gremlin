@@ -1,4 +1,5 @@
 mod cli;
+mod collections;
 mod config;
 mod db;
 mod error;
@@ -130,6 +131,18 @@ async fn main() -> anyhow::Result<()> {
                 accept,
                 output,
             )?;
+        }
+        Some(Commands::VerifyCollection {
+            collection_id,
+            target,
+            kind,
+        }) => {
+            let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
+            let conn = db::open_existing(&db)?;
+            let root = resolve_registered_root(&conn, &target, kind, machine_label.as_deref())?;
+            let summary =
+                collections::verify_collection_against_root(&conn, &collection_id, &root)?;
+            print_collection_verify_summary(summary, output)?;
         }
         Some(Commands::Worker { command }) => match command {
             WorkerCommands::Hash { path, jsonl, out } => {
@@ -878,6 +891,50 @@ fn print_transfer_plan(
         }
     }
     println!("note:\tplanning only; no files were copied");
+    Ok(())
+}
+
+fn print_collection_verify_summary(
+    summary: collections::CollectionVerifySummary,
+    output: fswork::OutputOptions,
+) -> anyhow::Result<()> {
+    if output.json {
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+        return Ok(());
+    }
+
+    println!("collection:\t{}", summary.collection_id);
+    println!("name:\t{}", summary.collection_name);
+    println!("root:\t{}\t{}", summary.root_id, summary.root_path);
+    println!("entries:\t{}", summary.entries);
+    println!("ok:\t{}", summary.ok);
+    println!("size_only:\t{}", summary.size_only);
+    println!("missing:\t{}", summary.missing);
+    println!("size_mismatch:\t{}", summary.size_mismatch);
+    println!("hash_mismatch:\t{}", summary.hash_mismatch);
+    println!("unverified:\t{}", summary.unverified);
+    println!("extras:\t{}", summary.extras);
+    if output.details {
+        for finding in summary.findings.into_iter().take(output.limit) {
+            println!(
+                "finding:\t{}\t{}\texpected={}\tactual={}",
+                finding.kind.as_str(),
+                finding.relative_path,
+                util::human_size(finding.expected_size_bytes),
+                finding
+                    .actual_size_bytes
+                    .map(util::human_size)
+                    .unwrap_or_else(|| "-".to_string())
+            );
+        }
+        for extra in summary.extra_files.into_iter().take(output.limit) {
+            println!(
+                "extra:\t{}\t{}",
+                extra.relative_path,
+                util::human_size(extra.size_bytes)
+            );
+        }
+    }
     Ok(())
 }
 

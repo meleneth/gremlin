@@ -72,6 +72,7 @@ gremlin hash PATH --all --db ./gremlin.db
 gremlin chunk-hash PATH --chunk-size-mib 64 --db ./gremlin.db
 gremlin verify PATH --db ./gremlin.db
 gremlin verify PATH --accept --db ./gremlin.db
+gremlin verify-collection COLLECTION_ID TARGET --db ./gremlin.db
 gremlin --json status PATH --db ./gremlin.db
 
 gremlin worker hash PATH --jsonl
@@ -152,6 +153,8 @@ Roots maintain `current_size_bytes`, the projected total size of currently index
 
 `verify` re-hashes current files and compares them to the latest stored per-path hashes. It reports `ok`, `changed`, `new`, `missing`, and `error`. By default it records history only; `--accept` promotes changed and new hashes into projected current truth.
 
+`verify-collection COLLECTION_ID TARGET` compares an imported checksum collection to a known root's current projected observations. It does not read or hash filesystem files; run `scan`, `hash --all`, SSH hash import, or a transfer first when the root needs fresher evidence. Results distinguish hash `ok`, `missing`, `size_mismatch`, `hash_mismatch`, `unverified` when the root lacks comparable hash evidence, `size_only` when only sizes can be compared, and extra root files that are not present in the collection.
+
 `worker hash --jsonl` does not require a database. It emits JSONL events suitable for manual or future automated remote execution over SSH.
 
 `import-events` reads JSONL events, preserves imported history in `job_events`, and creates checksum collection entries for completed hash events. With `--target TARGET`, completed hash events are also projected into that target root as current file observations and content objects. This is the current bridge for remote hashes: run or collect worker JSONL elsewhere, then import it into `nas01:/path` or `nas01:`.
@@ -189,9 +192,9 @@ Future seams deliberately left open:
 
 - SSH remote scan/hash dispatch: TUI import can hash through native remote `find`/`sha256sum`; next steps are live progress streaming and resumable remote worker state.
 - Remote browsing: live temporary SSH listings can be navigated in the TUI and imported as roots; next steps are richer cached directory observations and explicit refresh controls.
-- Manifest reconciliation: use imported SFV/CFV/PAR2 checksum collections as verification baselines where possible.
+- Manifest reconciliation: checksum collections can now be compared to root observations by path, size, and comparable BLAKE3/SHA-256 hashes; next steps are CRC/PAR2-specific verification and TUI browsing of collection comparison results.
 - SMB path mapping: add machine/root mapping without changing content identity.
-- Transfer planning/copying: persisted dry-run root-to-root plans, job events, CLI inspection, TUI persisted-plan loading, TUI plan browsing/run/review/retarget controls, detailed transfer progress, streamed hash-checked local copy execution, checkpointed chunk-verified one-sided SSH copies, optional local root chunk hashes, and optional local paranoid readback exist for TUI selections; next slices should add checksum collection comparisons and richer SSH resume controls/status.
+- Transfer planning/copying: persisted dry-run root-to-root plans, job events, CLI inspection, TUI persisted-plan loading, TUI plan browsing/run/review/retarget controls, detailed transfer progress, streamed hash-checked local copy execution, checkpointed chunk-verified one-sided SSH copies, optional local root chunk hashes, optional local paranoid readback, and CLI checksum collection comparison exist for TUI selections; next slices should add TUI access to collection comparison and richer SSH resume controls/status.
 - Seamless resume: make interrupted remote browsing, hashing, importing, and future copy jobs restart from durable job/event state instead of requiring manual cleanup.
 - Metadata extractors: add new job kinds and events rather than expanding scan/hash responsibilities.
 - Richer TUI job control: the TUI can start local jobs and transfer runs now; future slices should add better job filtering, clearer cancellation states, transfer chunk/resume detail, and async remote supervision without putting scan/hash/copy logic in TUI code.
@@ -199,5 +202,5 @@ Future seams deliberately left open:
 ## Known v0 Limits
 
 - Path storage uses UTF-8 lossy display strings; raw non-UTF-8 Unix path support should be added later.
-- Import preserves evidence and checksum entries. Target-aware worker imports can update projected root state for completed hash events, but full reconciliation from arbitrary checksum collections is not implemented.
+- Import preserves evidence and checksum entries. Target-aware worker imports can update projected root state for completed hash events. `verify-collection` can compare imported collections against projected root state, but CRC/PAR2 repair and verification are not implemented.
 - No daemon, remote-to-remote transfer, streamed SSH supervision, or metadata extraction is implemented. Transfer execution supports local-to-local and one-sided SSH copies through `ssh`; remote import supports fast stat observations and native SSH SHA-256 hashing.

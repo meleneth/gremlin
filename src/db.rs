@@ -187,6 +187,28 @@ pub struct ContentObjectRow {
 }
 
 #[derive(Debug, Clone)]
+pub struct ChecksumCollectionRow {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChecksumEntryRow {
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub blake3: Option<String>,
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChecksumObservationRow {
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub blake3: Option<String>,
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ObservationChunkHashInput<'a> {
     pub chunk_size_bytes: u64,
     pub chunk_index: u64,
@@ -1259,6 +1281,82 @@ pub fn attach_checksum_collection_target(
         params![collection_id, machine_id, root_id],
     )?;
     Ok(())
+}
+
+pub fn checksum_collection_by_id(
+    conn: &Connection,
+    collection_id: &str,
+) -> rusqlite::Result<Option<ChecksumCollectionRow>> {
+    conn.query_row(
+        r#"
+        SELECT id, name
+        FROM checksum_collections
+        WHERE id = ?1
+        "#,
+        params![collection_id],
+        |row| {
+            Ok(ChecksumCollectionRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+            })
+        },
+    )
+    .optional()
+}
+
+pub fn checksum_entries_for_collection(
+    conn: &Connection,
+    collection_id: &str,
+) -> rusqlite::Result<Vec<ChecksumEntryRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT relative_path, size_bytes, blake3, sha256
+        FROM checksum_entries
+        WHERE collection_id = ?1
+        ORDER BY relative_path ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(params![collection_id], |row| {
+        let size: i64 = row.get(1)?;
+        Ok(ChecksumEntryRow {
+            relative_path: row.get(0)?,
+            size_bytes: size as u64,
+            blake3: row.get(2)?,
+            sha256: row.get(3)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn checksum_observations_for_root(
+    conn: &Connection,
+    root_id: &str,
+) -> rusqlite::Result<BTreeMap<String, ChecksumObservationRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT p.relative_path, p.size_bytes, c.blake3, c.sha256
+        FROM path_observations p
+        LEFT JOIN content_objects c ON c.id = p.content_id
+        WHERE p.root_id = ?1
+          AND p.status = 'present'
+        ORDER BY p.relative_path ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(params![root_id], |row| {
+        let size: i64 = row.get(1)?;
+        Ok(ChecksumObservationRow {
+            relative_path: row.get(0)?,
+            size_bytes: size as u64,
+            blake3: row.get(2)?,
+            sha256: row.get(3)?,
+        })
+    })?;
+    let mut observations = BTreeMap::new();
+    for row in rows {
+        let row = row?;
+        observations.insert(row.relative_path.clone(), row);
+    }
+    Ok(observations)
 }
 
 pub fn insert_checksum_entry(

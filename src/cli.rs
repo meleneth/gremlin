@@ -58,6 +58,12 @@ pub enum Commands {
         #[arg(long, value_enum)]
         kind: Option<TargetKind>,
     },
+    VerifyCollection {
+        collection_id: String,
+        target: String,
+        #[arg(long, value_enum)]
+        kind: Option<TargetKind>,
+    },
     Worker {
         #[command(subcommand)]
         command: WorkerCommands,

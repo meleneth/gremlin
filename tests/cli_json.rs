@@ -268,6 +268,82 @@ fn import_events_can_project_into_default_ssh_target() {
 }
 
 #[test]
+fn verify_collection_compares_imported_hashes_to_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("gremlin.db");
+    let root = dir.path().join("root");
+    let jsonl = dir.path().join("checksums.jsonl");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("ok.txt"), b"same").unwrap();
+    std::fs::write(root.join("changed.txt"), b"old!").unwrap();
+    std::fs::write(root.join("missing.txt"), b"gone").unwrap();
+
+    gremlin()
+        .args([
+            "worker",
+            "hash",
+            root.to_str().unwrap(),
+            "--jsonl",
+            "--out",
+            jsonl.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    gremlin()
+        .args(["--no-config", "--db", db.to_str().unwrap(), "init"])
+        .assert()
+        .success();
+    let import_output = gremlin()
+        .args([
+            "--no-config",
+            "--db",
+            db.to_str().unwrap(),
+            "import-events",
+            jsonl.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let import_output = String::from_utf8(import_output).unwrap();
+    let collection_id = import_output
+        .split_whitespace()
+        .last()
+        .expect("collection id in import output");
+
+    std::fs::write(root.join("changed.txt"), b"new!").unwrap();
+    std::fs::remove_file(root.join("missing.txt")).unwrap();
+    std::fs::write(root.join("extra.txt"), b"extra").unwrap();
+    command_json(&[
+        "--no-config",
+        "--db",
+        db.to_str().unwrap(),
+        "--json",
+        "hash",
+        root.to_str().unwrap(),
+        "--all",
+    ]);
+
+    let summary = command_json(&[
+        "--no-config",
+        "--db",
+        db.to_str().unwrap(),
+        "--json",
+        "verify-collection",
+        collection_id,
+        root.to_str().unwrap(),
+    ]);
+    assert_eq!(summary["entries"], 3);
+    assert_eq!(summary["ok"], 1);
+    assert_eq!(summary["hash_mismatch"], 1);
+    assert_eq!(summary["missing"], 1);
+    assert_eq!(summary["extras"], 1);
+    assert_eq!(summary["findings"][0]["relative_path"], "changed.txt");
+    assert_eq!(summary["extra_files"][0]["relative_path"], "extra.txt");
+}
+
+#[test]
 fn positional_ssh_target_can_run_without_tui() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("gremlin.db");
