@@ -1,36 +1,71 @@
 use super::*;
 pub(super) fn run_current_transfer_plan(
+    conn: &Connection,
     db_path: &Path,
     job_tx: mpsc::UnboundedSender<TuiMessage>,
     state: &mut AppState,
-) {
+) -> anyhow::Result<()> {
     if state.collection_result.is_some() {
         state.status =
             "Collection comparison is shown; load a transfer plan to run copies".to_string();
-        return;
-    }
-    if let Some(plan_id) = state.transfer_run_plan_id.as_deref() {
-        state.status = format!("transfer plan {} is already running", short_id(plan_id));
-        return;
+        return Ok(());
     }
     let Some(plan) = state.last_plan.as_ref() else {
         state.status = "No transfer plan to run".to_string();
-        return;
+        return Ok(());
     };
     let copy_entries = plan_copy_count(plan);
     if copy_entries == 0 {
         state.status = "Plan has no copy entries; review conflicts first".to_string();
-        return;
+        return Ok(());
     }
     let plan_id = plan.plan_id.clone();
-    state.transfer_run_plan_id = Some(plan_id.clone());
+    db::update_transfer_plan_status(conn, &plan_id, "queued")?;
+    if let Some(plan) = state.last_plan.as_mut() {
+        plan.status = "queued".to_string();
+    }
     state.focus = FocusPane::Plan;
+    state.set_status(
+        ActivityLevel::Info,
+        format!(
+            "queued transfer {} ({} copy entries)",
+            short_id(&plan_id),
+            copy_entries
+        ),
+    );
+    start_next_queued_transfer(conn, db_path, job_tx, state)?;
+    Ok(())
+}
+
+pub(super) fn start_next_queued_transfer(
+    conn: &Connection,
+    db_path: &Path,
+    job_tx: mpsc::UnboundedSender<TuiMessage>,
+    state: &mut AppState,
+) -> anyhow::Result<()> {
+    if state.transfer_run_plan_id.is_some() {
+        return Ok(());
+    }
+    let Some(plan) = db::queued_transfer_plans(conn, 1)?.into_iter().next() else {
+        return Ok(());
+    };
+    let copy_entries = db::transfer_plan_entries_filtered(conn, &plan.id, Some("copy"))?.len();
+    if copy_entries == 0 {
+        db::update_transfer_plan_status(conn, &plan.id, "failed")?;
+        state.set_status(
+            ActivityLevel::Error,
+            format!("queued transfer {} has no copy entries", short_id(&plan.id)),
+        );
+        return Ok(());
+    }
+    state.transfer_run_plan_id = Some(plan.id.clone());
     state.background_started(format!(
-        "running transfer {} ({} copy entries)",
-        short_id(&plan_id),
+        "running queued transfer {} ({} copy entries)",
+        short_id(&plan.id),
         copy_entries
     ));
-    spawn_transfer_runner(db_path.to_path_buf(), plan_id, job_tx);
+    spawn_transfer_runner(db_path.to_path_buf(), plan.id, job_tx);
+    Ok(())
 }
 
 pub(super) fn decide_current_plan_entry(

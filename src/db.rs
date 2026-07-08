@@ -264,6 +264,7 @@ pub struct JobEventRow {
     pub sequence: i64,
     pub event_kind: String,
     pub payload_json: String,
+    pub params_json: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2029,6 +2030,39 @@ pub fn recent_transfer_plans(
     rows.collect()
 }
 
+pub fn queued_transfer_plans(
+    conn: &Connection,
+    limit: i64,
+) -> rusqlite::Result<Vec<TransferPlanRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT
+            p.id,
+            p.job_id,
+            p.source_root_id,
+            source.path,
+            p.dest_root_id,
+            dest.path,
+            p.selection_set_id,
+            p.status,
+            p.created_at,
+            p.params_json,
+            COUNT(e.id),
+            COALESCE(SUM(e.size_bytes), 0)
+        FROM transfer_plans p
+        JOIN roots source ON source.id = p.source_root_id
+        JOIN roots dest ON dest.id = p.dest_root_id
+        LEFT JOIN transfer_plan_entries e ON e.plan_id = p.id
+        WHERE p.status = 'queued'
+        GROUP BY p.id
+        ORDER BY p.created_at ASC
+        LIMIT ?1
+        "#,
+    )?;
+    let rows = stmt.query_map(params![limit], transfer_plan_from_row)?;
+    rows.collect()
+}
+
 pub fn transfer_plan_by_id(
     conn: &Connection,
     plan_id: &str,
@@ -2612,7 +2646,7 @@ pub fn recent_jobs_and_events(conn: &Connection, limit: i64) -> rusqlite::Result
         r#"
         SELECT j.id, j.kind, j.status, j.phase, j.current_path, j.files_seen,
                j.files_done, j.files_skipped, j.errors, j.cancel_requested,
-               e.sequence, e.event_kind, e.payload_json
+               e.sequence, e.event_kind, e.payload_json, j.params_json
         FROM job_events e
         JOIN jobs j ON j.id = e.job_id
         ORDER BY e.created_at DESC, e.sequence DESC
@@ -2634,6 +2668,7 @@ pub fn recent_jobs_and_events(conn: &Connection, limit: i64) -> rusqlite::Result
             sequence: row.get(10)?,
             event_kind: row.get(11)?,
             payload_json: row.get(12)?,
+            params_json: row.get(13)?,
         })
     })?;
     rows.collect()
@@ -2648,7 +2683,7 @@ pub fn recent_jobs_and_events_for_root(
         r#"
         SELECT j.id, j.kind, j.status, j.phase, j.current_path, j.files_seen,
                j.files_done, j.files_skipped, j.errors, j.cancel_requested,
-               e.sequence, e.event_kind, e.payload_json
+               e.sequence, e.event_kind, e.payload_json, j.params_json
         FROM job_events e
         JOIN jobs j ON j.id = e.job_id
         WHERE j.root_id = ?1
@@ -2671,6 +2706,7 @@ pub fn recent_jobs_and_events_for_root(
             sequence: row.get(10)?,
             event_kind: row.get(11)?,
             payload_json: row.get(12)?,
+            params_json: row.get(13)?,
         })
     })?;
     rows.collect()
@@ -3036,6 +3072,12 @@ mod tests {
         let copy_entries = transfer_plan_entries_filtered(&conn, &plan_id, Some("copy")).unwrap();
         assert_eq!(copy_entries.len(), 1);
         assert_eq!(copy_entries[0].relative_path, "a.txt");
+        assert!(queued_transfer_plans(&conn, 10).unwrap().is_empty());
+        update_transfer_plan_status(&conn, &plan_id, "queued").unwrap();
+        let queued = queued_transfer_plans(&conn, 10).unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].id, plan_id);
+        update_transfer_plan_status(&conn, &plan_id, "planned").unwrap();
 
         assert!(decide_review_transfer_plan_entry(
             &conn,

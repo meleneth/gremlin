@@ -39,19 +39,20 @@ impl Widget for EventsPane<'_> {
 
 pub(super) fn event_header() -> String {
     format!(
-        "{:<2} {:<18} {:<8} {:<10} {:<12} {:<24}",
-        "", "JOB", "TYPE", "STATUS", "EVENT", "PROGRESS"
+        "{:<2} {:<12} {:<8} {:<10} {:<12} {:<28} {:<24}",
+        "", "JOB", "TYPE", "STATUS", "EVENT", "TARGET", "PROGRESS"
     )
 }
 
 pub(super) fn event_row(marker: &str, row: &db::JobEventRow) -> String {
     format!(
-        "{:<2} {:<18} {:<8} {:<10} {:<12} {:<24}",
+        "{:<2} {:<12} {:<8} {:<10} {:<12} {:<28} {:<24}",
         marker,
-        short_id(&row.job_id),
+        truncate(short_id(&row.job_id), 12),
         truncate(&row.job_kind, 8),
         truncate(&event_status(row), 10),
         truncate(&event_label(row), 12),
+        truncate(&event_target(row), 28),
         truncate(&progress_count(row), 24)
     )
 }
@@ -61,6 +62,26 @@ fn event_label(row: &db::JobEventRow) -> String {
         return row.phase.clone().unwrap_or_else(|| "progress".to_string());
     }
     row.event_kind.clone()
+}
+
+fn event_target(row: &db::JobEventRow) -> String {
+    if row.job_kind == "transfer_copy" {
+        if let Some(direction) = transfer_direction(row.params_json.as_deref()) {
+            return direction;
+        }
+    }
+    row.current_path.clone().unwrap_or_else(|| "-".to_string())
+}
+
+fn transfer_direction(params_json: Option<&str>) -> Option<String> {
+    let payload: serde_json::Value = serde_json::from_str(params_json?).ok()?;
+    let source = payload.get("source_path")?.as_str()?;
+    let dest = payload.get("dest_path")?.as_str()?;
+    Some(format!(
+        "{} -> {}",
+        display_name_from_path(source),
+        display_name_from_path(dest)
+    ))
 }
 
 pub(super) fn event_summary(row: &db::JobEventRow) -> String {

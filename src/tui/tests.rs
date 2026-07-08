@@ -828,6 +828,7 @@ fn finds_latest_transfer_progress_event() {
         sequence: 2,
         event_kind: "job_completed".to_string(),
         payload_json: serde_json::json!({"type": "job", "message": "completed"}).to_string(),
+        params_json: None,
     };
     let progress = db::JobEventRow {
         sequence: 1,
@@ -851,6 +852,34 @@ fn finds_latest_transfer_progress_event() {
     let found = latest_transfer_progress(&[complete, progress]).unwrap();
     assert_eq!(found.current_path, "a.bin");
     assert_eq!(found.bytes_done, 5);
+}
+
+#[test]
+fn activity_rows_show_transfer_direction() {
+    let row = db::JobEventRow {
+        job_id: "job_transfer_1".to_string(),
+        job_kind: "transfer_copy".to_string(),
+        status: "running".to_string(),
+        phase: Some("copying".to_string()),
+        current_path: Some("a.bin".to_string()),
+        files_seen: 0,
+        files_done: 0,
+        files_skipped: 0,
+        errors: 0,
+        cancel_requested: false,
+        sequence: 1,
+        event_kind: "job_progress".to_string(),
+        payload_json: serde_json::json!({"type": "job_progress"}).to_string(),
+        params_json: Some(
+            serde_json::json!({
+                "source_path": "/mnt/source",
+                "dest_path": "/mnt/dest"
+            })
+            .to_string(),
+        ),
+    };
+
+    assert!(event_row("> ", &row).contains("source -> dest"));
 }
 
 #[test]

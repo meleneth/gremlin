@@ -103,6 +103,7 @@ pub(super) async fn run_loop(
                         ActivityLevel::Success
                     };
                     state.background_finished(level, status);
+                    start_next_queued_transfer(conn, db_path, job_tx.clone(), &mut state)?;
                 }
                 TuiMessage::ImportFinished(status) => {
                     let level = if status.contains("failed") {
@@ -386,7 +387,7 @@ pub(super) async fn run_loop(
                                 load_transfer_plan_by_id(conn, &plan_id, &mut state)?;
                             }
                         }
-                        run_current_transfer_plan(db_path, job_tx.clone(), &mut state);
+                        run_current_transfer_plan(conn, db_path, job_tx.clone(), &mut state)?;
                     }
                     KeyCode::Char('a') => {
                         decide_current_plan_entry(
@@ -521,7 +522,7 @@ fn request_immediate_quit(conn: &Connection, state: &mut AppState) -> anyhow::Re
 fn resumable_transfer_plans(conn: &Connection) -> anyhow::Result<Vec<db::TransferPlanRow>> {
     Ok(db::recent_transfer_plans(conn, 50)?
         .into_iter()
-        .filter(|plan| matches!(plan.status.as_str(), "canceled" | "running"))
+        .filter(|plan| matches!(plan.status.as_str(), "canceled" | "queued" | "running"))
         .collect())
 }
 

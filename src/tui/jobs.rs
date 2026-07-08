@@ -56,9 +56,16 @@ pub(super) fn spawn_transfer_runner(
     job_tx: mpsc::UnboundedSender<TuiMessage>,
 ) {
     task::spawn_blocking(move || {
+        let runner_plan_id = plan_id.clone();
         let result = (|| -> anyhow::Result<transfer::TransferRunResult> {
             let conn = db::open_existing(&db_path)?;
-            transfer::run_transfer_plan(&conn, &plan_id, false)
+            match transfer::run_transfer_plan(&conn, &runner_plan_id, false) {
+                Ok(result) => Ok(result),
+                Err(err) => {
+                    let _ = db::update_transfer_plan_status(&conn, &runner_plan_id, "failed");
+                    Err(err)
+                }
+            }
         })();
         let status = match result {
             Ok(result) if result.canceled => {
