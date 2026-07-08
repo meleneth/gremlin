@@ -4,7 +4,7 @@ Gremlin is a local-first file database, checksum, audit, and transfer-planning t
 
 This project is heavily vibe-coded with Codex using GPT-5.
 
-This first slice is intentionally small: a single Rust CLI crate, a Tokio runtime baseline, a local SQLite database, append-only job events, projected query tables, stat-only scanning, file hashing, JSONL worker/import seams, and a Ratatui TUI.
+The current version is still intentionally conservative: a single Rust CLI crate, a Tokio runtime baseline, a local SQLite database, append-only job events, projected query tables, stat-only scanning, file hashing, JSONL worker/import seams, persisted transfer plans, a local hash-checked copy runner, and a Ratatui TUI.
 
 ## Architecture Rule
 
@@ -23,13 +23,16 @@ gremlin hash PATH --db ./gremlin.db
 gremlin hash PATH --all --db ./gremlin.db
 gremlin verify PATH --db ./gremlin.db
 gremlin verify PATH --accept --db ./gremlin.db
+gremlin --json status PATH --db ./gremlin.db
 
 gremlin worker hash PATH --jsonl
 gremlin worker hash PATH --jsonl --out checksums.jsonl
 
 gremlin import-events checksums.jsonl --db ./gremlin.db
 gremlin import-events checksums.jsonl --target nas01:/srv/archive --db ./gremlin.db
+gremlin import-events checksums.jsonl --target nas01: --db ./gremlin.db
 gremlin import-manifest checksums.sfv --db ./gremlin.db
+gremlin import-manifest files.par2 --db ./gremlin.db
 
 gremlin events --db ./gremlin.db
 gremlin files --db ./gremlin.db
@@ -40,6 +43,7 @@ gremlin job show JOB_ID --db ./gremlin.db
 gremlin job run JOB_ID --db ./gremlin.db
 gremlin target inspect TARGET
 gremlin target add TARGET --db ./gremlin.db
+gremlin target add nas01: --db ./gremlin.db
 gremlin status TARGET --db ./gremlin.db
 gremlin transfer plan SOURCE DEST --db ./gremlin.db
 gremlin transfer list --db ./gremlin.db
@@ -94,15 +98,15 @@ Roots maintain `current_size_bytes`, the projected total size of currently index
 
 `verify` re-hashes current files and compares them to the latest stored per-path hashes. It reports `ok`, `changed`, `new`, `missing`, and `error`. By default it records history only; `--accept` promotes changed and new hashes into projected current truth.
 
-`worker hash --jsonl` does not require a database. It emits JSONL events suitable for future remote execution over SSH.
+`worker hash --jsonl` does not require a database. It emits JSONL events suitable for manual or future automated remote execution over SSH.
 
-`import-events` reads JSONL events, preserves imported history in `job_events`, and creates checksum collection entries for completed hash events.
+`import-events` reads JSONL events, preserves imported history in `job_events`, and creates checksum collection entries for completed hash events. With `--target TARGET`, completed hash events are also projected into that target root as current file observations and content objects. This is the current bridge for remote hashes: run or collect worker JSONL elsewhere, then import it into `nas01:/path` or `nas01:`.
 
-`import-manifest` reads SFV/CFV-style CRC manifests and PAR2 file-description packets into checksum collections. PAR2 parity repair/verification is not implemented yet.
+`import-manifest` reads SFV/CFV-style CRC manifests and PAR2 file-description packets into checksum collections. PAR2 parity repair/verification and CRC verification against files are not implemented yet.
 
 `job create` records an intended scan or hash job without executing file work. This is the same seam used by the TUI: UI actions create jobs, start them through the job runner, display projected progress, and can request cooperative cancellation between files.
 
-In the TUI, Space marks/unmarks the selected file in a persisted default selection set for the current root. Press `t` on a source root, move to a destination root, and press Enter to create a dry-run transfer plan from those marks. Esc cancels the destination selection.
+In the Lospec500-themed TUI, Space marks/unmarks the selected file in a persisted default selection set for the current root. Press `s` or `h` to start local scan/hash jobs for a root, `c` to request cancellation, `v` to rotate file columns, `t` on a source root, move to a destination root, and press Enter to create a dry-run transfer plan from those marks. Esc cancels the destination selection.
 
 `transfer plan SOURCE DEST` reads the source root's default TUI selection set, compares those marked paths against the destination root's current indexed observations, stores a durable transfer plan, records a `transfer_plan` job with append-only events, and prints a dry-run summary. It never copies or overwrites files. Initial actions are `copy`, `skip`, `verify_needed`, `conflict`, and `unavailable`.
 
@@ -119,16 +123,17 @@ gremlin target inspect nas01:/mnt/archive
 gremlin target inspect https://example.invalid/listing.json
 ```
 
-Use `--kind local-path|file-url|ssh|url` only when you want to force interpretation. `target add` creates or reuses the matching machine/root record, and `status TARGET` gives a fast projected summary when that root is already known.
+Use `--kind local-path|file-url|ssh|url` only when you want to force interpretation. `target add` creates or reuses the matching machine/root record, and `status TARGET` gives a fast projected summary when that root is already known. SSH targets may be written as `host:/path` or `host:`; `host:` means the login default directory and is stored as `~`.
 
-Most scan/hash/verify commands print a compact summary plus capped highlights. Use `--details` and `--limit N` to control result detail.
+Most scan/hash/verify commands print a compact summary plus capped highlights. Use `--details` and `--limit N` to control result detail. `--json` is available for `status`, `scan`, `hash`, and `verify`.
 
 ## Development Notes
 
 Future seams deliberately left open:
 
-- SSH remote dispatch: run `gremlin worker hash ... --jsonl --out ...` remotely, then copy JSONL back for import.
-- Manifest imports: add SFV/CFV checksum manifests and PAR2 file-list extraction as checksum collection sources.
+- SSH remote dispatch: run `gremlin worker hash ... --jsonl --out ...` remotely, stream progress, and import results without manual file shuffling.
+- Remote browsing: cache directory observations, let `host:` start at the default remote location, navigate from there, and promote browsed directories into tracked roots.
+- Manifest reconciliation: use imported SFV/CFV/PAR2 checksum collections as verification baselines where possible.
 - SMB path mapping: add machine/root mapping without changing content identity.
 - Transfer planning/copying: persisted dry-run root-to-root plans, job events, CLI inspection, streamed hash-checked local copy execution, and optional paranoid readback exist for TUI selections; next slices should add richer TUI plan browsing, checksum collection comparisons, and resumable copy checkpoints.
 - Seamless resume: make interrupted remote browsing, hashing, importing, and future copy jobs restart from durable job/event state instead of requiring manual cleanup.
@@ -138,5 +143,5 @@ Future seams deliberately left open:
 ## Known v0 Limits
 
 - Path storage uses UTF-8 lossy display strings; raw non-UTF-8 Unix path support should be added later.
-- Import preserves evidence and checksum entries but does not perform full reconciliation.
+- Import preserves evidence and checksum entries. Target-aware worker imports can update projected root state for completed hash events, but full reconciliation from arbitrary checksum collections is not implemented.
 - No deletion, daemon, remote SSH dispatch, or metadata extraction is implemented. Transfer execution is local-only and intentionally conservative.

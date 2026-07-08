@@ -44,6 +44,8 @@
 - Add safer handling for partial imports and duplicate event streams.
 - Track resumable worker/import state so interrupted remote hash jobs can continue without starting over.
 - Design remote browse/status around cached directory observations so flaky remote access does not make the UI useless.
+- Add cached directory navigation for SSH roots, starting at the default `host:` location.
+- Add a TUI flow to promote a browsed remote directory into a tracked root.
 
 ## Transfer Planning
 

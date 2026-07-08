@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_SSH_PATH: &str = "~";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum TargetKind {
@@ -101,11 +103,16 @@ fn parse_file_url(input: &str) -> anyhow::Result<ParsedTarget> {
 
 fn parse_ssh_target(input: &str) -> anyhow::Result<ParsedTarget> {
     let Some((machine, path)) = input.split_once(':') else {
-        anyhow::bail!("SSH target must look like host:/path");
+        anyhow::bail!("SSH target must look like host:/path or host:");
     };
-    if machine.is_empty() || path.is_empty() {
-        anyhow::bail!("SSH target must include both host and path");
+    if machine.is_empty() {
+        anyhow::bail!("SSH target must include a host");
     }
+    let path = if path.is_empty() {
+        DEFAULT_SSH_PATH
+    } else {
+        path
+    };
     Ok(ParsedTarget {
         original: input.to_string(),
         kind: TargetKind::Ssh,
@@ -145,11 +152,10 @@ fn looks_like_ssh_target(input: &str) -> bool {
     if input.starts_with('/') || input.starts_with("./") || input.starts_with("../") {
         return false;
     }
-    let Some((host, path)) = input.split_once(':') else {
+    let Some((host, _path)) = input.split_once(':') else {
         return false;
     };
     !host.is_empty()
-        && !path.is_empty()
         && !host.contains('/')
         && host
             .chars()
@@ -180,6 +186,14 @@ mod tests {
         assert_eq!(target.kind, TargetKind::Ssh);
         assert_eq!(target.machine_hint.as_deref(), Some("nas01"));
         assert_eq!(target.path, "/mnt/archive");
+    }
+
+    #[test]
+    fn infers_ssh_default_location() {
+        let target = parse_target("nas01:", None).unwrap();
+        assert_eq!(target.kind, TargetKind::Ssh);
+        assert_eq!(target.machine_hint.as_deref(), Some("nas01"));
+        assert_eq!(target.path, DEFAULT_SSH_PATH);
     }
 
     #[test]

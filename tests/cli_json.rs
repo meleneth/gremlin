@@ -108,3 +108,59 @@ fn status_emits_json_for_known_and_unknown_targets() {
     assert_eq!(unknown["kind"], "local_path");
     assert!(unknown["next"].as_str().unwrap().contains("target add"));
 }
+
+#[test]
+fn import_events_can_project_into_default_ssh_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("gremlin.db");
+    let jsonl = dir.path().join("remote.jsonl");
+    let event = serde_json::json!({
+        "event_kind": "hash_completed",
+        "job_id": "job_remote",
+        "sequence": 1,
+        "created_at": "2026-07-07T00:00:00Z",
+        "payload": {
+            "type": "hash_completed",
+            "relative_path": "folder/a.txt",
+            "basename": "a.txt",
+            "parent_path": "folder",
+            "size_bytes": 5,
+            "modified_at": "2026-07-07T00:00:00Z",
+            "blake3": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "sha256": "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss"
+        }
+    });
+    std::fs::write(&jsonl, format!("{}\n", event)).unwrap();
+
+    gremlin()
+        .args(["--no-config", "--db", db.to_str().unwrap(), "init"])
+        .assert()
+        .success();
+    gremlin()
+        .args([
+            "--no-config",
+            "--db",
+            db.to_str().unwrap(),
+            "import-events",
+            jsonl.to_str().unwrap(),
+            "--target",
+            "nas01:",
+        ])
+        .assert()
+        .success();
+
+    let status = command_json(&[
+        "--no-config",
+        "--db",
+        db.to_str().unwrap(),
+        "--json",
+        "status",
+        "nas01:",
+    ]);
+    assert_eq!(status["known"], true);
+    assert_eq!(status["kind"], "ssh");
+    assert_eq!(status["path"], "~");
+    assert_eq!(status["files"], 1);
+    assert_eq!(status["content_objects"], 1);
+    assert_eq!(status["latest_job"]["kind"], "import_events");
+}
