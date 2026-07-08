@@ -1143,7 +1143,7 @@ pub fn hash_file(root: &Path, path: &Path) -> anyhow::Result<HashResult> {
         size_bytes: meta.size_bytes,
         modified_at: meta.modified_at,
         blake3: blake3_hasher.finalize().to_hex().to_string(),
-        sha256: format!("{:x}", sha256_hasher.finalize()),
+        sha256: bytes_to_hex(sha256_hasher.finalize()),
     })
 }
 
@@ -1181,7 +1181,7 @@ fn chunk_hash_file(
                     chunk_index,
                     offset_bytes: chunk_offset,
                     size_bytes: chunk_bytes,
-                    digest: format!("{:x}", chunk_hasher.compute()),
+                    digest: format!("{:x}", chunk_hasher.finalize()),
                 });
                 chunk_index += 1;
                 chunk_offset += chunk_bytes;
@@ -1195,7 +1195,7 @@ fn chunk_hash_file(
             chunk_index,
             offset_bytes: chunk_offset,
             size_bytes: chunk_bytes,
-            digest: format!("{:x}", chunk_hasher.compute()),
+            digest: format!("{:x}", chunk_hasher.finalize()),
         });
     }
 
@@ -1815,6 +1815,17 @@ fn print_scan_deltas(deltas: &[ScanDelta], options: OutputOptions) {
             delta.previous_modified_at.as_deref().unwrap_or("-")
         );
     }
+}
+
+fn bytes_to_hex(bytes: impl AsRef<[u8]>) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = bytes.as_ref();
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 #[cfg(test)]

@@ -564,7 +564,7 @@ async fn run_loop(
         let transfer_progress = latest_transfer_progress(&events);
 
         terminal.draw(|frame| {
-            let area = frame.size();
+            let area = frame.area();
             frame.render_widget(Block::default().style(theme::base()), area);
             let vertical = Layout::default()
                 .direction(Direction::Vertical)

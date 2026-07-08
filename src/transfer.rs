@@ -885,7 +885,7 @@ fn copy_ssh_to_local_chunked(
     Ok(CopyHashResult {
         bytes: copied,
         blake3: blake3_hasher.finalize().to_hex().to_string(),
-        sha256: format!("{:x}", sha256_hasher.finalize()),
+        sha256: bytes_to_hex(sha256_hasher.finalize()),
     })
 }
 
@@ -1402,7 +1402,7 @@ fn hash_stream_to_writer(
     Ok(CopyHashResult {
         bytes,
         blake3: blake3_hasher.finalize().to_hex().to_string(),
-        sha256: format!("{:x}", sha256_hasher.finalize()),
+        sha256: bytes_to_hex(sha256_hasher.finalize()),
     })
 }
 
@@ -1436,6 +1436,17 @@ fn verify_copy_hash(
         }
     }
     Ok(())
+}
+
+fn bytes_to_hex(bytes: impl AsRef<[u8]>) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let bytes = bytes.as_ref();
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 fn build_transfer_plan(
