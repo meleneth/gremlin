@@ -126,6 +126,7 @@ struct AppState {
 struct PlanSnapshot {
     plan_id: String,
     source_root_id: String,
+    status: String,
     source_name: String,
     dest_name: String,
     summary: Vec<db::TransferPlanActionSummary>,
@@ -308,14 +309,7 @@ async fn run_loop(
                     if state.transfer_run_plan_id.as_deref() == Some(plan_id.as_str()) {
                         state.transfer_run_plan_id = None;
                     }
-                    if let Some(plan) = state
-                        .last_plan
-                        .as_mut()
-                        .filter(|plan| plan.plan_id == plan_id)
-                    {
-                        plan.summary = db::transfer_plan_action_summary(conn, &plan_id)?;
-                        plan.entries = db::transfer_plan_entries(conn, &plan_id)?;
-                    }
+                    refresh_last_plan(conn, &mut state, &plan_id)?;
                     state.status = status;
                 }
             }
@@ -452,6 +446,13 @@ async fn run_loop(
                     KeyCode::Char('t') => {
                         start_transfer_plan_selection(roots.get(state.selected_root), &mut state);
                     }
+                    KeyCode::Char('p') => {
+                        load_latest_transfer_plan(
+                            conn,
+                            roots.get(state.selected_root),
+                            &mut state,
+                        )?;
+                    }
                     KeyCode::Char('r') => {
                         run_current_transfer_plan(db_path, job_tx.clone(), &mut state);
                     }
@@ -503,7 +504,7 @@ fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "  q quit | Tab panes | arrows move | Space mark | s scan | h hash | c cancel | t plan | Enter | r run | a accept | d drop",
+            "  q quit | Tab panes | arrows move | Space mark | s scan | h hash | c cancel | t plan | Enter | p load | r run | a accept | d drop",
             theme::muted(),
         ),
     ]))
@@ -639,6 +640,15 @@ fn root_display_name(root: &db::RootRow) -> String {
         .to_string()
 }
 
+fn display_name_from_path(path: &str) -> String {
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
 fn render_detail_panel(frame: &mut ratatui::Frame<'_>, area: Rect, data: DetailData<'_>) {
     let root_lines = match (data.root, data.summary) {
         (Some(root), Some(summary)) => format!(
@@ -678,8 +688,9 @@ fn render_detail_panel(frame: &mut ratatui::Frame<'_>, area: Rect, data: DetailD
     };
     let plan_lines = if let Some(plan) = data.plan {
         format!(
-            "Plan: {} | {} -> {}\n{}",
+            "Plan: {} | {} | {} -> {}\n{}",
             short_id(&plan.plan_id),
+            plan.status,
             truncate(&plan.source_name, 18),
             truncate(&plan.dest_name, 18),
             plan_summary_line(&plan.summary)
@@ -1287,6 +1298,7 @@ fn create_transfer_plan_from_selection(
             state.last_plan = Some(PlanSnapshot {
                 plan_id: result.plan_id.clone(),
                 source_root_id: source.id.clone(),
+                status: "planned".to_string(),
                 source_name: root_display_name(source),
                 dest_name: root_display_name(dest),
                 summary,
@@ -1301,6 +1313,39 @@ fn create_transfer_plan_from_selection(
             state.status = format!("transfer plan failed: {err}");
         }
     }
+    Ok(())
+}
+
+fn load_latest_transfer_plan(
+    conn: &Connection,
+    selected_root: Option<&db::RootRow>,
+    state: &mut AppState,
+) -> anyhow::Result<()> {
+    let Some(root) = selected_root else {
+        state.status = "No root selected".to_string();
+        return Ok(());
+    };
+    let Some(plan) = db::recent_transfer_plans(conn, 100)?
+        .into_iter()
+        .find(|plan| plan.source_root_id == root.id || plan.dest_root_id == root.id)
+    else {
+        state.status = format!("No transfer plans found for {}", root_display_name(root));
+        return Ok(());
+    };
+    let summary = db::transfer_plan_action_summary(conn, &plan.id)?;
+    let entries = db::transfer_plan_entries(conn, &plan.id)?;
+    state.last_plan = Some(PlanSnapshot {
+        plan_id: plan.id.clone(),
+        source_root_id: plan.source_root_id.clone(),
+        status: plan.status.clone(),
+        source_name: display_name_from_path(&plan.source_path),
+        dest_name: display_name_from_path(&plan.dest_path),
+        summary,
+        entries,
+    });
+    state.plan_offset = 0;
+    state.focus = FocusPane::Plan;
+    state.status = format!("loaded transfer plan {}", short_id(&plan.id));
     Ok(())
 }
 
@@ -1387,6 +1432,9 @@ fn refresh_last_plan(conn: &Connection, state: &mut AppState, plan_id: &str) -> 
         .as_mut()
         .filter(|plan| plan.plan_id == plan_id)
     {
+        if let Some(row) = db::transfer_plan_by_id(conn, plan_id)? {
+            plan.status = row.status;
+        }
         plan.summary = db::transfer_plan_action_summary(conn, plan_id)?;
         plan.entries = db::transfer_plan_entries(conn, plan_id)?;
         if state.plan_offset >= plan.entries.len() {
@@ -1522,6 +1570,7 @@ mod tests {
         let plan = PlanSnapshot {
             plan_id: "plan_1".to_string(),
             source_root_id: "source_root".to_string(),
+            status: "planned".to_string(),
             source_name: "source".to_string(),
             dest_name: "dest".to_string(),
             summary: Vec::new(),
