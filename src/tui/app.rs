@@ -62,6 +62,7 @@ pub(super) async fn run_loop(
                 selected_temporary: selected_temporary_browse(&state),
                 summary: None,
                 selection: None,
+                detail_content: None,
                 events: &loading_events,
                 root_count: visible_root_count(&state, 0),
                 transfer_progress: None,
@@ -189,6 +190,7 @@ pub(super) async fn run_loop(
         };
         let transfer_progress = latest_transfer_progress(&events);
         state.sync_detail_selection(detail_key, files.len(), Instant::now());
+        let detail_content = selected_file_content(conn, files.get(state.detail_file_offset))?;
         let selected_temporary = selected_temporary_browse(&state);
 
         terminal.draw(|frame| {
@@ -202,6 +204,7 @@ pub(super) async fn run_loop(
                     selected_temporary,
                     summary: summary.as_ref(),
                     selection: selection_summary.as_ref(),
+                    detail_content: detail_content.as_ref(),
                     events: &events,
                     root_count,
                     transfer_progress,
@@ -461,6 +464,16 @@ pub(super) async fn run_loop(
         }
     }
     Ok(TuiExit::Normal)
+}
+
+fn selected_file_content(
+    conn: &Connection,
+    file: Option<&FileViewRow>,
+) -> anyhow::Result<Option<db::ContentObjectRow>> {
+    let Some(content_id) = file.and_then(|file| file.content_id.as_deref()) else {
+        return Ok(None);
+    };
+    Ok(db::content_object_by_id(conn, content_id)?)
 }
 
 fn request_immediate_quit(conn: &Connection, state: &mut AppState) -> anyhow::Result<()> {

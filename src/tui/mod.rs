@@ -410,6 +410,7 @@ struct DetailData<'a> {
     summary: Option<&'a db::RootSummary>,
     selection: Option<&'a db::SelectionSummary>,
     file: Option<&'a FileViewRow>,
+    content: Option<&'a db::ContentObjectRow>,
     selected_paths: &'a BTreeSet<String>,
     plan: Option<&'a PlanSnapshot>,
     collection: Option<&'a CollectionSnapshot>,

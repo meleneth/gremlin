@@ -920,6 +920,50 @@ fn formats_plan_review_hint_and_count() {
 }
 
 #[test]
+fn detail_pane_renders_selected_file_hashes() {
+    let selected_paths = BTreeSet::new();
+    let file = FileViewRow {
+        relative_path: "photos/foo.png".to_string(),
+        size_bytes: 10,
+        modified_at: Some("2026-07-08T12:00:00Z".to_string()),
+        content_id: Some("content_1234567890".to_string()),
+        status: "present".to_string(),
+        kind: FileKind::File,
+    };
+    let content = db::ContentObjectRow {
+        size_bytes: 10,
+        blake3: Some("blake3-hash-value".to_string()),
+        sha256: Some("sha256-hash-value".to_string()),
+    };
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 100, 20));
+
+    DetailPane {
+        data: DetailData {
+            root: None,
+            temporary_browse: None,
+            persisted_browse_dir: None,
+            summary: None,
+            selection: None,
+            file: Some(&file),
+            content: Some(&content),
+            selected_paths: &selected_paths,
+            plan: None,
+            collection: None,
+            transfer_progress: None,
+        },
+    }
+    .render(buffer.area, &mut buffer);
+
+    let text = buffer
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("BLAKE3: blake3-hash-value"));
+    assert!(text.contains("SHA-256: sha256-hash-value"));
+}
+
+#[test]
 fn app_screen_renders_empty_state_widgets() {
     let state = AppState::default();
     let selected_paths = BTreeSet::new();
@@ -934,6 +978,7 @@ fn app_screen_renders_empty_state_widgets() {
         selected_temporary: None,
         summary: None,
         selection: None,
+        detail_content: None,
         events: &[],
         root_count: 0,
         transfer_progress: None,

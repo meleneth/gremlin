@@ -133,10 +133,12 @@ pub fn run_transfer_plan(
                 result.copied += 1;
                 result.bytes_copied += bytes;
                 bytes_completed += entry.size_bytes;
+                db::refresh_root_current_size(conn, &dest_root.id)?;
             }
             Ok(CopyOutcome::Skipped) => {
                 result.skipped += 1;
                 bytes_completed += entry.size_bytes;
+                db::refresh_root_current_size(conn, &dest_root.id)?;
             }
             Err(err) => {
                 result.errors += 1;

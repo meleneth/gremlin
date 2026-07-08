@@ -44,8 +44,9 @@ impl Widget for DetailPane<'_> {
             }
         };
         let file_lines = if let Some(file) = data.file {
+            let hash_lines = file_hash_lines(data.content);
             format!(
-                "File: {}\nSize: {} ({} bytes) | Status: {} | Marked: {}\nModified: {} | Content: {} | Metadata: not extracted yet",
+                "File: {}\nSize: {} ({} bytes) | Status: {} | Marked: {}\nModified: {} | Content: {}\n{}Metadata: not extracted yet",
                 file.relative_path,
                 human_size(file.size_bytes as u64),
                 file.size_bytes,
@@ -56,10 +57,11 @@ impl Widget for DetailPane<'_> {
                     "no"
                 },
                 file.modified_at.as_deref().unwrap_or("-"),
-                file.content_id.as_deref().map(short_id).unwrap_or("stat-only")
+                file.content_id.as_deref().map(short_id).unwrap_or("stat-only"),
+                hash_lines
             )
         } else {
-            "File: -\nSize: - | Status: - | Modified: -\nContent: - | Metadata: not extracted yet"
+            "File: -\nSize: - | Status: - | Modified: -\nContent: -\nHashes: -\nMetadata: not extracted yet"
                 .to_string()
         };
         let plan_lines = if let Some(plan) = data.plan {
@@ -97,6 +99,17 @@ impl Widget for DetailPane<'_> {
             .block(panel_block("Details", false))
             .render(area, buf);
     }
+}
+
+fn file_hash_lines(content: Option<&db::ContentObjectRow>) -> String {
+    let Some(content) = content else {
+        return "Hashes: -\n".to_string();
+    };
+    format!(
+        "BLAKE3: {}\nSHA-256: {}\n",
+        content.blake3.as_deref().unwrap_or("-"),
+        content.sha256.as_deref().unwrap_or("-")
+    )
 }
 
 fn collection_detail_lines(collection: &CollectionSnapshot) -> String {
