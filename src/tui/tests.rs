@@ -176,7 +176,7 @@ fn command_hints_explain_destination_selection() {
 fn command_hints_include_root_verify() {
     let state = AppState::default();
 
-    assert!(active_command_hint(&state, false).contains("V verify"));
+    assert!(active_command_hint(&state, false).contains("v verify"));
 }
 
 #[test]

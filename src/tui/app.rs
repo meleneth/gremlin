@@ -181,7 +181,7 @@ pub(super) async fn run_loop(
                         break;
                     }
                     KeyCode::Tab => state.focus = state.focus.next(),
-                    KeyCode::Char('v') => {
+                    KeyCode::Char('f') => {
                         state.file_view = state.file_view.next();
                         state.status = format!("file fields: {}", state.file_view.label());
                     }
@@ -222,7 +222,7 @@ pub(super) async fn run_loop(
                             &mut state,
                         )?;
                     }
-                    KeyCode::Char('V') => {
+                    KeyCode::Char('v') => {
                         queue_selected_root(
                             conn,
                             db_path,
