@@ -13,7 +13,7 @@ pub(super) fn queue_selected_root(
         return Ok(());
     };
     let job_id = db::queue_file_job(conn, kind, std::path::Path::new(&root.path), machine_label)?;
-    state.status = format!("started {kind} job {job_id}");
+    state.background_started(format!("started {kind} job {job_id}"));
     spawn_job_runner(
         db_path.to_path_buf(),
         job_id,

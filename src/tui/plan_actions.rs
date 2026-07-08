@@ -20,11 +20,11 @@ pub(super) fn run_current_transfer_plan(
     let plan_id = plan.plan_id.clone();
     state.transfer_run_plan_id = Some(plan_id.clone());
     state.focus = FocusPane::Plan;
-    state.status = format!(
+    state.background_started(format!(
         "running transfer {} ({} copy entries)",
         short_id(&plan_id),
         copy_entries
-    );
+    ));
     spawn_transfer_runner(db_path.to_path_buf(), plan_id, job_tx);
 }
 

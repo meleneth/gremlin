@@ -7,6 +7,9 @@ pub(super) struct RootsPane<'a> {
 impl Widget for RootsPane<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let root_count = visible_root_count(self.state, self.roots.len());
+        let needs_attention = self.state.pending_delete_root_id.is_some()
+            || self.state.pending_import.is_some()
+            || self.state.transfer_source_root_id.is_some();
         let items = if root_count == 0 {
             vec![ListItem::new(
                 "No roots yet\nRun `gremlin /path` or `gremlin target add /path`",
@@ -49,8 +52,17 @@ impl Widget for RootsPane<'_> {
             rows
         };
         List::new(items)
-            .style(theme::panel())
-            .block(focus_block("Roots", FocusPane::Roots, self.state.focus))
+            .style(if needs_attention {
+                theme::attention()
+            } else {
+                theme::panel()
+            })
+            .block(attention_focus_block(
+                "Roots",
+                FocusPane::Roots,
+                self.state.focus,
+                needs_attention,
+            ))
             .render(area, buf);
     }
 }

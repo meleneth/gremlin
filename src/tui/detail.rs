@@ -130,7 +130,7 @@ impl Widget for InfoBar<'_> {
                 )
             })
             .unwrap_or_else(|| self.state.status.clone());
-        let text = format!(
+        let context = format!(
             "focus {:?} | roots {} | marked {} | plan {} | root {} | file {} | {} | {}",
             self.state.focus,
             self.data.root_count,
@@ -144,7 +144,23 @@ impl Widget for InfoBar<'_> {
             truncate(&event, 24),
             status
         );
-        Paragraph::new(text)
+        let mut lines = vec![Line::from(context)];
+        let mut activity_lines = self
+            .state
+            .activities
+            .iter()
+            .rev()
+            .take(3)
+            .collect::<Vec<_>>();
+        activity_lines.reverse();
+        for activity in activity_lines {
+            lines.push(Line::from(vec![
+                Span::styled(activity.level.label(), activity.level.style()),
+                Span::raw(" "),
+                Span::styled(truncate(&activity.message, 180), activity.level.style()),
+            ]));
+        }
+        Paragraph::new(lines)
             .style(theme::panel())
             .block(panel_block("Info", true))
             .render(area, buf);

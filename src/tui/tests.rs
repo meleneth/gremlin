@@ -173,6 +173,119 @@ fn command_hints_explain_destination_selection() {
 }
 
 #[test]
+fn transfer_plan_selection_moves_focus_to_roots() {
+    let root = db::RootRow {
+        id: "root_1".to_string(),
+        machine_id: "machine_1".to_string(),
+        path: "/tmp/source".to_string(),
+        label: None,
+        current_size_bytes: 0,
+        latest_job_kind: None,
+        latest_job_status: None,
+        latest_job_phase: None,
+    };
+    let mut state = AppState {
+        focus: FocusPane::Files,
+        ..AppState::default()
+    };
+
+    start_transfer_plan_selection(Some(&root), &mut state);
+
+    assert_eq!(state.transfer_source_root_id.as_deref(), Some("root_1"));
+    assert_eq!(state.focus, FocusPane::Roots);
+    assert!(state.status.contains("choose destination root"));
+}
+
+#[test]
+fn transfer_plan_destination_uses_visible_persisted_root_with_temporary_browse() {
+    let conn = Connection::open_in_memory().unwrap();
+    db::init_schema(&conn).unwrap();
+    let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+    let source_dir = tempfile::tempdir().unwrap();
+    let dest_dir = tempfile::tempdir().unwrap();
+    let source_id =
+        db::ensure_root(&conn, &machine_id, &source_dir.path().to_string_lossy()).unwrap();
+    let dest_id = db::ensure_root(&conn, &machine_id, &dest_dir.path().to_string_lossy()).unwrap();
+    db::insert_path_observation(
+        &conn,
+        db::PathObservationInput {
+            machine_id: &machine_id,
+            root_id: &source_id,
+            relative_path: "a.txt",
+            basename: "a.txt",
+            parent_path: ".",
+            size_bytes: 5,
+            modified_at: None,
+            content_id: None,
+        },
+    )
+    .unwrap();
+    db::toggle_selection_entry(&conn, &source_id, "a.txt").unwrap();
+    let roots = db::roots(&conn).unwrap();
+    let dest_index = roots
+        .iter()
+        .position(|root| root.id == dest_id)
+        .expect("destination root should be visible");
+    let mut state = AppState {
+        selected_root: visible_index_for_persisted(
+            &AppState {
+                temporary_browse: Some(TemporaryBrowse {
+                    label: "nas01:".to_string(),
+                    machine_id: "machine_remote".to_string(),
+                    root_path: "~".to_string(),
+                    current_path: "~".to_string(),
+                    entries: Vec::new(),
+                    browse_provider: None,
+                    import_provider: None,
+                }),
+                ..AppState::default()
+            },
+            dest_index,
+        ),
+        transfer_source_root_id: Some(source_id.clone()),
+        temporary_browse: Some(TemporaryBrowse {
+            label: "nas01:".to_string(),
+            machine_id: "machine_remote".to_string(),
+            root_path: "~".to_string(),
+            current_path: "~".to_string(),
+            entries: Vec::new(),
+            browse_provider: None,
+            import_provider: None,
+        }),
+        ..AppState::default()
+    };
+
+    create_transfer_plan_from_selection(&conn, &roots, &mut state).unwrap();
+
+    let plan = state.last_plan.as_ref().unwrap();
+    assert_eq!(
+        plan.dest_name,
+        display_name_from_path(&dest_dir.path().to_string_lossy())
+    );
+    assert_eq!(plan.entries.len(), 1);
+    assert_eq!(plan.entries[0].action, "copy");
+    assert_eq!(state.transfer_source_root_id, None);
+    assert_eq!(dest_id, roots[dest_index].id);
+}
+
+#[test]
+fn app_state_tracks_activity_and_background_jobs() {
+    let mut state = AppState::default();
+
+    state.background_started("started scan job_1");
+    assert_eq!(state.active_background_jobs, 1);
+    assert_eq!(state.status, "started scan job_1");
+    assert_eq!(state.activities.back().unwrap().level, ActivityLevel::Info);
+
+    state.background_finished(ActivityLevel::Success, "completed scan job_1");
+    assert_eq!(state.active_background_jobs, 0);
+    assert_eq!(
+        state.activities.back().unwrap().level,
+        ActivityLevel::Success
+    );
+}
+
+#[test]
 fn persisted_root_enter_and_backspace_navigate_directories() {
     let mut state = AppState::default();
     let dir = FileViewRow {

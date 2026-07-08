@@ -23,7 +23,7 @@ impl Widget for AppScreen<'_> {
                 Constraint::Length(4),
                 Constraint::Min(5),
                 Constraint::Length(14),
-                Constraint::Length(3),
+                Constraint::Length(6),
                 Constraint::Length(6),
             ])
             .split(area);

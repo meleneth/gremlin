@@ -15,6 +15,7 @@ pub const BLUE: Color = Color::Rgb(0x33, 0x88, 0xde);
 pub const RED: Color = Color::Rgb(0xec, 0x27, 0x3f);
 pub const ORANGE: Color = Color::Rgb(0xe9, 0x85, 0x37);
 pub const SELECT: Color = Color::Rgb(0x6b, 0x26, 0x43);
+pub const ATTENTION: Color = Color::Rgb(0x7a, 0x43, 0x1d);
 
 pub fn base() -> Style {
     Style::default().fg(TEXT).bg(BG)
@@ -26,6 +27,10 @@ pub fn panel() -> Style {
 
 pub fn panel_dark() -> Style {
     Style::default().fg(TEXT).bg(PANEL_DARK)
+}
+
+pub fn attention() -> Style {
+    Style::default().fg(TEXT).bg(ATTENTION)
 }
 
 pub fn active_title() -> Style {

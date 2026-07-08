@@ -8,6 +8,7 @@ pub(super) struct FilesPane<'a> {
 impl Widget for FilesPane<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let visible = self.files.iter().enumerate().skip(self.state.file_offset);
+        let needs_attention = self.state.pending_import.is_some();
         let items = if self.files.is_empty() {
             let message = if selected_temporary_browse(self.state).is_some() {
                 "No files in this remote directory"
@@ -37,8 +38,17 @@ impl Widget for FilesPane<'_> {
             rows
         };
         List::new(items)
-            .style(theme::panel())
-            .block(focus_block("Files", FocusPane::Files, self.state.focus))
+            .style(if needs_attention {
+                theme::attention()
+            } else {
+                theme::panel()
+            })
+            .block(attention_focus_block(
+                "Files",
+                FocusPane::Files,
+                self.state.focus,
+                needs_attention,
+            ))
             .render(area, buf);
     }
 }

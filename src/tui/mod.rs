@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -39,9 +39,67 @@ struct AppState {
     retarget_draft: Option<RetargetDraft>,
     pending_delete_root_id: Option<String>,
     pending_import: Option<PendingTemporaryImport>,
+    active_background_jobs: usize,
+    activities: VecDeque<ActivityMessage>,
     last_plan: Option<PlanSnapshot>,
     temporary_browse: Option<TemporaryBrowse>,
     root_browse_dirs: BTreeMap<String, String>,
+}
+
+impl AppState {
+    fn set_status(&mut self, level: ActivityLevel, message: impl Into<String>) {
+        let message = message.into();
+        self.status = message.clone();
+        self.activities
+            .push_back(ActivityMessage { level, message });
+        while self.activities.len() > 50 {
+            self.activities.pop_front();
+        }
+    }
+
+    fn background_started(&mut self, message: impl Into<String>) {
+        self.active_background_jobs += 1;
+        self.set_status(ActivityLevel::Info, message);
+    }
+
+    fn background_finished(&mut self, level: ActivityLevel, message: impl Into<String>) {
+        self.active_background_jobs = self.active_background_jobs.saturating_sub(1);
+        self.set_status(level, message);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActivityLevel {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+impl ActivityLevel {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Success => "ok",
+            Self::Warning => "warn",
+            Self::Error => "err",
+        }
+    }
+
+    fn style(self) -> Style {
+        match self {
+            Self::Info => theme::muted(),
+            Self::Success => theme::ok(),
+            Self::Warning => theme::warn(),
+            Self::Error => theme::error(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ActivityMessage {
+    level: ActivityLevel,
+    message: String,
 }
 
 pub type BrowseProvider =
@@ -347,6 +405,23 @@ fn focus_block(title: &'static str, pane: FocusPane, active: FocusPane) -> Block
         .style(theme::panel())
         .border_style(Style::default().fg(border).bg(theme::PANEL))
         .title_style(title_style)
+}
+
+fn attention_focus_block(
+    title: &'static str,
+    pane: FocusPane,
+    active: FocusPane,
+    attention: bool,
+) -> Block<'static> {
+    if !attention {
+        return focus_block(title, pane, active);
+    }
+    Block::default()
+        .title(pane.title(title, active))
+        .borders(Borders::ALL)
+        .style(theme::attention())
+        .border_style(Style::default().fg(theme::ACCENT).bg(theme::ATTENTION))
+        .title_style(Style::default().fg(theme::TEXT).bg(theme::ATTENTION))
 }
 
 fn file_status_style(status: &str) -> Style {

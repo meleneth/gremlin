@@ -43,15 +43,36 @@ pub(super) async fn run_loop(
     loop {
         while let Ok(message) = job_rx.try_recv() {
             match message {
-                TuiMessage::Status(message) => state.status = message,
+                TuiMessage::Status(message) => {
+                    let level = if message.contains("failed") || message.contains(" error") {
+                        ActivityLevel::Error
+                    } else {
+                        ActivityLevel::Info
+                    };
+                    state.background_finished(level, message);
+                }
                 TuiMessage::TransferFinished { plan_id, status } => {
                     if state.transfer_run_plan_id.as_deref() == Some(plan_id.as_str()) {
                         state.transfer_run_plan_id = None;
                     }
                     refresh_last_plan(conn, &mut state, &plan_id)?;
-                    state.status = status;
+                    let level = if status.contains("failed") {
+                        ActivityLevel::Error
+                    } else if status.contains("canceled") || !status.contains("errors 0") {
+                        ActivityLevel::Warning
+                    } else {
+                        ActivityLevel::Success
+                    };
+                    state.background_finished(level, status);
                 }
-                TuiMessage::ImportFinished(status) => state.status = status,
+                TuiMessage::ImportFinished(status) => {
+                    let level = if status.contains("failed") {
+                        ActivityLevel::Error
+                    } else {
+                        ActivityLevel::Success
+                    };
+                    state.background_finished(level, status);
+                }
                 TuiMessage::TemporaryTransferSourceImported {
                     root_id,
                     selected_relative_path,
@@ -66,7 +87,7 @@ pub(super) async fn run_loop(
                     )?;
                     state.transfer_source_root_id = Some(root_id);
                     state.focus = FocusPane::Roots;
-                    state.status = status;
+                    state.background_finished(ActivityLevel::Success, status);
                 }
             }
         }
@@ -146,7 +167,19 @@ pub(super) async fn run_loop(
                     continue;
                 }
                 match key.code {
-                    KeyCode::Char('q') => break,
+                    KeyCode::Char('q') => {
+                        if state.active_background_jobs > 0 {
+                            state.set_status(
+                                ActivityLevel::Warning,
+                                format!(
+                                    "{} background job(s) still running; wait or cancel before quitting",
+                                    state.active_background_jobs
+                                ),
+                            );
+                            continue;
+                        }
+                        break;
+                    }
                     KeyCode::Tab => state.focus = state.focus.next(),
                     KeyCode::Char('v') => {
                         state.file_view = state.file_view.next();

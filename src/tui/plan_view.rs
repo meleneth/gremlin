@@ -6,6 +6,7 @@ pub(super) struct PlanReviewPane<'a> {
 
 impl Widget for PlanReviewPane<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        let needs_attention = self.state.retarget_draft.is_some();
         let items = if let Some(plan) = self.plan {
             let mut rows = vec![ListItem::new(plan_entry_header()).style(theme::header())];
             rows.extend(
@@ -32,8 +33,17 @@ impl Widget for PlanReviewPane<'_> {
             vec![ListItem::new("No transfer plan yet")]
         };
         List::new(items)
-            .style(theme::panel())
-            .block(focus_block("Plan", FocusPane::Plan, self.state.focus))
+            .style(if needs_attention {
+                theme::attention()
+            } else {
+                theme::panel()
+            })
+            .block(attention_focus_block(
+                "Plan",
+                FocusPane::Plan,
+                self.state.focus,
+                needs_attention,
+            ))
             .render(area, buf);
     }
 }

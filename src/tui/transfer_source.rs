@@ -1,14 +1,17 @@
 use super::*;
 pub(super) fn start_transfer_plan_selection(root: Option<&db::RootRow>, state: &mut AppState) {
     let Some(root) = root else {
-        state.status = "No source root selected".to_string();
+        state.set_status(ActivityLevel::Warning, "No source root selected");
         return;
     };
     state.transfer_source_root_id = Some(root.id.clone());
     state.focus = FocusPane::Roots;
-    state.status = format!(
-        "transfer source: {}; choose destination root and press Enter",
-        root_display_name(root)
+    state.set_status(
+        ActivityLevel::Info,
+        format!(
+            "transfer source: {}; choose destination root and press Enter",
+            root_display_name(root)
+        ),
     );
 }
 
@@ -26,7 +29,10 @@ pub(super) fn start_temporary_transfer_source_import(
         return;
     };
     let target = temporary_transfer_import_target(state.focus, browse, selected_file);
-    state.status = format!("importing transfer source {} (fast)", target.remote_path);
+    state.background_started(format!(
+        "importing transfer source {} (fast)",
+        target.remote_path
+    ));
     task::spawn_blocking(move || {
         let message = match provider(ImportMode::Fast, &target.remote_path) {
             Ok(result) => {
@@ -106,7 +112,7 @@ pub(super) fn mark_imported_transfer_source(
 
 pub(super) fn cancel_transfer_plan_selection(state: &mut AppState) {
     if state.transfer_source_root_id.take().is_some() {
-        state.status = "transfer planning canceled".to_string();
+        state.set_status(ActivityLevel::Warning, "transfer planning canceled");
     }
 }
 
@@ -120,11 +126,14 @@ pub(super) fn create_transfer_plan_from_selection(
     };
     let Some(source) = roots.iter().find(|root| root.id == source_root_id) else {
         state.transfer_source_root_id = None;
-        state.status = "transfer source root is no longer visible".to_string();
+        state.set_status(
+            ActivityLevel::Error,
+            "transfer source root is no longer visible",
+        );
         return Ok(());
     };
-    let Some(dest) = roots.get(state.selected_root) else {
-        state.status = "No destination root selected".to_string();
+    let Some(dest) = selected_persisted_root(roots, state) else {
+        state.set_status(ActivityLevel::Warning, "No destination root selected");
         return Ok(());
     };
     match transfer::plan_selected_files(conn, source, dest) {
@@ -143,10 +152,13 @@ pub(super) fn create_transfer_plan_from_selection(
             state.transfer_source_root_id = None;
             state.plan_offset = 0;
             state.focus = FocusPane::Plan;
-            state.status = format!("planned transfer {}", result.plan_id);
+            state.set_status(
+                ActivityLevel::Success,
+                format!("planned transfer {}", result.plan_id),
+            );
         }
         Err(err) => {
-            state.status = format!("transfer plan failed: {err}");
+            state.set_status(ActivityLevel::Error, format!("transfer plan failed: {err}"));
         }
     }
     Ok(())

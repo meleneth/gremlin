@@ -120,7 +120,10 @@ pub(super) fn handle_temporary_import_choice(
         return;
     };
     let remote_path = pending.remote_path;
-    state.status = format!("importing {remote_path} ({})", import_mode_label(mode));
+    state.background_started(format!(
+        "importing {remote_path} ({})",
+        import_mode_label(mode)
+    ));
     task::spawn_blocking(move || {
         let status = match provider(mode, &remote_path) {
             Ok(result) => format!(
