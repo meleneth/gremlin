@@ -13,7 +13,7 @@ pub(super) fn queue_selected_root(
         return Ok(());
     };
     let job_id = queue_root_job(conn, root, kind, selected_paths)?;
-    state.background_started(format!("started {kind} job {job_id}"));
+    state.background_started_job(job_id.clone(), format!("started {kind} job {job_id}"));
     spawn_job_runner(
         db_path.to_path_buf(),
         job_id,

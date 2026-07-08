@@ -1006,6 +1006,21 @@ pub fn request_job_cancel(conn: &Connection, job_id: &str) -> rusqlite::Result<b
     Ok(changed > 0)
 }
 
+pub fn active_jobs(conn: &Connection) -> rusqlite::Result<Vec<JobRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT id, kind, status, machine_id, root_id, created_at, started_at, completed_at,
+               params_json, phase, current_path, files_total, files_seen, files_done,
+               files_skipped, errors, cancel_requested
+        FROM jobs
+        WHERE status IN ('created', 'running')
+        ORDER BY started_at DESC, created_at DESC
+        "#,
+    )?;
+    let rows = stmt.query_map([], job_from_row)?;
+    rows.collect()
+}
+
 pub fn job_cancel_requested(conn: &Connection, job_id: &str) -> rusqlite::Result<bool> {
     conn.query_row(
         "SELECT cancel_requested FROM jobs WHERE id = ?1",

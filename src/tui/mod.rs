@@ -50,6 +50,7 @@ struct AppState {
     pending_import: Option<PendingTemporaryImport>,
     pending_scoped_job: Option<PendingScopedJob>,
     active_background_jobs: usize,
+    active_job_ids: BTreeSet<String>,
     activities: VecDeque<ActivityMessage>,
     last_plan: Option<PlanSnapshot>,
     collection_result: Option<CollectionSnapshot>,
@@ -104,9 +105,24 @@ impl AppState {
         self.set_status(ActivityLevel::Info, message);
     }
 
+    fn background_started_job(&mut self, job_id: impl Into<String>, message: impl Into<String>) {
+        self.active_job_ids.insert(job_id.into());
+        self.background_started(message);
+    }
+
     fn background_finished(&mut self, level: ActivityLevel, message: impl Into<String>) {
         self.active_background_jobs = self.active_background_jobs.saturating_sub(1);
         self.set_status(level, message);
+    }
+
+    fn background_finished_job(
+        &mut self,
+        job_id: &str,
+        level: ActivityLevel,
+        message: impl Into<String>,
+    ) {
+        self.active_job_ids.remove(job_id);
+        self.background_finished(level, message);
     }
 }
 
@@ -361,6 +377,10 @@ impl From<collections::CollectionVerifySummary> for CollectionSnapshot {
 #[derive(Debug)]
 enum TuiMessage {
     Status(String),
+    JobFinished {
+        job_id: String,
+        status: String,
+    },
     TransferFinished {
         plan_id: String,
         status: String,

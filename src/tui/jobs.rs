@@ -42,11 +42,11 @@ pub(super) fn spawn_job_runner(
                 },
             )
         })();
-        let message = match result {
+        let status = match result {
             Ok(()) => format!("completed {kind} job {job_id}"),
             Err(err) => format!("failed {kind} job {job_id}: {err}"),
         };
-        let _ = job_tx.send(TuiMessage::Status(message));
+        let _ = job_tx.send(TuiMessage::JobFinished { job_id, status });
     });
 }
 

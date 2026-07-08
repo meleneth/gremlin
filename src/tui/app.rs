@@ -24,7 +24,16 @@ pub async fn run_with_initial_browse(
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
-    result
+    match result {
+        Ok(TuiExit::QuitNow) => std::process::exit(130),
+        Ok(TuiExit::Normal) => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
+pub(super) enum TuiExit {
+    Normal,
+    QuitNow,
 }
 
 pub(super) async fn run_loop(
@@ -33,7 +42,7 @@ pub(super) async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     _machine_label: Option<String>,
     initial_browse: Option<InitialBrowse>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<TuiExit> {
     let (job_tx, mut job_rx) = mpsc::unbounded_channel::<TuiMessage>();
     let mut state = AppState {
         status: "loading database...".to_string(),
@@ -72,6 +81,14 @@ pub(super) async fn run_loop(
                         ActivityLevel::Info
                     };
                     state.background_finished(level, message);
+                }
+                TuiMessage::JobFinished { job_id, status } => {
+                    let level = if status.contains("failed") || status.contains(" error") {
+                        ActivityLevel::Error
+                    } else {
+                        ActivityLevel::Success
+                    };
+                    state.background_finished_job(&job_id, level, status);
                 }
                 TuiMessage::TransferFinished { plan_id, status } => {
                     if state.transfer_run_plan_id.as_deref() == Some(plan_id.as_str()) {
@@ -195,17 +212,8 @@ pub(super) async fn run_loop(
         if event::poll(Duration::from_millis(250))? {
             if let Event::Key(key) = event::read()? {
                 if is_interrupt_key(key) {
-                    if state.active_background_jobs > 0 {
-                        state.set_status(
-                            ActivityLevel::Warning,
-                            format!(
-                                "{} background job(s) still running; wait or cancel before quitting",
-                                state.active_background_jobs
-                            ),
-                        );
-                        continue;
-                    }
-                    break;
+                    request_immediate_quit(conn, &mut state)?;
+                    return Ok(TuiExit::QuitNow);
                 }
                 if state.file_filter_editing {
                     handle_file_filter_input(&mut state, key.code);
@@ -435,5 +443,119 @@ pub(super) async fn run_loop(
             }
         }
     }
+    Ok(TuiExit::Normal)
+}
+
+fn request_immediate_quit(conn: &Connection, state: &mut AppState) -> anyhow::Result<()> {
+    let mut active_jobs = Vec::new();
+    for job in db::active_jobs(conn)? {
+        active_jobs.push(job);
+    }
+    let known_ids = active_jobs
+        .iter()
+        .map(|job| job.id.clone())
+        .collect::<BTreeSet<_>>();
+    for job_id in state.active_job_ids.difference(&known_ids) {
+        if db::request_job_cancel(conn, job_id)? {
+            append_interrupt_cancel_event(conn, job_id, "unknown", None, 0, 0)?;
+        }
+    }
+    if let Some(plan_id) = state.transfer_run_plan_id.as_deref() {
+        db::update_transfer_plan_status(conn, plan_id, "canceled")?;
+    }
+    let mut requested = 0_usize;
+    for job in active_jobs {
+        if db::request_job_cancel(conn, &job.id)? {
+            requested += 1;
+            append_interrupt_cancel_event(
+                conn,
+                &job.id,
+                &job.kind,
+                job.current_path.as_deref(),
+                job.files_seen as u64,
+                job.errors as u64,
+            )?;
+        }
+        db::complete_job(conn, &job.id, "canceled")?;
+        append_interrupt_canceled_event(
+            conn,
+            &job.id,
+            &job.kind,
+            job.current_path.as_deref(),
+            job.files_seen as u64,
+            job.errors as u64,
+        )?;
+        if job.kind == "transfer_copy" {
+            if let Some(plan_id) = job
+                .params_json
+                .as_deref()
+                .and_then(transfer_plan_id_from_job_params)
+            {
+                db::update_transfer_plan_status(conn, &plan_id, "canceled")?;
+            }
+        }
+    }
+    state.set_status(
+        ActivityLevel::Warning,
+        format!("interrupt requested; cancel marked for {requested} active job(s)"),
+    );
     Ok(())
+}
+
+fn append_interrupt_cancel_event(
+    conn: &Connection,
+    job_id: &str,
+    kind: &str,
+    path: Option<&str>,
+    files_seen: u64,
+    errors: u64,
+) -> anyhow::Result<()> {
+    let envelope = crate::events::EventEnvelope {
+        event_kind: crate::events::EventKind::JobCancelRequested,
+        job_id: Some(job_id.to_string()),
+        sequence: None,
+        created_at: crate::util::now_rfc3339(),
+        payload: crate::events::EventPayload::Job {
+            kind: kind.to_string(),
+            path: path.map(str::to_string),
+            message: Some("interrupt requested from tui".to_string()),
+            files_seen: Some(files_seen),
+            errors: Some(errors),
+        },
+    };
+    db::persist_event(conn, &envelope)?;
+    Ok(())
+}
+
+fn append_interrupt_canceled_event(
+    conn: &Connection,
+    job_id: &str,
+    kind: &str,
+    path: Option<&str>,
+    files_seen: u64,
+    errors: u64,
+) -> anyhow::Result<()> {
+    let envelope = crate::events::EventEnvelope {
+        event_kind: crate::events::EventKind::JobCanceled,
+        job_id: Some(job_id.to_string()),
+        sequence: None,
+        created_at: crate::util::now_rfc3339(),
+        payload: crate::events::EventPayload::Job {
+            kind: kind.to_string(),
+            path: path.map(str::to_string),
+            message: Some("interrupted by tui exit".to_string()),
+            files_seen: Some(files_seen),
+            errors: Some(errors),
+        },
+    };
+    db::persist_event(conn, &envelope)?;
+    Ok(())
+}
+
+fn transfer_plan_id_from_job_params(params_json: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(params_json)
+        .ok()?
+        .get("plan_id")?
+        .as_str()
+        .map(str::to_string)
 }
