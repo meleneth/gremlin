@@ -400,8 +400,11 @@ fn transfer_copy_checkpoint_honors_cancel_request() {
         &job_id,
         &plan_id,
         "/tmp/source",
-        2,
-        10,
+        TransferCancelProgress {
+            total_files: 2,
+            total_bytes: 10,
+            bytes_done: 5,
+        },
         &mut result
     )
     .unwrap());
@@ -415,6 +418,157 @@ fn transfer_copy_checkpoint_honors_cancel_request() {
     assert!(events
         .iter()
         .any(|event| event.event_kind == "job_canceled"));
+}
+
+#[test]
+fn transfer_progress_counts_completed_entries_across_files() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let dest_dir = tempfile::tempdir().unwrap();
+    std::fs::write(source_dir.path().join("a.txt"), b"hello").unwrap();
+    std::fs::write(source_dir.path().join("b.txt"), b"world!").unwrap();
+
+    let conn = Connection::open_in_memory().unwrap();
+    db::init_schema(&conn).unwrap();
+    let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+    let source_path = source_dir.path().to_string_lossy().to_string();
+    let dest_path = dest_dir.path().to_string_lossy().to_string();
+    let source_id = db::ensure_root(&conn, &machine_id, &source_path).unwrap();
+    let dest_id = db::ensure_root(&conn, &machine_id, &dest_path).unwrap();
+    let a_content_id = db::ensure_content_object(
+        &conn,
+        5,
+        blake3::hash(b"hello").to_hex().as_ref(),
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    )
+    .unwrap();
+    let b_content_id = db::ensure_content_object(
+        &conn,
+        6,
+        blake3::hash(b"world!").to_hex().as_ref(),
+        "711e9609339e92b03ddc0a211827dba421f38f9ed8b9d806e1ffdd8c15ffa03d",
+    )
+    .unwrap();
+    observe(
+        &conn,
+        &machine_id,
+        &source_id,
+        "a.txt",
+        5,
+        Some(&a_content_id),
+    );
+    observe(
+        &conn,
+        &machine_id,
+        &source_id,
+        "b.txt",
+        6,
+        Some(&b_content_id),
+    );
+    db::toggle_selection_entry(&conn, &source_id, "a.txt").unwrap();
+    db::toggle_selection_entry(&conn, &source_id, "b.txt").unwrap();
+    let source = db::root_by_id(&conn, &source_id).unwrap().unwrap();
+    let dest = db::root_by_id(&conn, &dest_id).unwrap().unwrap();
+    let plan = plan_selected_files(&conn, &source, &dest).unwrap();
+
+    let result = run_transfer_plan(&conn, &plan.plan_id, false).unwrap();
+
+    assert_eq!(result.copied, 2);
+    assert_eq!(result.bytes_copied, 11);
+    let events = db::events_for_job(&conn, &result.job_id).unwrap();
+    let progress = events
+        .iter()
+        .rev()
+        .find_map(|event| {
+            let payload: serde_json::Value = serde_json::from_str(&event.payload_json).ok()?;
+            (payload.get("type")?.as_str()? == "job_progress").then_some(payload)
+        })
+        .unwrap();
+    assert_eq!(progress.get("bytes_done").unwrap().as_u64(), Some(11));
+    assert_eq!(progress.get("bytes_total").unwrap().as_u64(), Some(11));
+}
+
+#[test]
+fn transfer_progress_counts_skipped_entries_as_completed_work() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let dest_dir = tempfile::tempdir().unwrap();
+    std::fs::write(source_dir.path().join("a.txt"), b"hello").unwrap();
+    std::fs::write(source_dir.path().join("b.txt"), b"world!").unwrap();
+    std::fs::write(dest_dir.path().join("a.txt"), b"hello").unwrap();
+
+    let conn = Connection::open_in_memory().unwrap();
+    db::init_schema(&conn).unwrap();
+    let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+    let source_path = source_dir.path().to_string_lossy().to_string();
+    let dest_path = dest_dir.path().to_string_lossy().to_string();
+    let source_id = db::ensure_root(&conn, &machine_id, &source_path).unwrap();
+    let dest_id = db::ensure_root(&conn, &machine_id, &dest_path).unwrap();
+    let a_content_id = db::ensure_content_object(
+        &conn,
+        5,
+        blake3::hash(b"hello").to_hex().as_ref(),
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    )
+    .unwrap();
+    let b_content_id = db::ensure_content_object(
+        &conn,
+        6,
+        blake3::hash(b"world!").to_hex().as_ref(),
+        "711e9609339e92b03ddc0a211827dba421f38f9ed8b9d806e1ffdd8c15ffa03d",
+    )
+    .unwrap();
+    observe(
+        &conn,
+        &machine_id,
+        &source_id,
+        "a.txt",
+        5,
+        Some(&a_content_id),
+    );
+    observe(
+        &conn,
+        &machine_id,
+        &source_id,
+        "b.txt",
+        6,
+        Some(&b_content_id),
+    );
+    db::toggle_selection_entry(&conn, &source_id, "a.txt").unwrap();
+    db::toggle_selection_entry(&conn, &source_id, "b.txt").unwrap();
+    let source = db::root_by_id(&conn, &source_id).unwrap().unwrap();
+    let dest = db::root_by_id(&conn, &dest_id).unwrap().unwrap();
+    let plan = plan_selected_files(&conn, &source, &dest).unwrap();
+    db::insert_transfer_plan_entry(
+        &conn,
+        db::TransferPlanEntryInput {
+            plan_id: &plan.plan_id,
+            relative_path: "a.txt",
+            dest_relative_path: Some("a.txt"),
+            size_bytes: 5,
+            source_content_id: Some(&a_content_id),
+            dest_content_id: None,
+            action: "copy",
+            reason: "test forced copy to exercise runner skip",
+            metadata_json: serde_json::json!({}),
+        },
+    )
+    .unwrap();
+
+    let result = run_transfer_plan(&conn, &plan.plan_id, false).unwrap();
+
+    assert_eq!(result.copied, 1);
+    assert_eq!(result.skipped, 1);
+    assert_eq!(result.bytes_copied, 6);
+    let events = db::events_for_job(&conn, &result.job_id).unwrap();
+    let progress = events
+        .iter()
+        .rev()
+        .find_map(|event| {
+            let payload: serde_json::Value = serde_json::from_str(&event.payload_json).ok()?;
+            (payload.get("type")?.as_str()? == "job_progress").then_some(payload)
+        })
+        .unwrap();
+    assert_eq!(progress.get("bytes_done").unwrap().as_u64(), Some(11));
+    assert_eq!(progress.get("files_skipped").unwrap().as_u64(), Some(1));
 }
 
 #[test]

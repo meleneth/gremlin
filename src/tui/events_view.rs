@@ -135,9 +135,21 @@ pub(super) fn transfer_progress_snapshot(payload_json: &str) -> Option<TransferP
 pub(super) fn transfer_progress_lines(progress: &TransferProgressSnapshot) -> String {
     let overall_percent = progress_percent(progress.bytes_done, progress.bytes_total);
     let file_percent = progress_percent(progress.file_bytes_done, progress.file_bytes_total);
+    let active_file = if progress.files_total == 0 {
+        0
+    } else {
+        progress
+            .files_done
+            .saturating_add(1)
+            .min(progress.files_total)
+    };
     format!(
-        "Overall {} {:>3}% {}/{} @ {}/s\nCurrent {} {:>3}% {}/{}\nNow: {} | files {}/{} | errors {}",
-        progress_bar(progress.bytes_done, progress.bytes_total, DETAIL_PROGRESS_WIDTH),
+        "Job  {} {:>3}% {}/{} @ {}/s\nFile {} {:>3}% {}/{} ({}/{})\nPath {} | errors {}",
+        progress_bar(
+            progress.bytes_done,
+            progress.bytes_total,
+            DETAIL_PROGRESS_WIDTH
+        ),
         overall_percent,
         human_size(progress.bytes_done),
         human_size(progress.bytes_total),
@@ -150,9 +162,9 @@ pub(super) fn transfer_progress_lines(progress: &TransferProgressSnapshot) -> St
         file_percent,
         human_size(progress.file_bytes_done),
         human_size(progress.file_bytes_total),
-        truncate(&progress.current_path, 36),
-        progress.files_done,
+        active_file,
         progress.files_total,
+        truncate(&progress.current_path, 54),
         progress.errors
     )
 }

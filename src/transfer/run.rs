@@ -66,6 +66,7 @@ pub fn run_transfer_plan(
     };
     let total = entries.len() as u64;
     let total_bytes = entries.iter().map(|entry| entry.size_bytes).sum::<u64>();
+    let mut bytes_completed = 0_u64;
 
     for entry in entries {
         if complete_transfer_if_canceled(
@@ -73,8 +74,11 @@ pub fn run_transfer_plan(
             &job_id,
             plan_id,
             &source_root.path,
-            total,
-            total_bytes,
+            TransferCancelProgress {
+                total_files: total,
+                total_bytes,
+                bytes_done: bytes_completed,
+            },
             &mut result,
         )? {
             return Ok(result);
@@ -84,7 +88,7 @@ pub fn run_transfer_plan(
         let source_display = source_path.display_path();
         let dest_display = dest_path.display_path();
         let current = entry.relative_path.as_str();
-        let bytes_before_file = result.bytes_copied;
+        let bytes_before_file = bytes_completed;
         let started_at = Instant::now();
         let mut on_progress = |file_bytes_done: u64,
                                file_bytes_total: u64,
@@ -126,12 +130,15 @@ pub fn run_transfer_plan(
             Ok(CopyOutcome::Copied(bytes)) => {
                 result.copied += 1;
                 result.bytes_copied += bytes;
+                bytes_completed += entry.size_bytes;
             }
             Ok(CopyOutcome::Skipped) => {
                 result.skipped += 1;
+                bytes_completed += entry.size_bytes;
             }
             Err(err) => {
                 result.errors += 1;
+                bytes_completed += entry.size_bytes;
                 persist_transfer_file_event(
                     conn,
                     &job_id,
@@ -174,7 +181,7 @@ pub fn run_transfer_plan(
                 files_done: result.copied,
                 files_skipped: result.skipped,
                 errors: result.errors,
-                bytes_done: Some(result.bytes_copied),
+                bytes_done: Some(bytes_completed),
                 bytes_total: Some(total_bytes),
                 file_bytes_done: Some(entry.size_bytes),
                 file_bytes_total: Some(entry.size_bytes),
@@ -188,8 +195,11 @@ pub fn run_transfer_plan(
             &job_id,
             plan_id,
             &source_root.path,
-            total,
-            total_bytes,
+            TransferCancelProgress {
+                total_files: total,
+                total_bytes,
+                bytes_done: bytes_completed,
+            },
             &mut result,
         )? {
             return Ok(result);
@@ -222,13 +232,19 @@ pub fn run_transfer_plan(
     Ok(result)
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct TransferCancelProgress {
+    pub(super) total_files: u64,
+    pub(super) total_bytes: u64,
+    pub(super) bytes_done: u64,
+}
+
 pub(super) fn complete_transfer_if_canceled(
     conn: &Connection,
     job_id: &str,
     plan_id: &str,
     source_path: &str,
-    total_files: u64,
-    total_bytes: u64,
+    transfer_progress: TransferCancelProgress,
     result: &mut TransferRunResult,
 ) -> anyhow::Result<bool> {
     if !db::job_cancel_requested(conn, job_id)? {
@@ -241,7 +257,7 @@ pub(super) fn complete_transfer_if_canceled(
         db::JobProgressInput {
             phase: "canceling",
             current_path: None,
-            files_total: Some(total_files),
+            files_total: Some(transfer_progress.total_files),
             files_seen,
             files_done: result.copied,
             files_skipped: result.skipped,
@@ -256,13 +272,13 @@ pub(super) fn complete_transfer_if_canceled(
         payload: EventPayload::JobProgress {
             phase: "canceling".to_string(),
             current_path: None,
-            files_total: Some(total_files),
+            files_total: Some(transfer_progress.total_files),
             files_seen,
             files_done: result.copied,
             files_skipped: result.skipped,
             errors: result.errors,
-            bytes_done: Some(result.bytes_copied),
-            bytes_total: Some(total_bytes),
+            bytes_done: Some(transfer_progress.bytes_done),
+            bytes_total: Some(transfer_progress.total_bytes),
             file_bytes_done: None,
             file_bytes_total: None,
             bytes_per_second: None,

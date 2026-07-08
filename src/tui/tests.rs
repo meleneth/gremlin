@@ -495,10 +495,11 @@ fn formats_transfer_progress_detail() {
     let progress = transfer_progress_snapshot(&payload.to_string()).unwrap();
     let lines = transfer_progress_lines(&progress);
 
-    assert!(lines.contains("Overall ▕██████████████░░░░░░░░░░░░░░▏  50%"));
+    assert!(lines.contains("Job  ▕██████████████░░░░░░░░░░░░░░▏  50%"));
     assert!(lines.contains("@ 2.0 MiB/s"));
-    assert!(lines.contains("Current ▕██████████████░░░░░░░░░░░░░░▏  50%"));
-    assert!(lines.contains("files 2/4 | errors 1"));
+    assert!(lines.contains("File ▕██████████████░░░░░░░░░░░░░░▏  50%"));
+    assert!(lines.contains("(3/4)"));
+    assert!(lines.contains("Path incoming/photos/foo.png | errors 1"));
 }
 
 #[test]
