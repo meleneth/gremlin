@@ -32,6 +32,26 @@ cargo build --release
 
 Manual SSH checksum imports can still use `gremlin worker hash --jsonl` if a compatible `gremlin` binary is available on the remote host. The TUI's SSH hash import path uses standard remote shell tools instead.
 
+## Development Checks
+
+Before finalizing code changes:
+
+```bash
+cargo fmt
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test
+```
+
+Coverage uses `cargo-llvm-cov`:
+
+```bash
+cargo install cargo-llvm-cov
+cargo llvm-cov --all-targets --all-features
+cargo llvm-cov --all-targets --all-features --html
+```
+
+The HTML report is written to `target/llvm-cov/html/index.html`.
+
 ## Architecture Rule
 
 The TUI may drive jobs, but it must not contain scan/hash/copy logic directly. File work is represented as commands and jobs. Jobs emit events. Events are persisted as durable history. The database projects current query state from those events and command results.
