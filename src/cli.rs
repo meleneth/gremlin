@@ -44,6 +44,13 @@ pub enum Commands {
         #[arg(long)]
         all: bool,
     },
+    ChunkHash {
+        target: String,
+        #[arg(long, value_enum)]
+        kind: Option<TargetKind>,
+        #[arg(long, default_value_t = crate::fswork::DEFAULT_CHUNK_SIZE_BYTES / 1024 / 1024)]
+        chunk_size_mib: u64,
+    },
     Verify {
         target: String,
         #[arg(long)]

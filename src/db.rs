@@ -141,6 +141,29 @@ pub struct ContentObjectRow {
 }
 
 #[derive(Debug, Clone)]
+pub struct ObservationChunkHashInput<'a> {
+    pub chunk_size_bytes: u64,
+    pub chunk_index: u64,
+    pub offset_bytes: u64,
+    pub size_bytes: u64,
+    pub algorithm: &'a str,
+    pub digest: &'a str,
+    pub job_id: Option<&'a str>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub struct ObservationChunkHashRow {
+    pub path_observation_id: String,
+    pub chunk_size_bytes: u64,
+    pub chunk_index: u64,
+    pub offset_bytes: u64,
+    pub size_bytes: u64,
+    pub algorithm: String,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct EventRow {
     pub job_id: String,
     pub sequence: i64,
@@ -305,6 +328,20 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             last_seen_at TEXT NOT NULL,
             status TEXT NOT NULL,
             UNIQUE(machine_id, root_id, relative_path)
+        );
+
+        CREATE TABLE IF NOT EXISTS path_observation_chunk_hashes (
+            id TEXT PRIMARY KEY,
+            path_observation_id TEXT NOT NULL REFERENCES path_observations(id),
+            chunk_size_bytes INTEGER NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            offset_bytes INTEGER NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            algorithm TEXT NOT NULL,
+            digest TEXT NOT NULL,
+            job_id TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(path_observation_id, chunk_size_bytes, chunk_index, algorithm)
         );
 
         CREATE TABLE IF NOT EXISTS jobs (
@@ -798,6 +835,19 @@ pub fn insert_path_observation(
     Ok(())
 }
 
+pub fn path_observation_id(
+    conn: &Connection,
+    root_id: &str,
+    relative_path: &str,
+) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT id FROM path_observations WHERE root_id = ?1 AND relative_path = ?2",
+        params![root_id, relative_path],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
 pub fn ensure_content_object(
     conn: &Connection,
     size_bytes: u64,
@@ -844,6 +894,86 @@ pub fn content_object_by_id(
         },
     )
     .optional()
+}
+
+pub fn replace_observation_chunk_hashes(
+    conn: &Connection,
+    path_observation_id: &str,
+    chunk_size_bytes: u64,
+    algorithm: &str,
+    chunks: &[ObservationChunkHashInput<'_>],
+) -> rusqlite::Result<()> {
+    conn.execute(
+        r#"
+        DELETE FROM path_observation_chunk_hashes
+        WHERE path_observation_id = ?1
+          AND chunk_size_bytes = ?2
+          AND algorithm = ?3
+        "#,
+        params![path_observation_id, chunk_size_bytes as i64, algorithm],
+    )?;
+    for chunk in chunks {
+        conn.execute(
+            r#"
+            INSERT INTO path_observation_chunk_hashes
+                (id, path_observation_id, chunk_size_bytes, chunk_index,
+                 offset_bytes, size_bytes, algorithm, digest, job_id, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "#,
+            params![
+                new_id("chunk"),
+                path_observation_id,
+                chunk.chunk_size_bytes as i64,
+                chunk.chunk_index as i64,
+                chunk.offset_bytes as i64,
+                chunk.size_bytes as i64,
+                chunk.algorithm,
+                chunk.digest,
+                chunk.job_id,
+                now_rfc3339()
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub fn observation_chunk_hashes(
+    conn: &Connection,
+    path_observation_id: &str,
+    chunk_size_bytes: u64,
+    algorithm: &str,
+) -> rusqlite::Result<Vec<ObservationChunkHashRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT path_observation_id, chunk_size_bytes, chunk_index, offset_bytes,
+               size_bytes, algorithm, digest
+        FROM path_observation_chunk_hashes
+        WHERE path_observation_id = ?1
+          AND chunk_size_bytes = ?2
+          AND algorithm = ?3
+        ORDER BY chunk_index ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        params![path_observation_id, chunk_size_bytes as i64, algorithm],
+        |row| {
+            let chunk_size: i64 = row.get(1)?;
+            let index: i64 = row.get(2)?;
+            let offset: i64 = row.get(3)?;
+            let size: i64 = row.get(4)?;
+            Ok(ObservationChunkHashRow {
+                path_observation_id: row.get(0)?,
+                chunk_size_bytes: chunk_size as u64,
+                chunk_index: index as u64,
+                offset_bytes: offset as u64,
+                size_bytes: size as u64,
+                algorithm: row.get(5)?,
+                digest: row.get(6)?,
+            })
+        },
+    )?;
+    rows.collect()
 }
 
 pub fn create_checksum_collection(

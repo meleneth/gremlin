@@ -86,6 +86,17 @@ pub struct HashSummary {
     pub hashed_paths: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ChunkHashSummary {
+    pub job_id: String,
+    pub chunk_size_bytes: u64,
+    pub files_seen: u64,
+    pub chunks_hashed: u64,
+    pub bytes_hashed: u64,
+    pub errors: u64,
+    pub hashed_paths: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerifyKind {
@@ -180,6 +191,25 @@ pub struct HashResult {
     sha256: String,
 }
 
+struct ChunkHashResult {
+    relative_path: String,
+    basename: String,
+    parent_path: String,
+    size_bytes: u64,
+    modified_at: Option<String>,
+    chunks: Vec<OwnedChunkHash>,
+}
+
+struct OwnedChunkHash {
+    chunk_index: u64,
+    offset_bytes: u64,
+    size_bytes: u64,
+    digest: String,
+}
+
+pub const DEFAULT_CHUNK_SIZE_BYTES: u64 = 64 * 1024 * 1024;
+const CHUNK_HASH_ALGORITHM: &str = "md5";
+
 pub fn scan_to_db(
     conn: &Connection,
     path: &Path,
@@ -241,6 +271,46 @@ pub fn hash_to_db(
         hash_all,
     )?;
     print_hash_summary(&summary, options);
+    Ok(summary)
+}
+
+pub fn chunk_hash_to_db(
+    conn: &Connection,
+    path: &Path,
+    db_path: &Path,
+    machine_label: Option<&str>,
+    chunk_size_bytes: u64,
+    options: OutputOptions,
+) -> anyhow::Result<ChunkHashSummary> {
+    if chunk_size_bytes == 0 {
+        anyhow::bail!("chunk size must be greater than zero");
+    }
+    db::init_schema(conn)?;
+    let root_path = absolute_path(path).with_context(|| format!("resolving {}", path.display()))?;
+    let skip_paths = db_sidecar_paths(db_path)?;
+    let machine_id = db::ensure_local_machine_with_label(conn, machine_label)?;
+    let root_id = db::ensure_root(conn, &machine_id, &lossy(&root_path))?;
+    let job_id = db::create_job(
+        conn,
+        "chunk_hash",
+        Some(&machine_id),
+        Some(&root_id),
+        serde_json::json!({
+            "path": lossy(&root_path),
+            "chunk_size_bytes": chunk_size_bytes,
+            "algorithm": CHUNK_HASH_ALGORITHM,
+        }),
+    )?;
+    let summary = run_chunk_hash_job(
+        conn,
+        &root_path,
+        &skip_paths,
+        &machine_id,
+        &root_id,
+        &job_id,
+        chunk_size_bytes,
+    )?;
+    print_chunk_hash_summary(&summary, options);
     Ok(summary)
 }
 
@@ -636,6 +706,139 @@ fn run_hash_job(
     })
 }
 
+fn run_chunk_hash_job(
+    conn: &Connection,
+    root_path: &Path,
+    skip_paths: &[PathBuf],
+    machine_id: &str,
+    root_id: &str,
+    job_id: &str,
+    chunk_size_bytes: u64,
+) -> anyhow::Result<ChunkHashSummary> {
+    db::start_job(conn, job_id)?;
+    let mut sequence = db::next_sequence(conn, job_id)?;
+    let mut progress = JobProgress::new("walking");
+    persist_db_event(
+        conn,
+        job_id,
+        &mut sequence,
+        EventKind::JobStarted,
+        EventPayload::Job {
+            kind: "chunk_hash".to_string(),
+            path: Some(lossy(root_path)),
+            message: Some(format!(
+                "{CHUNK_HASH_ALGORITHM} chunks of {} bytes",
+                chunk_size_bytes
+            )),
+            files_seen: None,
+            errors: None,
+        },
+    )?;
+
+    let mut files_seen = 0_u64;
+    let mut chunks_hashed = 0_u64;
+    let mut bytes_hashed = 0_u64;
+    let mut errors = 0_u64;
+    let mut hashed_paths = Vec::new();
+
+    for entry in WalkDir::new(root_path) {
+        if complete_if_canceled(
+            conn,
+            job_id,
+            &mut sequence,
+            "chunk_hash",
+            root_path,
+            &progress,
+        )? {
+            return Ok(ChunkHashSummary {
+                job_id: job_id.to_string(),
+                chunk_size_bytes,
+                files_seen,
+                chunks_hashed,
+                bytes_hashed,
+                errors,
+                hashed_paths,
+            });
+        }
+        match entry {
+            Ok(entry) if entry.file_type().is_file() => {
+                let path = entry.path();
+                if should_skip(path, skip_paths) {
+                    continue;
+                }
+                progress.phase = "processing";
+                match chunk_hash_file(root_path, path, chunk_size_bytes) {
+                    Ok(result) => {
+                        progress.current_path = Some(result.relative_path.clone());
+                        files_seen += 1;
+                        progress.files_seen = files_seen;
+                        accept_chunk_hash_result(
+                            conn,
+                            machine_id,
+                            root_id,
+                            job_id,
+                            chunk_size_bytes,
+                            &result,
+                        )?;
+                        chunks_hashed += result.chunks.len() as u64;
+                        bytes_hashed += result.size_bytes;
+                        hashed_paths.push(result.relative_path);
+                        progress.files_done = files_seen;
+                        persist_progress(conn, job_id, &mut sequence, &progress, None)?;
+                    }
+                    Err(err) => {
+                        errors += 1;
+                        progress.errors = errors;
+                        persist_job_error(conn, job_id, &mut sequence, "chunk_hash", path, err)?;
+                        persist_progress(conn, job_id, &mut sequence, &progress, None)?;
+                    }
+                }
+                progress.phase = "walking";
+            }
+            Ok(_) => {}
+            Err(err) => {
+                errors += 1;
+                progress.errors = errors;
+                persist_walk_error(conn, job_id, &mut sequence, "chunk_hash", err)?;
+                persist_progress(conn, job_id, &mut sequence, &progress, None)?;
+            }
+        }
+    }
+
+    progress.phase = "finalizing";
+    progress.current_path = None;
+    persist_progress(conn, job_id, &mut sequence, &progress, None)?;
+
+    let status = if errors == 0 {
+        "completed"
+    } else {
+        "completed_with_errors"
+    };
+    persist_db_event(
+        conn,
+        job_id,
+        &mut sequence,
+        EventKind::JobCompleted,
+        EventPayload::Job {
+            kind: "chunk_hash".to_string(),
+            path: Some(lossy(root_path)),
+            message: Some(status.to_string()),
+            files_seen: Some(files_seen),
+            errors: Some(errors),
+        },
+    )?;
+    db::complete_job(conn, job_id, status)?;
+    Ok(ChunkHashSummary {
+        job_id: job_id.to_string(),
+        chunk_size_bytes,
+        files_seen,
+        chunks_hashed,
+        bytes_hashed,
+        errors,
+        hashed_paths,
+    })
+}
+
 fn run_verify_job(
     conn: &Connection,
     root_path: &Path,
@@ -944,6 +1147,68 @@ pub fn hash_file(root: &Path, path: &Path) -> anyhow::Result<HashResult> {
     })
 }
 
+fn chunk_hash_file(
+    root: &Path,
+    path: &Path,
+    chunk_size_bytes: u64,
+) -> anyhow::Result<ChunkHashResult> {
+    let meta = file_meta(root, path)?;
+    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut reader = BufReader::new(file);
+    let mut chunks = Vec::new();
+    let mut buf = [0_u8; 64 * 1024];
+    let mut chunk_hasher = md5::Context::new();
+    let mut chunk_index = 0_u64;
+    let mut chunk_offset = 0_u64;
+    let mut chunk_bytes = 0_u64;
+
+    loop {
+        let read = reader
+            .read(&mut buf)
+            .with_context(|| format!("reading {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        let mut consumed = 0_usize;
+        while consumed < read {
+            let remaining_in_chunk = (chunk_size_bytes - chunk_bytes) as usize;
+            let take = remaining_in_chunk.min(read - consumed);
+            chunk_hasher.consume(&buf[consumed..consumed + take]);
+            consumed += take;
+            chunk_bytes += take as u64;
+            if chunk_bytes == chunk_size_bytes {
+                chunks.push(OwnedChunkHash {
+                    chunk_index,
+                    offset_bytes: chunk_offset,
+                    size_bytes: chunk_bytes,
+                    digest: format!("{:x}", chunk_hasher.compute()),
+                });
+                chunk_index += 1;
+                chunk_offset += chunk_bytes;
+                chunk_bytes = 0;
+                chunk_hasher = md5::Context::new();
+            }
+        }
+    }
+    if chunk_bytes > 0 {
+        chunks.push(OwnedChunkHash {
+            chunk_index,
+            offset_bytes: chunk_offset,
+            size_bytes: chunk_bytes,
+            digest: format!("{:x}", chunk_hasher.compute()),
+        });
+    }
+
+    Ok(ChunkHashResult {
+        relative_path: meta.relative_path,
+        basename: meta.basename,
+        parent_path: meta.parent_path,
+        size_bytes: meta.size_bytes,
+        modified_at: meta.modified_at,
+        chunks,
+    })
+}
+
 fn previous_observations(
     conn: &Connection,
     machine_id: &str,
@@ -1093,6 +1358,57 @@ fn accept_hash_result(
             modified_at: result.modified_at.as_deref(),
             content_id: Some(&content_id),
         },
+    )?;
+    Ok(())
+}
+
+fn accept_chunk_hash_result(
+    conn: &Connection,
+    machine_id: &str,
+    root_id: &str,
+    job_id: &str,
+    chunk_size_bytes: u64,
+    result: &ChunkHashResult,
+) -> anyhow::Result<()> {
+    db::insert_path_observation(
+        conn,
+        db::PathObservationInput {
+            machine_id,
+            root_id,
+            relative_path: &result.relative_path,
+            basename: &result.basename,
+            parent_path: &result.parent_path,
+            size_bytes: result.size_bytes,
+            modified_at: result.modified_at.as_deref(),
+            content_id: None,
+        },
+    )?;
+    let Some(path_observation_id) = db::path_observation_id(conn, root_id, &result.relative_path)?
+    else {
+        anyhow::bail!(
+            "path observation missing after insert: {}",
+            result.relative_path
+        );
+    };
+    let inputs = result
+        .chunks
+        .iter()
+        .map(|chunk| db::ObservationChunkHashInput {
+            chunk_size_bytes,
+            chunk_index: chunk.chunk_index,
+            offset_bytes: chunk.offset_bytes,
+            size_bytes: chunk.size_bytes,
+            algorithm: CHUNK_HASH_ALGORITHM,
+            digest: &chunk.digest,
+            job_id: Some(job_id),
+        })
+        .collect::<Vec<_>>();
+    db::replace_observation_chunk_hashes(
+        conn,
+        &path_observation_id,
+        chunk_size_bytes,
+        CHUNK_HASH_ALGORITHM,
+        &inputs,
     )?;
     Ok(())
 }
@@ -1402,6 +1718,33 @@ fn print_hash_summary(summary: &HashSummary, options: OutputOptions) {
     }
 }
 
+fn print_chunk_hash_summary(summary: &ChunkHashSummary, options: OutputOptions) {
+    if options.quiet {
+        return;
+    }
+    if options.json {
+        print_json_summary(summary);
+        return;
+    }
+    println!(
+        "chunk hash job {}: {} files, {} chunks, {}, {} errors, chunk_size={}",
+        summary.job_id,
+        summary.files_seen,
+        summary.chunks_hashed,
+        crate::util::human_size(summary.bytes_hashed),
+        summary.errors,
+        crate::util::human_size(summary.chunk_size_bytes)
+    );
+    let limit = if options.details {
+        summary.hashed_paths.len()
+    } else {
+        options.limit
+    };
+    for path in summary.hashed_paths.iter().take(limit) {
+        println!("chunked\t{path}");
+    }
+}
+
 fn print_verify_summary(summary: &VerifySummary, options: OutputOptions) {
     if options.quiet {
         return;
@@ -1656,5 +1999,66 @@ mod tests {
         )
         .unwrap();
         assert_eq!(changed.files_hashed, 1);
+    }
+
+    #[test]
+    fn chunk_hashes_are_stored_for_path_observations_only_when_requested() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hello.txt");
+        std::fs::write(&file, b"abcdefghij").unwrap();
+        let db_path = dir.path().join("gremlin.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+        db::init_schema(&conn).unwrap();
+
+        let hash = hash_to_db(
+            &conn,
+            dir.path(),
+            &db_path,
+            None,
+            true,
+            OutputOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(hash.files_hashed, 1);
+        let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+        let root_id = db::ensure_root(
+            &conn,
+            &machine_id,
+            &lossy(&absolute_path(dir.path()).unwrap()),
+        )
+        .unwrap();
+        let observation_id = db::path_observation_id(&conn, &root_id, "hello.txt")
+            .unwrap()
+            .unwrap();
+        assert!(
+            db::observation_chunk_hashes(&conn, &observation_id, 4, CHUNK_HASH_ALGORITHM)
+                .unwrap()
+                .is_empty()
+        );
+
+        let summary = chunk_hash_to_db(
+            &conn,
+            dir.path(),
+            &db_path,
+            None,
+            4,
+            OutputOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(summary.files_seen, 1);
+        assert_eq!(summary.chunks_hashed, 3);
+        assert_eq!(summary.bytes_hashed, 10);
+        let chunks =
+            db::observation_chunk_hashes(&conn, &observation_id, 4, CHUNK_HASH_ALGORITHM).unwrap();
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].path_observation_id, observation_id);
+        assert_eq!(chunks[0].chunk_size_bytes, 4);
+        assert_eq!(chunks[0].chunk_index, 0);
+        assert_eq!(chunks[0].offset_bytes, 0);
+        assert_eq!(chunks[0].size_bytes, 4);
+        assert_eq!(chunks[0].digest, format!("{:x}", md5::compute(b"abcd")));
+        assert_eq!(chunks[2].offset_bytes, 8);
+        assert_eq!(chunks[2].size_bytes, 2);
+        assert_eq!(chunks[0].algorithm, "md5");
     }
 }

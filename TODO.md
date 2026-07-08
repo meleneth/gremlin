@@ -37,6 +37,7 @@
 
 - Build remote dispatch and progress streaming on Tokio rather than adding a separate sync orchestration path.
 - Implement SSH dispatch for `worker hash --jsonl`.
+- Implement SSH host-side chunk hashing that stores MD5 chunk evidence without copying file bytes locally first.
 - Preserve remote worker job identity while also projecting target-aware imports into local import jobs.
 - Treat SFV, CFV, PAR2, and worker JSONL as manifest/checksum collection sources.
 - Add SMB path mapping and target normalization.
@@ -52,6 +53,7 @@
 - Add compare flow between two roots or checksum collections.
 - Add more transfer plan filters and output formats after the copy runner requirements settle.
 - Model copy chunks or per-file transfer checkpoints beyond the current whole-file copy runner.
+- Use stored path-observation chunk hashes to resume transfer plans and isolate corrupt chunks.
 - Make resume distinguish size-only skips from hash-verified skips.
 - Add remote-to-remote transfer execution after one-sided SSH copies settle.
 - Add SSH paranoid readback/hash verification after remote writes.

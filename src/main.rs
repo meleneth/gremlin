@@ -71,6 +71,32 @@ async fn main() -> anyhow::Result<()> {
             let conn = db::open_existing(&db)?;
             fswork::hash_to_db(&conn, &path, &db, machine_label.as_deref(), all, output)?;
         }
+        Some(Commands::ChunkHash {
+            target,
+            kind,
+            chunk_size_mib,
+        }) => {
+            let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
+            let conn = db::open_existing(&db)?;
+            let parsed = targets::parse_target(&target, kind)?;
+            if !matches!(parsed.kind, TargetKind::LocalPath | TargetKind::FileUrl) {
+                anyhow::bail!("chunk-hash currently supports local path and file:// targets only");
+            }
+            let local_path = parsed
+                .local_path()
+                .ok_or_else(|| anyhow::anyhow!("chunk-hash target is not local file-like"))?;
+            let chunk_size_bytes = chunk_size_mib
+                .checked_mul(1024 * 1024)
+                .ok_or_else(|| anyhow::anyhow!("chunk size is too large"))?;
+            fswork::chunk_hash_to_db(
+                &conn,
+                &local_path,
+                &db,
+                machine_label.as_deref(),
+                chunk_size_bytes,
+                output,
+            )?;
+        }
         Some(Commands::Verify {
             target,
             accept,

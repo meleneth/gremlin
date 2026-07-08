@@ -23,6 +23,7 @@ gremlin config init --default-db ./gremlin.db --machine-label workstation
 gremlin scan PATH --db ./gremlin.db
 gremlin hash PATH --db ./gremlin.db
 gremlin hash PATH --all --db ./gremlin.db
+gremlin chunk-hash PATH --chunk-size-mib 64 --db ./gremlin.db
 gremlin verify PATH --db ./gremlin.db
 gremlin verify PATH --accept --db ./gremlin.db
 gremlin --json status PATH --db ./gremlin.db
@@ -100,6 +101,8 @@ Roots maintain `current_size_bytes`, the projected total size of currently index
 
 `hash` walks a directory tree, computes BLAKE3 and SHA-256 for files that look new or changed from stat data, stores content objects, updates path observations, and persists hash events. Use `--all` to hash every regular file.
 
+`chunk-hash` is explicit opt-in evidence collection for local roots. It computes MD5 chunks for each file, stores them on the current path observation, and does not run as part of normal scan/hash/copy. The default chunk size is 64 MiB; use `--chunk-size-mib` to change it. This is intended as the foundation for SSH cache warming, corruption localization, and future resumable transfer checkpoints.
+
 `verify` re-hashes current files and compares them to the latest stored per-path hashes. It reports `ok`, `changed`, `new`, `missing`, and `error`. By default it records history only; `--accept` promotes changed and new hashes into projected current truth.
 
 `worker hash --jsonl` does not require a database. It emits JSONL events suitable for manual or future automated remote execution over SSH.
@@ -141,7 +144,7 @@ Future seams deliberately left open:
 - Remote browsing: cache directory observations, let `host:` start at the default remote location, navigate from there, and promote browsed directories into tracked roots.
 - Manifest reconciliation: use imported SFV/CFV/PAR2 checksum collections as verification baselines where possible.
 - SMB path mapping: add machine/root mapping without changing content identity.
-- Transfer planning/copying: persisted dry-run root-to-root plans, job events, CLI inspection, TUI persisted-plan loading, TUI plan browsing/run/review/retarget controls, detailed local-copy progress, streamed hash-checked local copy execution, and optional paranoid readback exist for TUI selections; next slices should add checksum collection comparisons and resumable copy checkpoints.
+- Transfer planning/copying: persisted dry-run root-to-root plans, job events, CLI inspection, TUI persisted-plan loading, TUI plan browsing/run/review/retarget controls, detailed local-copy progress, streamed hash-checked local copy execution, optional local root chunk hashes, and optional paranoid readback exist for TUI selections; next slices should add checksum collection comparisons and resumable copy checkpoints.
 - Seamless resume: make interrupted remote browsing, hashing, importing, and future copy jobs restart from durable job/event state instead of requiring manual cleanup.
 - Metadata extractors: add new job kinds and events rather than expanding scan/hash responsibilities.
 - Richer TUI job control: the TUI can start local jobs now; future slices should add progress, cancellation states, filtering, and async remote supervision without putting scan/hash/copy logic in TUI code.
