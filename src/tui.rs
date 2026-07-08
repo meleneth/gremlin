@@ -118,16 +118,24 @@ struct AppState {
     event_offset: usize,
     status: String,
     transfer_source_root_id: Option<String>,
+    transfer_run_plan_id: Option<String>,
     last_plan: Option<PlanSnapshot>,
 }
 
 #[derive(Debug, Clone)]
 struct PlanSnapshot {
     plan_id: String,
+    source_root_id: String,
     source_name: String,
     dest_name: String,
     summary: Vec<db::TransferPlanActionSummary>,
     entries: Vec<db::TransferPlanEntryRow>,
+}
+
+#[derive(Debug)]
+enum TuiMessage {
+    Status(String),
+    TransferFinished { plan_id: String, status: String },
 }
 
 struct InfoBarData<'a> {
@@ -287,14 +295,30 @@ async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     machine_label: Option<String>,
 ) -> anyhow::Result<()> {
-    let (job_tx, mut job_rx) = mpsc::unbounded_channel::<String>();
+    let (job_tx, mut job_rx) = mpsc::unbounded_channel::<TuiMessage>();
     let mut state = AppState {
         status: "ready".to_string(),
         ..AppState::default()
     };
     loop {
         while let Ok(message) = job_rx.try_recv() {
-            state.status = message;
+            match message {
+                TuiMessage::Status(message) => state.status = message,
+                TuiMessage::TransferFinished { plan_id, status } => {
+                    if state.transfer_run_plan_id.as_deref() == Some(plan_id.as_str()) {
+                        state.transfer_run_plan_id = None;
+                    }
+                    if let Some(plan) = state
+                        .last_plan
+                        .as_mut()
+                        .filter(|plan| plan.plan_id == plan_id)
+                    {
+                        plan.summary = db::transfer_plan_action_summary(conn, &plan_id)?;
+                        plan.entries = db::transfer_plan_entries(conn, &plan_id)?;
+                    }
+                    state.status = status;
+                }
+            }
         }
         let roots = db::roots(conn)?;
         normalize_selection(&mut state, roots.len());
@@ -303,8 +327,11 @@ async fn run_loop(
             Some(root) => db::recent_files_for_root(conn, &root.id, 500)?,
             None => Vec::new(),
         };
-        let events = match selected {
-            Some(root) => db::recent_jobs_and_events_for_root(conn, &root.id, 300)?,
+        let event_root_id = state.last_plan.as_ref().and_then(|plan| {
+            (state.focus == FocusPane::Plan).then_some(plan.source_root_id.as_str())
+        });
+        let events = match event_root_id.or_else(|| selected.map(|root| root.id.as_str())) {
+            Some(root_id) => db::recent_jobs_and_events_for_root(conn, root_id, 300)?,
             None => db::recent_jobs_and_events(conn, 100)?,
         };
         let summary = match selected {
@@ -425,6 +452,9 @@ async fn run_loop(
                     KeyCode::Char('t') => {
                         start_transfer_plan_selection(roots.get(state.selected_root), &mut state);
                     }
+                    KeyCode::Char('r') => {
+                        run_current_transfer_plan(db_path, job_tx.clone(), &mut state);
+                    }
                     KeyCode::Enter => {
                         create_transfer_plan_from_selection(conn, &roots, &mut state)?;
                     }
@@ -457,7 +487,7 @@ fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "  q quit | Tab panes | arrows move | Space mark | s scan | h hash | c cancel | t plan | Enter",
+            "  q quit | Tab panes | arrows move | Space mark | s scan | h hash | c cancel | t plan | Enter | r run",
             theme::muted(),
         ),
     ]))
@@ -667,16 +697,23 @@ fn render_info_bar(
         .event
         .map(event_summary)
         .unwrap_or_else(|| "event -".to_string());
+    let plan_status = state
+        .last_plan
+        .as_ref()
+        .map(|plan| {
+            format!(
+                "copy {} review {}",
+                plan_copy_count(plan),
+                plan_review_count(plan)
+            )
+        })
+        .unwrap_or_else(|| "-".to_string());
     let text = format!(
         "focus {:?} | roots {} | marked {} | plan {} | root {} | file {} | {} | {}",
         state.focus,
         data.root_count,
         data.selection.map(|value| value.marked_count).unwrap_or(0),
-        state
-            .last_plan
-            .as_ref()
-            .map(|plan| plan_review_count(plan).to_string())
-            .unwrap_or_else(|| "-".to_string()),
+        plan_status,
         truncate(root, 24),
         truncate(file, 20),
         truncate(&event, 24),
@@ -828,6 +865,13 @@ fn plan_review_count(plan: &PlanSnapshot) -> usize {
                 "review" | "conflict" | "verify_needed"
             )
         })
+        .count()
+}
+
+fn plan_copy_count(plan: &PlanSnapshot) -> usize {
+    plan.entries
+        .iter()
+        .filter(|entry| entry.action == "copy")
         .count()
 }
 
@@ -1111,7 +1155,7 @@ fn queue_selected_root(
     root: Option<&db::RootRow>,
     kind: &str,
     machine_label: Option<&str>,
-    job_tx: mpsc::UnboundedSender<String>,
+    job_tx: mpsc::UnboundedSender<TuiMessage>,
     state: &mut AppState,
 ) -> anyhow::Result<()> {
     let Some(root) = root else {
@@ -1226,6 +1270,7 @@ fn create_transfer_plan_from_selection(
             let entries = db::transfer_plan_entries(conn, &result.plan_id)?;
             state.last_plan = Some(PlanSnapshot {
                 plan_id: result.plan_id.clone(),
+                source_root_id: source.id.clone(),
                 source_name: root_display_name(source),
                 dest_name: root_display_name(dest),
                 summary,
@@ -1243,12 +1288,41 @@ fn create_transfer_plan_from_selection(
     Ok(())
 }
 
+fn run_current_transfer_plan(
+    db_path: &Path,
+    job_tx: mpsc::UnboundedSender<TuiMessage>,
+    state: &mut AppState,
+) {
+    if let Some(plan_id) = state.transfer_run_plan_id.as_deref() {
+        state.status = format!("transfer plan {} is already running", short_id(plan_id));
+        return;
+    }
+    let Some(plan) = state.last_plan.as_ref() else {
+        state.status = "No transfer plan to run".to_string();
+        return;
+    };
+    let copy_entries = plan_copy_count(plan);
+    if copy_entries == 0 {
+        state.status = "Plan has no copy entries; review conflicts first".to_string();
+        return;
+    }
+    let plan_id = plan.plan_id.clone();
+    state.transfer_run_plan_id = Some(plan_id.clone());
+    state.focus = FocusPane::Plan;
+    state.status = format!(
+        "running transfer {} ({} copy entries)",
+        short_id(&plan_id),
+        copy_entries
+    );
+    spawn_transfer_runner(db_path.to_path_buf(), plan_id, job_tx);
+}
+
 fn spawn_job_runner(
     db_path: PathBuf,
     job_id: String,
     kind: String,
     machine_label: Option<String>,
-    job_tx: mpsc::UnboundedSender<String>,
+    job_tx: mpsc::UnboundedSender<TuiMessage>,
 ) {
     task::spawn_blocking(move || {
         let result = (|| -> anyhow::Result<()> {
@@ -1268,7 +1342,32 @@ fn spawn_job_runner(
             Ok(()) => format!("completed {kind} job {job_id}"),
             Err(err) => format!("failed {kind} job {job_id}: {err}"),
         };
-        let _ = job_tx.send(message);
+        let _ = job_tx.send(TuiMessage::Status(message));
+    });
+}
+
+fn spawn_transfer_runner(
+    db_path: PathBuf,
+    plan_id: String,
+    job_tx: mpsc::UnboundedSender<TuiMessage>,
+) {
+    task::spawn_blocking(move || {
+        let result = (|| -> anyhow::Result<transfer::TransferRunResult> {
+            let conn = db::open_existing(&db_path)?;
+            transfer::run_transfer_plan(&conn, &plan_id, false)
+        })();
+        let status = match result {
+            Ok(result) => format!(
+                "completed transfer {}: copied {} ({}) skipped {} errors {}",
+                short_id(&result.plan_id),
+                result.copied,
+                human_size(result.bytes_copied),
+                result.skipped,
+                result.errors
+            ),
+            Err(err) => format!("failed transfer {}: {err}", short_id(&plan_id)),
+        };
+        let _ = job_tx.send(TuiMessage::TransferFinished { plan_id, status });
     });
 }
 
@@ -1343,6 +1442,7 @@ mod tests {
         };
         let plan = PlanSnapshot {
             plan_id: "plan_1".to_string(),
+            source_root_id: "source_root".to_string(),
             source_name: "source".to_string(),
             dest_name: "dest".to_string(),
             summary: Vec::new(),
@@ -1351,5 +1451,6 @@ mod tests {
 
         assert_eq!(plan_entry_hint(&review), "review hash=1 name=1");
         assert_eq!(plan_review_count(&plan), 1);
+        assert_eq!(plan_copy_count(&plan), 1);
     }
 }

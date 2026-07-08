@@ -57,7 +57,7 @@
 - Add remote-to-remote transfer execution after one-sided SSH copies settle.
 - Add SSH paranoid readback/hash verification after remote writes.
 - Replace `scp` transfer execution with owned streams so SSH copies can emit live byte/rate progress.
-- Add TUI controls to run a transfer plan and inspect copy progress.
+- Add richer TUI transfer progress detail beyond the compact Events pane rows.
 
 ## Metadata Extractors
 
