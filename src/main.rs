@@ -319,6 +319,27 @@ async fn main() -> anyhow::Result<()> {
                     parsed.kind, machine_id, root_id, root_path
                 );
             }
+            TargetCommands::Remove { target, kind, yes } => {
+                let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
+                let conn = db::open_existing(&db)?;
+                let parsed = targets::parse_target(&target, kind)?;
+                let (machine_id, root_path) =
+                    resolve_target_identity(&conn, &parsed, machine_label.as_deref())?;
+                let root = db::find_root_by_machine_path(&conn, &machine_id, &root_path)?
+                    .ok_or_else(|| anyhow::anyhow!("target is not a known root: {target}"))?;
+                let summary = db::root_delete_summary(&conn, &root.id)?;
+                if !yes {
+                    print_root_delete_summary(&root, &summary);
+                    println!("confirm:\trerun with --yes to remove this root from the database");
+                    return Ok(());
+                }
+                let Some(summary) = db::delete_root(&conn, &root.id)? else {
+                    anyhow::bail!("target is not a known root: {target}");
+                };
+                println!("removed:\t{}\t{}\t{}", root.id, root.path, root.machine_id);
+                print_root_delete_counts(&summary);
+                println!("note:\tno filesystem files were deleted");
+            }
             TargetCommands::Ls { target, kind, path } => {
                 let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
                 let conn = db::open_existing(&db)?;
@@ -802,6 +823,28 @@ fn print_cached_directory_entry(entry: &db::CachedDirectoryEntry) {
                 .unwrap_or("stat-only")
         );
     }
+}
+
+fn print_root_delete_summary(root: &db::RootRow, summary: &db::RootDeleteSummary) {
+    println!("root:\t{}\t{}\t{}", root.id, root.path, root.machine_id);
+    print_root_delete_counts(summary);
+    println!("note:\tthis removes Gremlin database records only; filesystem files are not deleted");
+}
+
+fn print_root_delete_counts(summary: &db::RootDeleteSummary) {
+    println!(
+        "records:\tobservations={} chunks={} selections={}/{} plans={}/{} checksums={}/{} jobs={} events={}",
+        summary.path_observations,
+        summary.chunk_hashes,
+        summary.selection_sets,
+        summary.selection_entries,
+        summary.transfer_plans,
+        summary.transfer_plan_entries,
+        summary.checksum_collections,
+        summary.checksum_entries,
+        summary.jobs,
+        summary.job_events
+    );
 }
 
 #[derive(Debug)]

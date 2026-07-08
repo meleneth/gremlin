@@ -143,6 +143,14 @@ pub enum TargetCommands {
         #[arg(long)]
         label: Option<String>,
     },
+    #[command(visible_alias = "rm")]
+    Remove {
+        target: String,
+        #[arg(long, value_enum)]
+        kind: Option<TargetKind>,
+        #[arg(long)]
+        yes: bool,
+    },
     Ls {
         target: String,
         #[arg(long, value_enum)]

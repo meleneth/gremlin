@@ -119,6 +119,7 @@ struct AppState {
     transfer_source_root_id: Option<String>,
     transfer_run_plan_id: Option<String>,
     retarget_draft: Option<RetargetDraft>,
+    pending_delete_root_id: Option<String>,
     last_plan: Option<PlanSnapshot>,
     temporary_browse: Option<TemporaryBrowse>,
 }
@@ -542,6 +543,10 @@ async fn run_loop(
                     handle_retarget_input(conn, &mut state, key.code)?;
                     continue;
                 }
+                if state.pending_delete_root_id.is_some() {
+                    handle_delete_root_confirmation(conn, &mut state, key.code)?;
+                    continue;
+                }
                 match key.code {
                     KeyCode::Char('q') => break,
                     KeyCode::Tab => state.focus = state.focus.next(),
@@ -601,6 +606,12 @@ async fn run_loop(
                             selected_persisted_root(&roots, &state),
                             &mut state,
                         )?;
+                    }
+                    KeyCode::Char('x') => {
+                        start_delete_root_confirmation(
+                            selected_persisted_root(&roots, &state),
+                            &mut state,
+                        );
                     }
                     KeyCode::Char('r') => {
                         run_current_transfer_plan(db_path, job_tx.clone(), &mut state);
@@ -663,7 +674,7 @@ async fn run_loop(
 fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect) {
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
-            "  q quit | Tab panes | arrows move | Space mark | s scan | h hash | c cancel | t plan | Enter | p load | r run | a accept | d drop | e retarget",
+            "  q quit | Tab panes | arrows move | Space mark | s scan | h hash | x remove root | c cancel | t plan | Enter | p load | r run | a accept | d drop | e retarget",
             theme::muted(),
         ),
     ]))
@@ -1793,6 +1804,58 @@ fn load_latest_transfer_plan(
     state.plan_offset = 0;
     state.focus = FocusPane::Plan;
     state.status = format!("loaded transfer plan {}", short_id(&plan.id));
+    Ok(())
+}
+
+fn start_delete_root_confirmation(selected_root: Option<&db::RootRow>, state: &mut AppState) {
+    let Some(root) = selected_root else {
+        state.status = "No persisted root selected to remove".to_string();
+        return;
+    };
+    state.pending_delete_root_id = Some(root.id.clone());
+    state.status = format!(
+        "Remove root {} from database? y confirms, n/Esc cancels; files stay on disk",
+        root_display_name(root)
+    );
+}
+
+fn handle_delete_root_confirmation(
+    conn: &Connection,
+    state: &mut AppState,
+    code: KeyCode,
+) -> anyhow::Result<()> {
+    match code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            let Some(root_id) = state.pending_delete_root_id.take() else {
+                return Ok(());
+            };
+            match db::delete_root(conn, &root_id)? {
+                Some(summary) => {
+                    state.selected_root = state.selected_root.saturating_sub(1);
+                    state.file_offset = 0;
+                    state.event_offset = 0;
+                    state.transfer_source_root_id = None;
+                    state.last_plan = None;
+                    state.status = format!(
+                        "removed root {} ({} observations, {} plans); files untouched",
+                        short_id(&summary.root_id),
+                        summary.path_observations,
+                        summary.transfer_plans
+                    );
+                }
+                None => {
+                    state.status = format!("root {} was already gone", short_id(&root_id));
+                }
+            }
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+            state.pending_delete_root_id = None;
+            state.status = "root removal canceled".to_string();
+        }
+        _ => {
+            state.status = "Confirm root removal with y, or cancel with n/Esc".to_string();
+        }
+    }
     Ok(())
 }
 

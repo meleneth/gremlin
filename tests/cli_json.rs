@@ -110,6 +110,72 @@ fn status_emits_json_for_known_and_unknown_targets() {
 }
 
 #[test]
+fn target_remove_requires_yes_and_removes_root_records_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("gremlin.db");
+    let root = dir.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("hello.txt"), b"hello").unwrap();
+
+    gremlin()
+        .args(["--no-config", "--db", db.to_str().unwrap(), "init"])
+        .assert()
+        .success();
+    command_json(&[
+        "--no-config",
+        "--db",
+        db.to_str().unwrap(),
+        "--json",
+        "scan",
+        root.to_str().unwrap(),
+    ]);
+
+    gremlin()
+        .args([
+            "--no-config",
+            "--db",
+            db.to_str().unwrap(),
+            "target",
+            "remove",
+            root.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let still_known = command_json(&[
+        "--no-config",
+        "--db",
+        db.to_str().unwrap(),
+        "--json",
+        "status",
+        root.to_str().unwrap(),
+    ]);
+    assert_eq!(still_known["known"], true);
+
+    gremlin()
+        .args([
+            "--no-config",
+            "--db",
+            db.to_str().unwrap(),
+            "target",
+            "rm",
+            root.to_str().unwrap(),
+            "--yes",
+        ])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(root.join("hello.txt")).unwrap(), b"hello");
+    let removed = command_json(&[
+        "--no-config",
+        "--db",
+        db.to_str().unwrap(),
+        "--json",
+        "status",
+        root.to_str().unwrap(),
+    ]);
+    assert_eq!(removed["known"], false);
+}
+
+#[test]
 fn import_events_can_project_into_default_ssh_target() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("gremlin.db");

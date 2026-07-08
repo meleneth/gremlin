@@ -55,6 +55,21 @@ pub struct RootSummary {
 }
 
 #[derive(Debug, Clone)]
+pub struct RootDeleteSummary {
+    pub root_id: String,
+    pub path_observations: i64,
+    pub chunk_hashes: i64,
+    pub selection_sets: i64,
+    pub selection_entries: i64,
+    pub transfer_plans: i64,
+    pub transfer_plan_entries: i64,
+    pub checksum_collections: i64,
+    pub checksum_entries: i64,
+    pub jobs: i64,
+    pub job_events: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct SelectionSummary {
     pub set_id: String,
     pub marked_count: i64,
@@ -573,6 +588,167 @@ pub fn set_root_label(conn: &Connection, root_id: &str, label: &str) -> rusqlite
         params![root_id, label],
     )?;
     Ok(())
+}
+
+pub fn delete_root(
+    conn: &Connection,
+    root_id: &str,
+) -> rusqlite::Result<Option<RootDeleteSummary>> {
+    if root_by_id(conn, root_id)?.is_none() {
+        return Ok(None);
+    }
+    let summary = root_delete_summary(conn, root_id)?;
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        r#"
+        DELETE FROM job_events
+        WHERE job_id IN (
+            SELECT id FROM jobs WHERE root_id = ?1
+            UNION
+            SELECT job_id FROM transfer_plans
+            WHERE (source_root_id = ?1 OR dest_root_id = ?1) AND job_id IS NOT NULL
+            UNION
+            SELECT job_id FROM checksum_collections
+            WHERE root_id = ?1 AND job_id IS NOT NULL
+        )
+        "#,
+        params![root_id],
+    )?;
+    tx.execute(
+        r#"
+        DELETE FROM jobs
+        WHERE root_id = ?1
+           OR id IN (
+                SELECT job_id FROM transfer_plans
+                WHERE (source_root_id = ?1 OR dest_root_id = ?1) AND job_id IS NOT NULL
+                UNION
+                SELECT job_id FROM checksum_collections
+                WHERE root_id = ?1 AND job_id IS NOT NULL
+           )
+        "#,
+        params![root_id],
+    )?;
+    tx.execute(
+        "DELETE FROM transfer_plan_entries WHERE plan_id IN (SELECT id FROM transfer_plans WHERE source_root_id = ?1 OR dest_root_id = ?1)",
+        params![root_id],
+    )?;
+    tx.execute(
+        "DELETE FROM transfer_plans WHERE source_root_id = ?1 OR dest_root_id = ?1",
+        params![root_id],
+    )?;
+    tx.execute(
+        "DELETE FROM checksum_entries WHERE collection_id IN (SELECT id FROM checksum_collections WHERE root_id = ?1)",
+        params![root_id],
+    )?;
+    tx.execute(
+        "DELETE FROM checksum_collections WHERE root_id = ?1",
+        params![root_id],
+    )?;
+    tx.execute(
+        "DELETE FROM selection_entries WHERE root_id = ?1 OR selection_set_id IN (SELECT id FROM selection_sets WHERE root_id = ?1)",
+        params![root_id],
+    )?;
+    tx.execute(
+        "DELETE FROM selection_sets WHERE root_id = ?1",
+        params![root_id],
+    )?;
+    tx.execute(
+        "DELETE FROM path_observation_chunk_hashes WHERE path_observation_id IN (SELECT id FROM path_observations WHERE root_id = ?1)",
+        params![root_id],
+    )?;
+    tx.execute(
+        "DELETE FROM path_observations WHERE root_id = ?1",
+        params![root_id],
+    )?;
+    tx.execute("DELETE FROM roots WHERE id = ?1", params![root_id])?;
+    tx.commit()?;
+    Ok(Some(summary))
+}
+
+pub fn root_delete_summary(
+    conn: &Connection,
+    root_id: &str,
+) -> rusqlite::Result<RootDeleteSummary> {
+    let path_observations = count_for_root(conn, "path_observations", root_id)?;
+    let chunk_hashes = conn.query_row(
+        "SELECT COUNT(*) FROM path_observation_chunk_hashes WHERE path_observation_id IN (SELECT id FROM path_observations WHERE root_id = ?1)",
+        params![root_id],
+        |row| row.get(0),
+    )?;
+    let selection_sets = count_for_root(conn, "selection_sets", root_id)?;
+    let selection_entries = conn.query_row(
+        "SELECT COUNT(*) FROM selection_entries WHERE root_id = ?1 OR selection_set_id IN (SELECT id FROM selection_sets WHERE root_id = ?1)",
+        params![root_id],
+        |row| row.get(0),
+    )?;
+    let transfer_plans = conn.query_row(
+        "SELECT COUNT(*) FROM transfer_plans WHERE source_root_id = ?1 OR dest_root_id = ?1",
+        params![root_id],
+        |row| row.get(0),
+    )?;
+    let transfer_plan_entries = conn.query_row(
+        "SELECT COUNT(*) FROM transfer_plan_entries WHERE plan_id IN (SELECT id FROM transfer_plans WHERE source_root_id = ?1 OR dest_root_id = ?1)",
+        params![root_id],
+        |row| row.get(0),
+    )?;
+    let checksum_collections = count_for_root(conn, "checksum_collections", root_id)?;
+    let checksum_entries = conn.query_row(
+        "SELECT COUNT(*) FROM checksum_entries WHERE collection_id IN (SELECT id FROM checksum_collections WHERE root_id = ?1)",
+        params![root_id],
+        |row| row.get(0),
+    )?;
+    let jobs = conn.query_row(
+        r#"
+        SELECT COUNT(*) FROM jobs
+        WHERE root_id = ?1
+           OR id IN (
+                SELECT job_id FROM transfer_plans
+                WHERE (source_root_id = ?1 OR dest_root_id = ?1) AND job_id IS NOT NULL
+                UNION
+                SELECT job_id FROM checksum_collections
+                WHERE root_id = ?1 AND job_id IS NOT NULL
+           )
+        "#,
+        params![root_id],
+        |row| row.get(0),
+    )?;
+    let job_events = conn.query_row(
+        r#"
+        SELECT COUNT(*) FROM job_events
+        WHERE job_id IN (
+            SELECT id FROM jobs WHERE root_id = ?1
+            UNION
+            SELECT job_id FROM transfer_plans
+            WHERE (source_root_id = ?1 OR dest_root_id = ?1) AND job_id IS NOT NULL
+            UNION
+            SELECT job_id FROM checksum_collections
+            WHERE root_id = ?1 AND job_id IS NOT NULL
+        )
+        "#,
+        params![root_id],
+        |row| row.get(0),
+    )?;
+    Ok(RootDeleteSummary {
+        root_id: root_id.to_string(),
+        path_observations,
+        chunk_hashes,
+        selection_sets,
+        selection_entries,
+        transfer_plans,
+        transfer_plan_entries,
+        checksum_collections,
+        checksum_entries,
+        jobs,
+        job_events,
+    })
+}
+
+fn count_for_root(conn: &Connection, table: &str, root_id: &str) -> rusqlite::Result<i64> {
+    conn.query_row(
+        &format!("SELECT COUNT(*) FROM {table} WHERE root_id = ?1"),
+        params![root_id],
+        |row| row.get(0),
+    )
 }
 
 pub fn refresh_root_current_size(conn: &Connection, root_id: &str) -> rusqlite::Result<i64> {
