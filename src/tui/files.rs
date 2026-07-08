@@ -1,43 +1,46 @@
 use super::*;
-pub(super) fn render_files(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    files: &[FileViewRow],
-    selected_paths: &BTreeSet<String>,
-    state: &AppState,
-) {
-    let visible = files.iter().enumerate().skip(state.file_offset);
-    let items = if files.is_empty() {
-        let message = if selected_temporary_browse(state).is_some() {
-            "No files in this remote directory"
-        } else {
-            "No indexed files for this root"
-        };
-        vec![ListItem::new(message)]
-    } else {
-        let mut rows = vec![ListItem::new(file_header(state.file_view)).style(theme::header())];
-        rows.extend(visible.map(|(idx, file)| {
-            let marker = if idx == state.file_offset { "> " } else { "  " };
-            let selected = file_row_selected(file, selected_paths);
-            let style = if idx == state.file_offset {
-                theme::selected()
-            } else if selected {
-                theme::marked()
+pub(super) struct FilesPane<'a> {
+    pub(super) files: &'a [FileViewRow],
+    pub(super) selected_paths: &'a BTreeSet<String>,
+    pub(super) state: &'a AppState,
+}
+
+impl Widget for FilesPane<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let visible = self.files.iter().enumerate().skip(self.state.file_offset);
+        let items = if self.files.is_empty() {
+            let message = if selected_temporary_browse(self.state).is_some() {
+                "No files in this remote directory"
             } else {
-                file_status_style(&file.status)
+                "No indexed files for this root"
             };
-            ListItem::new(file_row(marker, selected, file, state.file_view)).style(style)
-        }));
-        rows
-    };
-    frame.render_widget(
-        List::new(items).style(theme::panel()).block(focus_block(
-            "Files",
-            FocusPane::Files,
-            state.focus,
-        )),
-        area,
-    );
+            vec![ListItem::new(message)]
+        } else {
+            let mut rows =
+                vec![ListItem::new(file_header(self.state.file_view)).style(theme::header())];
+            rows.extend(visible.map(|(idx, file)| {
+                let marker = if idx == self.state.file_offset {
+                    "> "
+                } else {
+                    "  "
+                };
+                let selected = file_row_selected(file, self.selected_paths);
+                let style = if idx == self.state.file_offset {
+                    theme::selected()
+                } else if selected {
+                    theme::marked()
+                } else {
+                    file_status_style(&file.status)
+                };
+                ListItem::new(file_row(marker, selected, file, self.state.file_view)).style(style)
+            }));
+            rows
+        };
+        List::new(items)
+            .style(theme::panel())
+            .block(focus_block("Files", FocusPane::Files, self.state.focus))
+            .render(area, buf);
+    }
 }
 
 pub(super) fn file_row_selected(file: &FileViewRow, selected_paths: &BTreeSet<String>) -> bool {

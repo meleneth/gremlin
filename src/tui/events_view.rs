@@ -1,38 +1,36 @@
 use super::*;
-pub(super) fn render_events(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    events: &[db::JobEventRow],
-    state: &AppState,
-) {
-    let visible = events.iter().enumerate().skip(state.event_offset);
-    let items = if events.is_empty() {
-        vec![ListItem::new("No jobs or events for this root")]
-    } else {
-        let mut rows = vec![ListItem::new(event_header()).style(theme::header())];
-        rows.extend(visible.map(|(idx, row)| {
-            let marker = if idx == state.event_offset {
-                "> "
-            } else {
-                "  "
-            };
-            let style = if idx == state.event_offset {
-                theme::selected()
-            } else {
-                job_status_style(&event_status(row))
-            };
-            ListItem::new(event_row(marker, row)).style(style)
-        }));
-        rows
-    };
-    frame.render_widget(
-        List::new(items).style(theme::panel()).block(focus_block(
-            "Jobs",
-            FocusPane::Events,
-            state.focus,
-        )),
-        area,
-    );
+pub(super) struct EventsPane<'a> {
+    pub(super) events: &'a [db::JobEventRow],
+    pub(super) state: &'a AppState,
+}
+
+impl Widget for EventsPane<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let visible = self.events.iter().enumerate().skip(self.state.event_offset);
+        let items = if self.events.is_empty() {
+            vec![ListItem::new("No jobs or events for this root")]
+        } else {
+            let mut rows = vec![ListItem::new(event_header()).style(theme::header())];
+            rows.extend(visible.map(|(idx, row)| {
+                let marker = if idx == self.state.event_offset {
+                    "> "
+                } else {
+                    "  "
+                };
+                let style = if idx == self.state.event_offset {
+                    theme::selected()
+                } else {
+                    job_status_style(&event_status(row))
+                };
+                ListItem::new(event_row(marker, row)).style(style)
+            }));
+            rows
+        };
+        List::new(items)
+            .style(theme::panel())
+            .block(focus_block("Jobs", FocusPane::Events, self.state.focus))
+            .render(area, buf);
+    }
 }
 
 pub(super) fn event_header() -> String {
@@ -194,27 +192,47 @@ const EVENT_PROGRESS_WIDTH: usize = 14;
 const PARTIAL_BLOCKS: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
 
 pub(super) fn progress_bar(done: u64, total: u64, width: usize) -> String {
-    if width == 0 {
-        return "[]".to_string();
+    TextProgressBar { done, total, width }.label()
+}
+
+pub(super) struct TextProgressBar {
+    pub(super) done: u64,
+    pub(super) total: u64,
+    pub(super) width: usize,
+}
+
+impl TextProgressBar {
+    pub(super) fn label(&self) -> String {
+        if self.width == 0 {
+            return "[]".to_string();
+        }
+        let clamped_done = self.done.min(self.total);
+        let eighths_total = if self.total == 0 {
+            0
+        } else {
+            ((clamped_done as u128) * (self.width as u128) * 8) / (self.total as u128)
+        };
+        let full = (eighths_total / 8).min(self.width as u128) as usize;
+        let partial = (eighths_total % 8) as usize;
+        let mut bar = String::with_capacity(self.width + 2);
+        bar.push('▕');
+        bar.push_str(&"█".repeat(full));
+        if full < self.width {
+            bar.push_str(PARTIAL_BLOCKS[partial]);
+            let empty = self.width.saturating_sub(full + usize::from(partial > 0));
+            bar.push_str(&"░".repeat(empty));
+        }
+        bar.push('▏');
+        bar
     }
-    let clamped_done = done.min(total);
-    let eighths_total = if total == 0 {
-        0
-    } else {
-        ((clamped_done as u128) * (width as u128) * 8) / (total as u128)
-    };
-    let full = (eighths_total / 8).min(width as u128) as usize;
-    let partial = (eighths_total % 8) as usize;
-    let mut bar = String::with_capacity(width + 2);
-    bar.push('▕');
-    bar.push_str(&"█".repeat(full));
-    if full < width {
-        bar.push_str(PARTIAL_BLOCKS[partial]);
-        let empty = width.saturating_sub(full + usize::from(partial > 0));
-        bar.push_str(&"░".repeat(empty));
+}
+
+impl Widget for TextProgressBar {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        Paragraph::new(self.label())
+            .style(theme::panel())
+            .render(area, buf);
     }
-    bar.push('▏');
-    bar
 }
 
 pub(super) fn transfer_rate(bytes_per_second: f64) -> String {

@@ -1,4 +1,43 @@
 use super::*;
+pub(super) struct PlanReviewPane<'a> {
+    pub(super) plan: Option<&'a PlanSnapshot>,
+    pub(super) state: &'a AppState,
+}
+
+impl Widget for PlanReviewPane<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let items = if let Some(plan) = self.plan {
+            let mut rows = vec![ListItem::new(plan_entry_header()).style(theme::header())];
+            rows.extend(
+                plan.entries
+                    .iter()
+                    .enumerate()
+                    .skip(self.state.plan_offset)
+                    .map(|(idx, entry)| {
+                        let marker = if idx == self.state.plan_offset {
+                            "> "
+                        } else {
+                            "  "
+                        };
+                        let style = if idx == self.state.plan_offset {
+                            theme::selected()
+                        } else {
+                            plan_action_style(&entry.action)
+                        };
+                        ListItem::new(plan_entry_row(marker, entry)).style(style)
+                    }),
+            );
+            rows
+        } else {
+            vec![ListItem::new("No transfer plan yet")]
+        };
+        List::new(items)
+            .style(theme::panel())
+            .block(focus_block("Plan", FocusPane::Plan, self.state.focus))
+            .render(area, buf);
+    }
+}
+
 pub(super) fn plan_summary_line(summary: &[db::TransferPlanActionSummary]) -> String {
     if summary.is_empty() {
         return "No plan entries".to_string();
@@ -34,40 +73,6 @@ pub(super) fn plan_copy_count(plan: &PlanSnapshot) -> usize {
         .iter()
         .filter(|entry| entry.action == "copy")
         .count()
-}
-
-pub(super) fn render_plan_review(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    plan: Option<&PlanSnapshot>,
-    state: &AppState,
-) {
-    let items =
-        if let Some(plan) = plan {
-            let mut rows = vec![ListItem::new(plan_entry_header()).style(theme::header())];
-            rows.extend(plan.entries.iter().enumerate().skip(state.plan_offset).map(
-                |(idx, entry)| {
-                    let marker = if idx == state.plan_offset { "> " } else { "  " };
-                    let style = if idx == state.plan_offset {
-                        theme::selected()
-                    } else {
-                        plan_action_style(&entry.action)
-                    };
-                    ListItem::new(plan_entry_row(marker, entry)).style(style)
-                },
-            ));
-            rows
-        } else {
-            vec![ListItem::new("No transfer plan yet")]
-        };
-    frame.render_widget(
-        List::new(items).style(theme::panel()).block(focus_block(
-            "Plan",
-            FocusPane::Plan,
-            state.focus,
-        )),
-        area,
-    );
 }
 
 pub(super) fn plan_entry_header() -> String {

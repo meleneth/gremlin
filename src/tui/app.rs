@@ -134,39 +134,72 @@ pub(super) async fn run_loop(
                 .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
                 .split(vertical[2]);
 
-            render_header(frame, vertical[0], &state, selected_temporary.is_some());
-            render_roots(frame, middle[0], &roots, &state);
-            render_files(frame, middle[1], &files, &selected_paths, &state);
-            render_detail_panel(
-                frame,
-                lower[0],
-                DetailData {
-                    root: selected,
-                    temporary_browse: selected_temporary,
-                    persisted_browse_dir: selected
-                        .map(|root| current_persisted_root_dir(&state, &root.id)),
-                    summary: summary.as_ref(),
-                    selection: selection_summary.as_ref(),
-                    file: files.get(state.file_offset),
+            frame.render_widget(
+                HeaderPane {
+                    state: &state,
+                    has_temporary_browse: selected_temporary.is_some(),
+                },
+                vertical[0],
+            );
+            frame.render_widget(
+                RootsPane {
+                    roots: &roots,
+                    state: &state,
+                },
+                middle[0],
+            );
+            frame.render_widget(
+                FilesPane {
+                    files: &files,
                     selected_paths: &selected_paths,
+                    state: &state,
+                },
+                middle[1],
+            );
+            frame.render_widget(
+                DetailPane {
+                    data: DetailData {
+                        root: selected,
+                        temporary_browse: selected_temporary,
+                        persisted_browse_dir: selected
+                            .map(|root| current_persisted_root_dir(&state, &root.id)),
+                        summary: summary.as_ref(),
+                        selection: selection_summary.as_ref(),
+                        file: files.get(state.file_offset),
+                        selected_paths: &selected_paths,
+                        plan: state.last_plan.as_ref(),
+                        transfer_progress: transfer_progress.clone(),
+                    },
+                },
+                lower[0],
+            );
+            frame.render_widget(
+                PlanReviewPane {
                     plan: state.last_plan.as_ref(),
-                    transfer_progress: transfer_progress.clone(),
+                    state: &state,
                 },
+                lower[1],
             );
-            render_plan_review(frame, lower[1], state.last_plan.as_ref(), &state);
-            render_info_bar(
-                frame,
+            frame.render_widget(
+                InfoBar {
+                    data: InfoBarData {
+                        root_name: selected_root_name(selected, selected_temporary),
+                        file: files.get(state.file_offset),
+                        selection: selection_summary.as_ref(),
+                        event: events.get(state.event_offset),
+                        root_count,
+                    },
+                    state: &state,
+                },
                 vertical[3],
-                InfoBarData {
-                    root_name: selected_root_name(selected, selected_temporary),
-                    file: files.get(state.file_offset),
-                    selection: selection_summary.as_ref(),
-                    event: events.get(state.event_offset),
-                    root_count,
-                },
-                &state,
             );
-            render_events(frame, vertical[4], &events, &state);
+            frame.render_widget(
+                EventsPane {
+                    events: &events,
+                    state: &state,
+                },
+                vertical[4],
+            );
         })?;
 
         if event::poll(Duration::from_millis(250))? {

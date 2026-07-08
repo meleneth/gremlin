@@ -1,58 +1,58 @@
 use super::*;
-pub(super) fn render_roots(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    roots: &[db::RootRow],
-    state: &AppState,
-) {
-    let root_count = visible_root_count(state, roots.len());
-    let items = if root_count == 0 {
-        vec![ListItem::new(
-            "No roots yet\nRun `gremlin /path` or `gremlin target add /path`",
-        )]
-    } else {
-        let mut rows = vec![ListItem::new(root_header()).style(theme::header())];
-        if let Some(browse) = state.temporary_browse.as_ref() {
-            let style = if state.selected_root == 0 {
-                theme::selected()
-            } else {
-                theme::warn()
-            };
-            rows.push(
-                ListItem::new(temporary_root_row(state.selected_root == 0, browse)).style(style),
-            );
-        }
-        rows.extend(roots.iter().enumerate().map(|(root_idx, root)| {
-            let idx = visible_index_for_persisted(state, root_idx);
-            let marker = if idx == state.selected_root {
-                "> "
-            } else {
-                "  "
-            };
-            let transfer_marker = if state.transfer_source_root_id.as_deref() == Some(&root.id) {
-                "S"
-            } else {
-                " "
-            };
-            let style = if idx == state.selected_root {
-                theme::selected()
-            } else if state.transfer_source_root_id.as_deref() == Some(&root.id) {
-                theme::marked()
-            } else {
-                theme::panel()
-            };
-            ListItem::new(root_row(marker, transfer_marker, root)).style(style)
-        }));
-        rows
-    };
-    frame.render_widget(
-        List::new(items).style(theme::panel()).block(focus_block(
-            "Roots",
-            FocusPane::Roots,
-            state.focus,
-        )),
-        area,
-    );
+pub(super) struct RootsPane<'a> {
+    pub(super) roots: &'a [db::RootRow],
+    pub(super) state: &'a AppState,
+}
+
+impl Widget for RootsPane<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let root_count = visible_root_count(self.state, self.roots.len());
+        let items = if root_count == 0 {
+            vec![ListItem::new(
+                "No roots yet\nRun `gremlin /path` or `gremlin target add /path`",
+            )]
+        } else {
+            let mut rows = vec![ListItem::new(root_header()).style(theme::header())];
+            if let Some(browse) = self.state.temporary_browse.as_ref() {
+                let style = if self.state.selected_root == 0 {
+                    theme::selected()
+                } else {
+                    theme::warn()
+                };
+                rows.push(
+                    ListItem::new(temporary_root_row(self.state.selected_root == 0, browse))
+                        .style(style),
+                );
+            }
+            rows.extend(self.roots.iter().enumerate().map(|(root_idx, root)| {
+                let idx = visible_index_for_persisted(self.state, root_idx);
+                let marker = if idx == self.state.selected_root {
+                    "> "
+                } else {
+                    "  "
+                };
+                let transfer_marker =
+                    if self.state.transfer_source_root_id.as_deref() == Some(&root.id) {
+                        "S"
+                    } else {
+                        " "
+                    };
+                let style = if idx == self.state.selected_root {
+                    theme::selected()
+                } else if self.state.transfer_source_root_id.as_deref() == Some(&root.id) {
+                    theme::marked()
+                } else {
+                    theme::panel()
+                };
+                ListItem::new(root_row(marker, transfer_marker, root)).style(style)
+            }));
+            rows
+        };
+        List::new(items)
+            .style(theme::panel())
+            .block(focus_block("Roots", FocusPane::Roots, self.state.focus))
+            .render(area, buf);
+    }
 }
 
 pub(super) fn root_header() -> String {

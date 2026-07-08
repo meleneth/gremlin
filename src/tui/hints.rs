@@ -1,15 +1,17 @@
 use super::*;
-pub(super) fn render_header(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    state: &AppState,
-    has_temporary_browse: bool,
-) {
-    let header = Paragraph::new(command_hint_lines(state, has_temporary_browse))
-        .style(theme::panel())
-        .wrap(Wrap { trim: true })
-        .block(panel_block("Commands", true));
-    frame.render_widget(header, area);
+pub(super) struct HeaderPane<'a> {
+    pub(super) state: &'a AppState,
+    pub(super) has_temporary_browse: bool,
+}
+
+impl Widget for HeaderPane<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let header = Paragraph::new(command_hint_lines(self.state, self.has_temporary_browse))
+            .style(theme::panel())
+            .wrap(Wrap { trim: true })
+            .block(panel_block("Commands", true));
+        header.render(area, buf);
+    }
 }
 
 pub(super) fn command_hint_lines(
