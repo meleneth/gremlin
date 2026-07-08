@@ -55,6 +55,10 @@ pub enum Commands {
     },
     ImportEvents {
         input: PathBuf,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long, value_enum)]
+        kind: Option<TargetKind>,
     },
     ImportManifest {
         input: PathBuf,

@@ -10,17 +10,41 @@ use crate::error::GremlinError;
 use crate::events::{EventEnvelope, EventKind, EventPayload};
 use crate::util::{basename, now_rfc3339, parent_path};
 
+#[derive(Debug, Clone)]
+pub struct EventImportTarget {
+    pub machine_id: String,
+    pub root_id: String,
+    pub root_path: String,
+}
+
 pub fn import_events_file(conn: &Connection, input: &Path) -> anyhow::Result<()> {
+    import_events_file_for_target(conn, input, None)
+}
+
+pub fn import_events_file_for_target(
+    conn: &Connection,
+    input: &Path,
+    target: Option<&EventImportTarget>,
+) -> anyhow::Result<()> {
     db::init_schema(conn)?;
     let file = File::open(input).with_context(|| format!("opening {}", input.display()))?;
     let reader = BufReader::new(file);
     let source = input.display().to_string();
-    let import_job_id = db::ensure_import_job(conn, &source)?;
+    let import_job_id = create_import_job(conn, &source, target)?;
     let collection_id =
         db::create_checksum_collection(conn, &source, "jsonl_import", Some(&import_job_id))?;
+    if let Some(target) = target {
+        db::attach_checksum_collection_target(
+            conn,
+            &collection_id,
+            &target.machine_id,
+            &target.root_id,
+        )?;
+    }
 
     let mut imported = 0_u64;
     let mut checksums = 0_u64;
+    let mut projected = 0_u64;
     let mut import_sequence = db::next_sequence(conn, &import_job_id)?;
 
     for (idx, line) in reader.lines().enumerate() {
@@ -46,6 +70,7 @@ pub fn import_events_file(conn: &Connection, input: &Path) -> anyhow::Result<()>
         if let EventPayload::HashCompleted {
             relative_path,
             basename,
+            parent_path,
             size_bytes,
             modified_at,
             blake3,
@@ -69,15 +94,63 @@ pub fn import_events_file(conn: &Connection, input: &Path) -> anyhow::Result<()>
                     }),
                 },
             )?;
+            if let Some(target) = target {
+                let content_id = db::ensure_content_object(conn, *size_bytes, blake3, sha256)?;
+                db::insert_path_observation(
+                    conn,
+                    db::PathObservationInput {
+                        machine_id: &target.machine_id,
+                        root_id: &target.root_id,
+                        relative_path,
+                        basename,
+                        parent_path,
+                        size_bytes: *size_bytes,
+                        modified_at: modified_at.as_deref(),
+                        content_id: Some(&content_id),
+                    },
+                )?;
+                projected += 1;
+            }
             checksums += 1;
         }
     }
 
     db::complete_job(conn, &import_job_id, "completed")?;
-    println!(
-        "import job {import_job_id}: {imported} events, {checksums} checksum entries, collection {collection_id}"
-    );
+    if let Some(target) = target {
+        println!(
+            "import job {import_job_id}: {imported} events, {checksums} checksum entries, {projected} projected files, collection {collection_id}, root {} {}",
+            target.root_id, target.root_path
+        );
+    } else {
+        println!(
+            "import job {import_job_id}: {imported} events, {checksums} checksum entries, collection {collection_id}"
+        );
+    }
     Ok(())
+}
+
+fn create_import_job(
+    conn: &Connection,
+    source: &str,
+    target: Option<&EventImportTarget>,
+) -> rusqlite::Result<String> {
+    let job_id = if let Some(target) = target {
+        db::create_job(
+            conn,
+            "import_events",
+            Some(&target.machine_id),
+            Some(&target.root_id),
+            serde_json::json!({
+                "source": source,
+                "target_root_id": target.root_id,
+                "target_root_path": target.root_path,
+            }),
+        )?
+    } else {
+        return db::ensure_import_job(conn, source);
+    };
+    db::start_job(conn, &job_id)?;
+    Ok(job_id)
 }
 
 pub fn import_manifest_file(conn: &Connection, input: &Path) -> anyhow::Result<()> {
@@ -470,6 +543,56 @@ mod tests {
         assert_eq!(db::table_count(&conn, "checksum_collections").unwrap(), 1);
         assert_eq!(db::table_count(&conn, "checksum_entries").unwrap(), 1);
         assert_eq!(db::table_count(&conn, "job_events").unwrap(), 1);
+    }
+
+    #[test]
+    fn imports_hash_events_into_target_root_projection() {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl = dir.path().join("remote.jsonl");
+        let event = EventEnvelope {
+            event_kind: EventKind::HashCompleted,
+            job_id: Some("job_remote".to_string()),
+            sequence: Some(1),
+            created_at: now_rfc3339(),
+            payload: EventPayload::HashCompleted {
+                relative_path: "folder/a.txt".to_string(),
+                basename: "a.txt".to_string(),
+                parent_path: "folder".to_string(),
+                size_bytes: 5,
+                modified_at: Some("2026-07-07T00:00:00Z".to_string()),
+                blake3: "b".repeat(64),
+                sha256: "s".repeat(64),
+            },
+        };
+        std::fs::write(&jsonl, format!("{}\n", event.to_json_line().unwrap())).unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        let machine_id = db::ensure_machine_hint(&conn, "nas01", Some("ssh")).unwrap();
+        let root_id = db::ensure_root(&conn, &machine_id, "/srv/archive").unwrap();
+        let target = EventImportTarget {
+            machine_id: machine_id.clone(),
+            root_id: root_id.clone(),
+            root_path: "/srv/archive".to_string(),
+        };
+
+        import_events_file_for_target(&conn, &jsonl, Some(&target)).unwrap();
+
+        assert_eq!(db::table_count(&conn, "checksum_collections").unwrap(), 1);
+        assert_eq!(db::table_count(&conn, "checksum_entries").unwrap(), 1);
+        assert_eq!(db::table_count(&conn, "content_objects").unwrap(), 1);
+        let status = db::target_status(&conn, &machine_id, "/srv/archive")
+            .unwrap()
+            .unwrap();
+        assert_eq!(status.file_count, 1);
+        assert_eq!(status.content_count, 1);
+        assert_eq!(status.total_bytes, 5);
+        assert_eq!(status.latest_job.unwrap().kind, "import_events");
+        let observation = db::path_observation_for_root_path(&conn, &root_id, "folder/a.txt")
+            .unwrap()
+            .unwrap();
+        assert_eq!(observation.size_bytes, 5);
+        assert!(observation.content_id.is_some());
     }
 
     #[test]

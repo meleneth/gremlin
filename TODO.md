@@ -37,7 +37,7 @@
 
 - Build remote dispatch and progress streaming on Tokio rather than adding a separate sync orchestration path.
 - Implement SSH dispatch for `worker hash --jsonl`.
-- Add remote job metadata so imported events can be tied back to remote machines/roots cleanly.
+- Preserve remote worker job identity while also projecting target-aware imports into local import jobs.
 - Treat SFV, CFV, PAR2, and worker JSONL as manifest/checksum collection sources.
 - Add SMB path mapping and target normalization.
 - Improve import reconciliation from checksum collections into projected state.

@@ -28,6 +28,7 @@ gremlin worker hash PATH --jsonl
 gremlin worker hash PATH --jsonl --out checksums.jsonl
 
 gremlin import-events checksums.jsonl --db ./gremlin.db
+gremlin import-events checksums.jsonl --target nas01:/srv/archive --db ./gremlin.db
 gremlin import-manifest checksums.sfv --db ./gremlin.db
 
 gremlin events --db ./gremlin.db

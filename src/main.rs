@@ -95,10 +95,32 @@ async fn main() -> anyhow::Result<()> {
                 fswork::worker_hash_jsonl(&path, out.as_deref())?;
             }
         },
-        Some(Commands::ImportEvents { input }) => {
+        Some(Commands::ImportEvents {
+            input,
+            target,
+            kind,
+        }) => {
             let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
             let conn = db::open_existing(&db)?;
-            import::import_events_file(&conn, &input)?;
+            let import_target = match target {
+                Some(target) => {
+                    let parsed = targets::parse_target(&target, kind)?;
+                    let (machine_id, root_path) =
+                        resolve_target_identity(&conn, &parsed, machine_label.as_deref())?;
+                    let root_id = db::ensure_root(&conn, &machine_id, &root_path)?;
+                    Some(import::EventImportTarget {
+                        machine_id,
+                        root_id,
+                        root_path,
+                    })
+                }
+                None => None,
+            };
+            if let Some(import_target) = import_target.as_ref() {
+                import::import_events_file_for_target(&conn, &input, Some(import_target))?;
+            } else {
+                import::import_events_file(&conn, &input)?;
+            }
         }
         Some(Commands::ImportManifest { input }) => {
             let db = config_ctx.resolve_db_or_default(cli.db.clone())?;

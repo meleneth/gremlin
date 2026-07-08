@@ -810,6 +810,23 @@ pub fn create_checksum_collection(
     Ok(id)
 }
 
+pub fn attach_checksum_collection_target(
+    conn: &Connection,
+    collection_id: &str,
+    machine_id: &str,
+    root_id: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        r#"
+        UPDATE checksum_collections
+        SET machine_id = ?2, root_id = ?3
+        WHERE id = ?1
+        "#,
+        params![collection_id, machine_id, root_id],
+    )?;
+    Ok(())
+}
+
 pub fn insert_checksum_entry(
     conn: &Connection,
     input: ChecksumEntryInput<'_>,
