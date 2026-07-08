@@ -26,6 +26,23 @@ pub fn import_events_file_for_target(
     input: &Path,
     target: Option<&EventImportTarget>,
 ) -> anyhow::Result<()> {
+    import_events_file_for_target_inner(conn, input, target, true)
+}
+
+pub fn import_events_file_for_target_silent(
+    conn: &Connection,
+    input: &Path,
+    target: Option<&EventImportTarget>,
+) -> anyhow::Result<()> {
+    import_events_file_for_target_inner(conn, input, target, false)
+}
+
+fn import_events_file_for_target_inner(
+    conn: &Connection,
+    input: &Path,
+    target: Option<&EventImportTarget>,
+    print_summary: bool,
+) -> anyhow::Result<()> {
     db::init_schema(conn)?;
     let file = File::open(input).with_context(|| format!("opening {}", input.display()))?;
     let reader = BufReader::new(file);
@@ -116,15 +133,17 @@ pub fn import_events_file_for_target(
     }
 
     db::complete_job(conn, &import_job_id, "completed")?;
-    if let Some(target) = target {
-        println!(
-            "import job {import_job_id}: {imported} events, {checksums} checksum entries, {projected} projected files, collection {collection_id}, root {} {}",
-            target.root_id, target.root_path
-        );
-    } else {
-        println!(
-            "import job {import_job_id}: {imported} events, {checksums} checksum entries, collection {collection_id}"
-        );
+    if print_summary {
+        if let Some(target) = target {
+            println!(
+                "import job {import_job_id}: {imported} events, {checksums} checksum entries, {projected} projected files, collection {collection_id}, root {} {}",
+                target.root_id, target.root_path
+            );
+        } else {
+            println!(
+                "import job {import_job_id}: {imported} events, {checksums} checksum entries, collection {collection_id}"
+            );
+        }
     }
     Ok(())
 }

@@ -120,12 +120,30 @@ struct AppState {
     transfer_run_plan_id: Option<String>,
     retarget_draft: Option<RetargetDraft>,
     pending_delete_root_id: Option<String>,
+    pending_import_prompt: bool,
     last_plan: Option<PlanSnapshot>,
     temporary_browse: Option<TemporaryBrowse>,
 }
 
 pub type BrowseProvider =
     Arc<dyn Fn(&str) -> anyhow::Result<Vec<InitialBrowseEntry>> + Send + Sync + 'static>;
+pub type ImportProvider =
+    Arc<dyn Fn(ImportMode, &str) -> anyhow::Result<ImportResult> + Send + Sync + 'static>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportMode {
+    No,
+    Fast,
+    Hash,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportResult {
+    pub mode: ImportMode,
+    pub root_id: String,
+    pub root_path: String,
+    pub files_imported: u64,
+}
 
 #[derive(Clone)]
 pub struct InitialBrowse {
@@ -135,6 +153,7 @@ pub struct InitialBrowse {
     pub current_path: String,
     pub entries: Vec<InitialBrowseEntry>,
     pub browse_provider: Option<BrowseProvider>,
+    pub import_provider: Option<ImportProvider>,
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +172,7 @@ struct TemporaryBrowse {
     current_path: String,
     entries: Vec<InitialBrowseEntry>,
     browse_provider: Option<BrowseProvider>,
+    import_provider: Option<ImportProvider>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,6 +200,7 @@ impl From<InitialBrowse> for TemporaryBrowse {
             current_path: value.current_path,
             entries: value.entries,
             browse_provider: value.browse_provider,
+            import_provider: value.import_provider,
         }
     }
 }
@@ -234,6 +255,7 @@ struct PlanSnapshot {
 enum TuiMessage {
     Status(String),
     TransferFinished { plan_id: String, status: String },
+    ImportFinished(String),
 }
 
 struct InfoBarData<'a> {
@@ -442,6 +464,7 @@ async fn run_loop(
                     refresh_last_plan(conn, &mut state, &plan_id)?;
                     state.status = status;
                 }
+                TuiMessage::ImportFinished(status) => state.status = status,
             }
         }
         let roots = db::roots(conn)?;
@@ -547,6 +570,10 @@ async fn run_loop(
                     handle_delete_root_confirmation(conn, &mut state, key.code)?;
                     continue;
                 }
+                if state.pending_import_prompt {
+                    handle_temporary_import_choice(&mut state, key.code, job_tx.clone());
+                    continue;
+                }
                 match key.code {
                     KeyCode::Char('q') => break,
                     KeyCode::Tab => state.focus = state.focus.next(),
@@ -613,6 +640,9 @@ async fn run_loop(
                             &mut state,
                         );
                     }
+                    KeyCode::Char('i') => {
+                        start_temporary_import_prompt(&mut state);
+                    }
                     KeyCode::Char('r') => {
                         run_current_transfer_plan(db_path, job_tx.clone(), &mut state);
                     }
@@ -674,7 +704,7 @@ async fn run_loop(
 fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect) {
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
-            "  q quit | Tab panes | arrows move | Space mark | s scan | h hash | x remove root | c cancel | t plan | Enter | p load | r run | a accept | d drop | e retarget",
+            "  q quit | Tab panes | arrows move | Space mark | i import | s scan | h hash | x remove root | c cancel | t plan | Enter | p load | r run | a accept | d drop | e retarget",
             theme::muted(),
         ),
     ]))
@@ -1859,6 +1889,79 @@ fn handle_delete_root_confirmation(
     Ok(())
 }
 
+fn start_temporary_import_prompt(state: &mut AppState) {
+    let Some(browse) = selected_temporary_browse(state) else {
+        state.status = "Select a temporary SSH browse root to import".to_string();
+        return;
+    };
+    if browse.import_provider.is_none() {
+        state.status = "Import is unavailable for this temporary root".to_string();
+        return;
+    }
+    state.pending_import_prompt = true;
+    state.status =
+        "Import current remote directory? n=root only, f=fast recursive stat, h=remote hash, Esc cancels"
+            .to_string();
+}
+
+fn handle_temporary_import_choice(
+    state: &mut AppState,
+    code: KeyCode,
+    job_tx: mpsc::UnboundedSender<TuiMessage>,
+) {
+    let mode = match code {
+        KeyCode::Char('n') | KeyCode::Char('N') => Some(ImportMode::No),
+        KeyCode::Char('f') | KeyCode::Char('F') => Some(ImportMode::Fast),
+        KeyCode::Char('h') | KeyCode::Char('H') => Some(ImportMode::Hash),
+        KeyCode::Esc => {
+            state.pending_import_prompt = false;
+            state.status = "import canceled".to_string();
+            return;
+        }
+        _ => {
+            state.status = "Choose n root-only, f fast stat, h remote hash, or Esc".to_string();
+            return;
+        }
+    };
+    let Some(mode) = mode else {
+        return;
+    };
+    let Some(browse) = selected_temporary_browse(state) else {
+        state.pending_import_prompt = false;
+        state.status = "No temporary root selected".to_string();
+        return;
+    };
+    let Some(provider) = browse.import_provider.clone() else {
+        state.pending_import_prompt = false;
+        state.status = "Import is unavailable for this temporary root".to_string();
+        return;
+    };
+    let remote_path = browse.current_path.clone();
+    state.pending_import_prompt = false;
+    state.status = format!("importing {remote_path} ({})", import_mode_label(mode));
+    task::spawn_blocking(move || {
+        let status = match provider(mode, &remote_path) {
+            Ok(result) => format!(
+                "imported {} as root {} ({}, {} files)",
+                result.root_path,
+                short_id(&result.root_id),
+                import_mode_label(result.mode),
+                result.files_imported
+            ),
+            Err(err) => format!("import failed: {err}"),
+        };
+        let _ = job_tx.send(TuiMessage::ImportFinished(status));
+    });
+}
+
+fn import_mode_label(mode: ImportMode) -> &'static str {
+    match mode {
+        ImportMode::No => "root-only",
+        ImportMode::Fast => "fast",
+        ImportMode::Hash => "hash",
+    }
+}
+
 fn run_current_transfer_plan(
     db_path: &Path,
     job_tx: mpsc::UnboundedSender<TuiMessage>,
@@ -2161,6 +2264,7 @@ mod tests {
                     modified_at: None,
                 }],
                 browse_provider: Some(provider),
+                import_provider: None,
             }),
             ..AppState::default()
         };

@@ -16,6 +16,8 @@ use cli::{
     Cli, Commands, ConfigCommands, JobCommands, TargetCommands, TransferCommands, WorkerCommands,
 };
 use serde::Serialize;
+use std::io::Write;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use targets::{ParsedTarget, TargetKind};
@@ -571,6 +573,8 @@ fn run_default_target(
                 parsed.kind, machine_id, root_path
             );
             let browse_provider = ssh_browse_provider(parsed.clone());
+            let import_provider =
+                ssh_import_provider(parsed.clone(), machine_id.clone(), db_path.clone());
             match fast_scan_ssh_directory(&parsed, &root_path) {
                 Ok(entries) => {
                     if entries.is_empty() {
@@ -586,6 +590,7 @@ fn run_default_target(
                         current_path: root_path.clone(),
                         entries: entries.iter().map(tui_entry_from_fast).collect(),
                         browse_provider: Some(browse_provider),
+                        import_provider: Some(import_provider),
                     });
                 }
                 Err(err) => {
@@ -597,6 +602,7 @@ fn run_default_target(
                         current_path: root_path.clone(),
                         entries: Vec::new(),
                         browse_provider: Some(browse_provider),
+                        import_provider: Some(import_provider),
                     });
                 }
             }
@@ -862,6 +868,16 @@ fn ssh_browse_provider(parsed: ParsedTarget) -> tui::BrowseProvider {
     })
 }
 
+fn ssh_import_provider(
+    parsed: ParsedTarget,
+    machine_id: String,
+    db_path: PathBuf,
+) -> tui::ImportProvider {
+    Arc::new(move |mode, remote_path| {
+        import_ssh_root(&db_path, &parsed, &machine_id, remote_path, mode)
+    })
+}
+
 fn tui_entry_from_fast(entry: &FastDirectoryEntry) -> tui::InitialBrowseEntry {
     tui::InitialBrowseEntry {
         kind: entry.kind.clone(),
@@ -869,6 +885,176 @@ fn tui_entry_from_fast(entry: &FastDirectoryEntry) -> tui::InitialBrowseEntry {
         size_bytes: entry.size_bytes,
         modified_at: entry.modified_at.clone(),
     }
+}
+
+fn import_ssh_root(
+    db_path: &std::path::Path,
+    parsed: &ParsedTarget,
+    machine_id: &str,
+    remote_path: &str,
+    mode: tui::ImportMode,
+) -> anyhow::Result<tui::ImportResult> {
+    let conn = db::open_existing(db_path)?;
+    let root_id = db::ensure_root(&conn, machine_id, remote_path)?;
+    let files_imported = match mode {
+        tui::ImportMode::No => 0,
+        tui::ImportMode::Fast => {
+            import_ssh_fast_stat(&conn, parsed, machine_id, &root_id, remote_path)?
+        }
+        tui::ImportMode::Hash => {
+            import_ssh_worker_hash(&conn, parsed, machine_id, &root_id, remote_path)?
+        }
+    };
+    Ok(tui::ImportResult {
+        mode,
+        root_id,
+        root_path: remote_path.to_string(),
+        files_imported,
+    })
+}
+
+#[derive(Debug)]
+struct RemoteStatEntry {
+    relative_path: String,
+    size_bytes: u64,
+    modified_at: Option<String>,
+}
+
+fn import_ssh_fast_stat(
+    conn: &rusqlite::Connection,
+    parsed: &ParsedTarget,
+    machine_id: &str,
+    root_id: &str,
+    remote_path: &str,
+) -> anyhow::Result<u64> {
+    let entries = fast_scan_ssh_tree(parsed, remote_path)?;
+    for entry in &entries {
+        db::insert_path_observation(
+            conn,
+            db::PathObservationInput {
+                machine_id,
+                root_id,
+                relative_path: &entry.relative_path,
+                basename: remote_basename(&entry.relative_path),
+                parent_path: &remote_parent(&entry.relative_path),
+                size_bytes: entry.size_bytes,
+                modified_at: entry.modified_at.as_deref(),
+                content_id: None,
+            },
+        )?;
+    }
+    Ok(entries.len() as u64)
+}
+
+fn import_ssh_worker_hash(
+    conn: &rusqlite::Connection,
+    parsed: &ParsedTarget,
+    machine_id: &str,
+    root_id: &str,
+    remote_path: &str,
+) -> anyhow::Result<u64> {
+    let host = parsed
+        .machine_hint
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("SSH target missing machine hint"))?;
+    let command = format!(
+        "gremlin worker hash {} --jsonl",
+        remote_shell_path(remote_path)
+    );
+    let output = Command::new("ssh")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ConnectTimeout=2")
+        .arg(host)
+        .arg(command)
+        .output()
+        .with_context(|| format!("running remote hash worker for {host}:{remote_path}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "remote hash failed for {host}:{remote_path}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let temp_path =
+        std::env::temp_dir().join(format!("gremlin-{}.jsonl", util::new_id("ssh_hash")));
+    {
+        let mut file = std::fs::File::create(&temp_path)
+            .with_context(|| format!("creating {}", temp_path.display()))?;
+        file.write_all(&output.stdout)
+            .with_context(|| format!("writing {}", temp_path.display()))?;
+    }
+    let target = import::EventImportTarget {
+        machine_id: machine_id.to_string(),
+        root_id: root_id.to_string(),
+        root_path: remote_path.to_string(),
+    };
+    let result = import::import_events_file_for_target_silent(conn, &temp_path, Some(&target));
+    let _ = std::fs::remove_file(&temp_path);
+    result?;
+    let summary = db::root_summary(conn, root_id)?;
+    Ok(summary.file_count as u64)
+}
+
+fn fast_scan_ssh_tree(
+    parsed: &ParsedTarget,
+    remote_path: &str,
+) -> anyhow::Result<Vec<RemoteStatEntry>> {
+    let host = parsed
+        .machine_hint
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("SSH target missing machine hint"))?;
+    let command = format!(
+        "find -L {} -type f -printf '%P\\t%s\\t%T+\\n'",
+        remote_shell_path(remote_path)
+    );
+    let output = Command::new("ssh")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ConnectTimeout=2")
+        .arg(host)
+        .arg(command)
+        .output()
+        .with_context(|| format!("fast importing SSH target {host}:{remote_path}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "ssh fast import failed for {host}:{remote_path}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut entries = Vec::new();
+    for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let parts = line.splitn(3, '\t').collect::<Vec<_>>();
+        if parts.len() != 3 || parts[0].is_empty() {
+            continue;
+        }
+        entries.push(RemoteStatEntry {
+            relative_path: parts[0].to_string(),
+            size_bytes: parts[1].parse::<u64>().unwrap_or(0),
+            modified_at: Some(parts[2].to_string()),
+        });
+    }
+    entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    Ok(entries)
+}
+
+fn remote_basename(relative_path: &str) -> &str {
+    relative_path.rsplit('/').next().unwrap_or(relative_path)
+}
+
+fn remote_parent(relative_path: &str) -> String {
+    relative_path
+        .rsplit_once('/')
+        .map(|(parent, _)| {
+            if parent.is_empty() {
+                ".".to_string()
+            } else {
+                parent.to_string()
+            }
+        })
+        .unwrap_or_else(|| ".".to_string())
 }
 
 fn fast_scan_ssh_directory(

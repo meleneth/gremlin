@@ -36,7 +36,7 @@
 ## Remote And Imports
 
 - Build remote dispatch and progress streaming on Tokio rather than adding a separate sync orchestration path.
-- Implement SSH dispatch for `worker hash --jsonl`.
+- Improve SSH dispatch for `worker hash --jsonl` with streamed progress and remote worker availability checks.
 - Implement SSH host-side chunk hashing that stores MD5 chunk evidence without copying file bytes locally first.
 - Preserve remote worker job identity while also projecting target-aware imports into local import jobs.
 - Treat SFV, CFV, PAR2, and worker JSONL as manifest/checksum collection sources.
@@ -45,8 +45,8 @@
 - Add safer handling for partial imports and duplicate event streams.
 - Track resumable worker/import state so interrupted remote hash jobs can continue without starting over.
 - Design remote browse/status around cached directory observations so flaky remote access does not make the UI useless.
-- Add TUI cached directory navigation for SSH roots, starting at the default `host:` location.
-- Add a TUI flow to promote a browsed remote directory into a tracked root.
+- Add richer TUI cached directory navigation for persisted SSH roots, not only temporary live browse roots.
+- Add explicit refresh/re-import controls for promoted remote roots.
 
 ## Transfer Planning
 
@@ -69,5 +69,5 @@
 
 - Incremental hashing relies on size/mtime and can miss same-size timestamp-preserved edits; use `hash --all` for full rebuilds.
 - Verify reads bytes and can prove current content against stored hashes, but missing remains non-destructive.
-- Remote targets are registered and summarized only; no SSH execution exists yet.
+- SSH browse, one-sided copy, fast stat import, and remote worker hash import exist; remote-to-remote copy and streamed remote supervision are not implemented yet.
 - Resume is not implemented yet; current jobs are durable records, but scan/hash execution still runs in one process.
