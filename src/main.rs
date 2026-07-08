@@ -17,6 +17,7 @@ use cli::{
 };
 use serde::Serialize;
 use std::process::Command;
+use std::sync::Arc;
 use targets::{ParsedTarget, TargetKind};
 
 #[tokio::main]
@@ -43,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
                 tui::run_with_options(&conn, &db, machine_label).await?;
                 return Ok(());
             };
-            let db = run_default_target(
+            let default_target = run_default_target(
                 &config_ctx,
                 cli.db.clone(),
                 target,
@@ -51,8 +52,14 @@ async fn main() -> anyhow::Result<()> {
                 output,
             )?;
             if !cli.no_tui {
-                let conn = db::open_existing(&db)?;
-                tui::run_with_options(&conn, &db, machine_label).await?;
+                let conn = db::open_existing(&default_target.db_path)?;
+                tui::run_with_initial_browse(
+                    &conn,
+                    &default_target.db_path,
+                    machine_label,
+                    default_target.initial_browse,
+                )
+                .await?;
             }
         }
         Some(Commands::Init) => {
@@ -495,13 +502,18 @@ fn resolve_registered_root(
         })
 }
 
+struct DefaultTargetResult {
+    db_path: std::path::PathBuf,
+    initial_browse: Option<tui::InitialBrowse>,
+}
+
 fn run_default_target(
     config_ctx: &config::ConfigContext,
     cli_db: Option<std::path::PathBuf>,
     target: &str,
     machine_label: Option<&str>,
     output: fswork::OutputOptions,
-) -> anyhow::Result<std::path::PathBuf> {
+) -> anyhow::Result<DefaultTargetResult> {
     let text_output = fswork::OutputOptions {
         json: false,
         ..output
@@ -511,6 +523,7 @@ fn run_default_target(
     db::init_schema(&conn)?;
     let parsed = targets::parse_target(target, None)?;
     let (machine_id, root_path) = resolve_target_identity(&conn, &parsed, machine_label)?;
+    let mut initial_browse = None;
     match parsed.kind {
         TargetKind::LocalPath | TargetKind::FileUrl => {
             let root_id = db::ensure_root(&conn, &machine_id, &root_path)?;
@@ -536,17 +549,34 @@ fn run_default_target(
                 "target {:?}\tmachine={}\troot=temporary\tpath={}",
                 parsed.kind, machine_id, root_path
             );
+            let browse_provider = ssh_browse_provider(parsed.clone());
             match fast_scan_ssh_directory(&parsed, &root_path) {
                 Ok(entries) => {
                     if entries.is_empty() {
                         println!("empty:\t.");
                     }
-                    for entry in entries {
-                        print_fast_directory_entry(&entry);
+                    for entry in &entries {
+                        print_fast_directory_entry(entry);
                     }
+                    initial_browse = Some(tui::InitialBrowse {
+                        label: parsed.original.clone(),
+                        machine_id: machine_id.clone(),
+                        root_path: root_path.clone(),
+                        current_path: root_path.clone(),
+                        entries: entries.iter().map(tui_entry_from_fast).collect(),
+                        browse_provider: Some(browse_provider),
+                    });
                 }
                 Err(err) => {
                     println!("warning:\tSSH fastscan failed: {err}");
+                    initial_browse = Some(tui::InitialBrowse {
+                        label: parsed.original.clone(),
+                        machine_id: machine_id.clone(),
+                        root_path: root_path.clone(),
+                        current_path: root_path.clone(),
+                        entries: Vec::new(),
+                        browse_provider: Some(browse_provider),
+                    });
                 }
             }
             println!(
@@ -563,7 +593,10 @@ fn run_default_target(
             println!("next:\tURL browsing is not implemented yet");
         }
     }
-    Ok(db_path)
+    Ok(DefaultTargetResult {
+        db_path,
+        initial_browse,
+    })
 }
 
 fn resolve_target_identity(
@@ -777,6 +810,22 @@ struct FastDirectoryEntry {
     name: String,
     size_bytes: u64,
     modified_at: Option<String>,
+}
+
+fn ssh_browse_provider(parsed: ParsedTarget) -> tui::BrowseProvider {
+    Arc::new(move |remote_path: &str| {
+        fast_scan_ssh_directory(&parsed, remote_path)
+            .map(|entries| entries.iter().map(tui_entry_from_fast).collect())
+    })
+}
+
+fn tui_entry_from_fast(entry: &FastDirectoryEntry) -> tui::InitialBrowseEntry {
+    tui::InitialBrowseEntry {
+        kind: entry.kind.clone(),
+        name: entry.name.clone(),
+        size_bytes: entry.size_bytes,
+        modified_at: entry.modified_at.clone(),
+    }
 }
 
 fn fast_scan_ssh_directory(

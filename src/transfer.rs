@@ -1529,6 +1529,53 @@ mod tests {
     }
 
     #[test]
+    fn copy_entries_preserve_source_relative_subdirectories() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let dest_dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(source_dir.path().join("some")).unwrap();
+        std::fs::write(source_dir.path().join("some/file.png"), b"hello").unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+        let source_path = source_dir.path().to_string_lossy().to_string();
+        let dest_path = dest_dir.path().to_string_lossy().to_string();
+        let source_id = db::ensure_root(&conn, &machine_id, &source_path).unwrap();
+        let dest_id = db::ensure_root(&conn, &machine_id, &dest_path).unwrap();
+        let content_id = db::ensure_content_object(
+            &conn,
+            5,
+            blake3::hash(b"hello").to_hex().as_ref(),
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        )
+        .unwrap();
+        observe(
+            &conn,
+            &machine_id,
+            &source_id,
+            "some/file.png",
+            5,
+            Some(&content_id),
+        );
+        db::toggle_selection_entry(&conn, &source_id, "some/file.png").unwrap();
+        let source = db::root_by_id(&conn, &source_id).unwrap().unwrap();
+        let dest = db::root_by_id(&conn, &dest_id).unwrap().unwrap();
+        let plan = plan_selected_files(&conn, &source, &dest).unwrap();
+        let entry = only_entry(&conn, &plan.plan_id);
+        assert_eq!(entry.relative_path, "some/file.png");
+        assert_eq!(entry.dest_relative_path, "some/file.png");
+
+        let result = run_transfer_plan(&conn, &plan.plan_id, false).unwrap();
+
+        assert_eq!(result.copied, 1);
+        assert_eq!(
+            std::fs::read(dest_dir.path().join("some/file.png")).unwrap(),
+            b"hello"
+        );
+        assert!(!dest_dir.path().join("file.png").exists());
+    }
+
+    #[test]
     fn transfer_copy_checkpoint_honors_cancel_request() {
         let conn = Connection::open_in_memory().unwrap();
         db::init_schema(&conn).unwrap();

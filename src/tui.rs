@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode};
@@ -106,7 +107,7 @@ mod theme {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct AppState {
     focus: FocusPane,
     file_view: FileView,
@@ -119,6 +120,102 @@ struct AppState {
     transfer_run_plan_id: Option<String>,
     retarget_draft: Option<RetargetDraft>,
     last_plan: Option<PlanSnapshot>,
+    temporary_browse: Option<TemporaryBrowse>,
+}
+
+pub type BrowseProvider =
+    Arc<dyn Fn(&str) -> anyhow::Result<Vec<InitialBrowseEntry>> + Send + Sync + 'static>;
+
+#[derive(Clone)]
+pub struct InitialBrowse {
+    pub label: String,
+    pub machine_id: String,
+    pub root_path: String,
+    pub current_path: String,
+    pub entries: Vec<InitialBrowseEntry>,
+    pub browse_provider: Option<BrowseProvider>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InitialBrowseEntry {
+    pub kind: String,
+    pub name: String,
+    pub size_bytes: u64,
+    pub modified_at: Option<String>,
+}
+
+#[derive(Clone)]
+struct TemporaryBrowse {
+    label: String,
+    machine_id: String,
+    root_path: String,
+    current_path: String,
+    entries: Vec<InitialBrowseEntry>,
+    browse_provider: Option<BrowseProvider>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileKind {
+    File,
+    Directory,
+}
+
+#[derive(Debug, Clone)]
+struct FileViewRow {
+    relative_path: String,
+    size_bytes: i64,
+    modified_at: Option<String>,
+    content_id: Option<String>,
+    status: String,
+    kind: FileKind,
+}
+
+impl From<InitialBrowse> for TemporaryBrowse {
+    fn from(value: InitialBrowse) -> Self {
+        Self {
+            label: value.label,
+            machine_id: value.machine_id,
+            root_path: value.root_path,
+            current_path: value.current_path,
+            entries: value.entries,
+            browse_provider: value.browse_provider,
+        }
+    }
+}
+
+impl From<&db::FileRow> for FileViewRow {
+    fn from(value: &db::FileRow) -> Self {
+        Self {
+            relative_path: value.relative_path.clone(),
+            size_bytes: value.size_bytes,
+            modified_at: value.modified_at.clone(),
+            content_id: value.content_id.clone(),
+            status: value.status.clone(),
+            kind: FileKind::File,
+        }
+    }
+}
+
+impl FileViewRow {
+    fn from_temporary_entry(entry: &InitialBrowseEntry) -> Self {
+        let kind = if entry.kind == "dir" {
+            FileKind::Directory
+        } else {
+            FileKind::File
+        };
+        Self {
+            relative_path: entry.name.clone(),
+            size_bytes: entry.size_bytes as i64,
+            modified_at: entry.modified_at.clone(),
+            content_id: None,
+            status: if kind == FileKind::Directory {
+                "dir".to_string()
+            } else {
+                "remote".to_string()
+            },
+            kind,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -139,8 +236,8 @@ enum TuiMessage {
 }
 
 struct InfoBarData<'a> {
-    root: Option<&'a db::RootRow>,
-    file: Option<&'a db::FileRow>,
+    root_name: Option<String>,
+    file: Option<&'a FileViewRow>,
     selection: Option<&'a db::SelectionSummary>,
     event: Option<&'a db::JobEventRow>,
     root_count: usize,
@@ -148,9 +245,10 @@ struct InfoBarData<'a> {
 
 struct DetailData<'a> {
     root: Option<&'a db::RootRow>,
+    temporary_browse: Option<&'a TemporaryBrowse>,
     summary: Option<&'a db::RootSummary>,
     selection: Option<&'a db::SelectionSummary>,
-    file: Option<&'a db::FileRow>,
+    file: Option<&'a FileViewRow>,
     selected_paths: &'a BTreeSet<String>,
     plan: Option<&'a PlanSnapshot>,
     transfer_progress: Option<TransferProgressSnapshot>,
@@ -296,13 +394,22 @@ pub async fn run_with_options(
     db_path: &Path,
     machine_label: Option<String>,
 ) -> anyhow::Result<()> {
+    run_with_initial_browse(conn, db_path, machine_label, None).await
+}
+
+pub async fn run_with_initial_browse(
+    conn: &Connection,
+    db_path: &Path,
+    machine_label: Option<String>,
+    initial_browse: Option<InitialBrowse>,
+) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(conn, db_path, &mut terminal, machine_label).await;
+    let result = run_loop(conn, db_path, &mut terminal, machine_label, initial_browse).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -315,10 +422,12 @@ async fn run_loop(
     db_path: &Path,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     machine_label: Option<String>,
+    initial_browse: Option<InitialBrowse>,
 ) -> anyhow::Result<()> {
     let (job_tx, mut job_rx) = mpsc::unbounded_channel::<TuiMessage>();
     let mut state = AppState {
         status: "ready".to_string(),
+        temporary_browse: initial_browse.map(TemporaryBrowse::from),
         ..AppState::default()
     };
     loop {
@@ -335,11 +444,21 @@ async fn run_loop(
             }
         }
         let roots = db::roots(conn)?;
-        normalize_selection(&mut state, roots.len());
-        let selected = roots.get(state.selected_root);
-        let files = match selected {
-            Some(root) => db::recent_files_for_root(conn, &root.id, 500)?,
-            None => Vec::new(),
+        let root_count = visible_root_count(&state, roots.len());
+        normalize_selection(&mut state, root_count);
+        let selected = selected_persisted_root(&roots, &state);
+        let selected_temporary = selected_temporary_browse(&state);
+        let files = match (selected, selected_temporary) {
+            (Some(root), _) => db::recent_files_for_root(conn, &root.id, 500)?
+                .iter()
+                .map(FileViewRow::from)
+                .collect(),
+            (None, Some(browse)) => browse
+                .entries
+                .iter()
+                .map(FileViewRow::from_temporary_entry)
+                .collect(),
+            (None, None) => Vec::new(),
         };
         let event_root_id = state.last_plan.as_ref().and_then(|plan| {
             (state.focus == FocusPane::Plan).then_some(plan.source_root_id.as_str())
@@ -392,6 +511,7 @@ async fn run_loop(
                 lower[0],
                 DetailData {
                     root: selected,
+                    temporary_browse: selected_temporary,
                     summary: summary.as_ref(),
                     selection: selection_summary.as_ref(),
                     file: files.get(state.file_offset),
@@ -405,11 +525,11 @@ async fn run_loop(
                 frame,
                 vertical[3],
                 InfoBarData {
-                    root: selected,
+                    root_name: selected_root_name(selected, selected_temporary),
                     file: files.get(state.file_offset),
                     selection: selection_summary.as_ref(),
                     event: events.get(state.event_offset),
-                    root_count: roots.len(),
+                    root_count,
                 },
                 &state,
             );
@@ -437,7 +557,7 @@ async fn run_loop(
                             .unwrap_or(0);
                         move_down(
                             &mut state,
-                            roots.len(),
+                            root_count,
                             files.len(),
                             plan_count,
                             events.len(),
@@ -448,7 +568,7 @@ async fn run_loop(
                         queue_selected_root(
                             conn,
                             db_path,
-                            roots.get(state.selected_root),
+                            selected_persisted_root(&roots, &state),
                             "scan",
                             machine_label.as_deref(),
                             job_tx.clone(),
@@ -459,7 +579,7 @@ async fn run_loop(
                         queue_selected_root(
                             conn,
                             db_path,
-                            roots.get(state.selected_root),
+                            selected_persisted_root(&roots, &state),
                             "hash",
                             machine_label.as_deref(),
                             job_tx.clone(),
@@ -470,12 +590,15 @@ async fn run_loop(
                         request_selected_cancel(conn, events.get(state.event_offset), &mut state)?;
                     }
                     KeyCode::Char('t') => {
-                        start_transfer_plan_selection(roots.get(state.selected_root), &mut state);
+                        start_transfer_plan_selection(
+                            selected_persisted_root(&roots, &state),
+                            &mut state,
+                        );
                     }
                     KeyCode::Char('p') => {
                         load_latest_transfer_plan(
                             conn,
-                            roots.get(state.selected_root),
+                            selected_persisted_root(&roots, &state),
                             &mut state,
                         )?;
                     }
@@ -502,7 +625,21 @@ async fn run_loop(
                         start_retarget_current_plan_entry(&mut state);
                     }
                     KeyCode::Enter => {
-                        create_transfer_plan_from_selection(conn, &roots, &mut state)?;
+                        if state.focus == FocusPane::Files
+                            && selected_temporary_browse(&state).is_some()
+                        {
+                            let file = files.get(state.file_offset).cloned();
+                            open_temporary_file_entry(&mut state, file.as_ref());
+                        } else {
+                            create_transfer_plan_from_selection(conn, &roots, &mut state)?;
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        if state.focus == FocusPane::Files
+                            && selected_temporary_browse(&state).is_some()
+                        {
+                            open_temporary_parent(&mut state);
+                        }
                     }
                     KeyCode::Esc => {
                         cancel_transfer_plan_selection(&mut state);
@@ -541,13 +678,25 @@ fn render_roots(
     roots: &[db::RootRow],
     state: &AppState,
 ) {
-    let items = if roots.is_empty() {
+    let root_count = visible_root_count(state, roots.len());
+    let items = if root_count == 0 {
         vec![ListItem::new(
             "No roots yet\nRun `gremlin /path` or `gremlin target add /path`",
         )]
     } else {
         let mut rows = vec![ListItem::new(root_header()).style(theme::header())];
-        rows.extend(roots.iter().enumerate().map(|(idx, root)| {
+        if let Some(browse) = state.temporary_browse.as_ref() {
+            let style = if state.selected_root == 0 {
+                theme::selected()
+            } else {
+                theme::warn()
+            };
+            rows.push(
+                ListItem::new(temporary_root_row(state.selected_root == 0, browse)).style(style),
+            );
+        }
+        rows.extend(roots.iter().enumerate().map(|(root_idx, root)| {
+            let idx = visible_index_for_persisted(state, root_idx);
             let marker = if idx == state.selected_root {
                 "> "
             } else {
@@ -594,6 +743,24 @@ fn root_row(marker: &str, transfer_marker: &str, root: &db::RootRow) -> String {
         truncate(&root_display_name(root), 8),
         human_size(root.current_size_bytes as u64),
         truncate(&root_job_label(root), 6)
+    )
+}
+
+fn temporary_root_row(selected: bool, browse: &TemporaryBrowse) -> String {
+    format!(
+        "{:<2} {:<1} {:<8} {:>5} {:<6}",
+        if selected { "> " } else { "  " },
+        "T",
+        truncate(&browse.label, 8),
+        human_size(
+            browse
+                .entries
+                .iter()
+                .filter(|entry| entry.kind != "dir")
+                .map(|entry| entry.size_bytes)
+                .sum()
+        ),
+        "browse"
     )
 }
 
@@ -672,7 +839,25 @@ fn display_name_from_path(path: &str) -> String {
 }
 
 fn render_detail_panel(frame: &mut ratatui::Frame<'_>, area: Rect, data: DetailData<'_>) {
-    let root_lines = match (data.root, data.summary) {
+    let root_lines = if let Some(browse) = data.temporary_browse {
+        format!(
+            "Root: {} (temporary)\nPath: {}\nFiles: {} | Directories: {} | Current: {}\nMachine: {} | Set: browse-only",
+            browse.label,
+            browse.current_path,
+            browse.entries.iter().filter(|entry| entry.kind != "dir").count(),
+            browse.entries.iter().filter(|entry| entry.kind == "dir").count(),
+            human_size(
+                browse
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.kind != "dir")
+                    .map(|entry| entry.size_bytes)
+                    .sum()
+            ),
+            short_id(&browse.machine_id),
+        )
+    } else {
+        match (data.root, data.summary) {
         (Some(root), Some(summary)) => format!(
             "Root: {}\nPath: {}\nFiles: {} | Hashed: {} | Current: {} | Marked: {} ({})\nMachine: {} | Set: {}",
             root_display_name(root),
@@ -688,6 +873,7 @@ fn render_detail_panel(frame: &mut ratatui::Frame<'_>, area: Rect, data: DetailD
                 .unwrap_or("-")
         ),
         _ => "Root: -\nPath: -\nMachine: - | Files: - | Hashed: - | Current size: -".to_string(),
+        }
     };
     let file_lines = if let Some(file) = data.file {
         format!(
@@ -741,8 +927,7 @@ fn render_info_bar(
     data: InfoBarData<'_>,
     state: &AppState,
 ) {
-    let root_name = data.root.map(root_display_name);
-    let root = root_name.as_deref().unwrap_or("-");
+    let root = data.root_name.as_deref().unwrap_or("-");
     let file = data
         .file
         .map(|file| file.relative_path.as_str())
@@ -795,13 +980,18 @@ fn render_info_bar(
 fn render_files(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
-    files: &[db::FileRow],
+    files: &[FileViewRow],
     selected_paths: &BTreeSet<String>,
     state: &AppState,
 ) {
     let visible = files.iter().enumerate().skip(state.file_offset);
     let items = if files.is_empty() {
-        vec![ListItem::new("No indexed files for this root")]
+        let message = if selected_temporary_browse(state).is_some() {
+            "No files in this remote directory"
+        } else {
+            "No indexed files for this root"
+        };
+        vec![ListItem::new(message)]
     } else {
         let mut rows = vec![ListItem::new(file_header(state.file_view)).style(theme::header())];
         rows.extend(visible.map(|(idx, file)| {
@@ -846,16 +1036,21 @@ fn file_header(view: FileView) -> String {
     }
 }
 
-fn file_row(marker: &str, selected: bool, file: &db::FileRow, view: FileView) -> String {
+fn file_row(marker: &str, selected: bool, file: &FileViewRow, view: FileView) -> String {
     let hash = file.content_id.as_deref().map(short_id).unwrap_or("stat");
     let modified = file.modified_at.as_deref().unwrap_or("-");
     let marked = if selected { "*" } else { " " };
+    let path = if file.kind == FileKind::Directory {
+        format!("{}/", file.relative_path)
+    } else {
+        file.relative_path.clone()
+    };
     match view {
         FileView::Basic => format!(
             "{:<2} {:<1} {:<24} {:>9} {:<8}",
             marker,
             marked,
-            truncate(&file.relative_path, 24),
+            truncate(&path, 24),
             human_size(file.size_bytes as u64),
             truncate(&file.status, 8)
         ),
@@ -863,7 +1058,7 @@ fn file_row(marker: &str, selected: bool, file: &db::FileRow, view: FileView) ->
             "{:<2} {:<1} {:<18} {:>9} {:<18}",
             marker,
             marked,
-            truncate(&file.relative_path, 18),
+            truncate(&path, 18),
             human_size(file.size_bytes as u64),
             truncate(modified, 18)
         ),
@@ -871,14 +1066,14 @@ fn file_row(marker: &str, selected: bool, file: &db::FileRow, view: FileView) ->
             "{:<2} {:<1} {:<26} {:<18}",
             marker,
             marked,
-            truncate(&file.relative_path, 26),
+            truncate(&path, 26),
             truncate(hash, 18)
         ),
         FileView::All => format!(
             "{:<2} {:<1} {:<14} {:>8} {:<6} {:<8} {:<10}",
             marker,
             marked,
-            truncate(&file.relative_path, 14),
+            truncate(&path, 14),
             human_size(file.size_bytes as u64),
             truncate(&file.status, 6),
             truncate(hash, 8),
@@ -1241,6 +1436,139 @@ fn normalize_selection(state: &mut AppState, root_count: usize) {
     }
 }
 
+fn visible_root_count(state: &AppState, persisted_count: usize) -> usize {
+    persisted_count + usize::from(state.temporary_browse.is_some())
+}
+
+fn visible_index_for_persisted(state: &AppState, persisted_idx: usize) -> usize {
+    persisted_idx + usize::from(state.temporary_browse.is_some())
+}
+
+fn persisted_index_for_visible(state: &AppState) -> Option<usize> {
+    if state.temporary_browse.is_some() {
+        state.selected_root.checked_sub(1)
+    } else {
+        Some(state.selected_root)
+    }
+}
+
+fn selected_persisted_root<'a>(
+    roots: &'a [db::RootRow],
+    state: &AppState,
+) -> Option<&'a db::RootRow> {
+    roots.get(persisted_index_for_visible(state)?)
+}
+
+fn selected_temporary_browse(state: &AppState) -> Option<&TemporaryBrowse> {
+    state
+        .temporary_browse
+        .as_ref()
+        .filter(|_| state.selected_root == 0)
+}
+
+fn selected_root_name(
+    root: Option<&db::RootRow>,
+    browse: Option<&TemporaryBrowse>,
+) -> Option<String> {
+    browse
+        .map(|browse| format!("{}:{}", browse.label, browse.current_path))
+        .or_else(|| root.map(root_display_name))
+}
+
+fn open_temporary_file_entry(state: &mut AppState, selected_file: Option<&FileViewRow>) {
+    let Some(file) = selected_file else {
+        state.status = "No remote entry selected".to_string();
+        return;
+    };
+    if file.kind != FileKind::Directory {
+        state.status = format!("selected remote file {}", file.relative_path);
+        return;
+    }
+    let Some(current) = state
+        .temporary_browse
+        .as_ref()
+        .map(|browse| browse.current_path.clone())
+    else {
+        state.status = "No temporary browse root selected".to_string();
+        return;
+    };
+    let next_path = remote_child_path(&current, &file.relative_path);
+    open_temporary_path(state, next_path);
+}
+
+fn open_temporary_parent(state: &mut AppState) {
+    let Some(browse) = state.temporary_browse.as_ref() else {
+        state.status = "No temporary browse root selected".to_string();
+        return;
+    };
+    if browse.current_path == browse.root_path {
+        state.status = "Already at temporary root".to_string();
+        return;
+    }
+    let Some(parent) = remote_parent_path(&browse.current_path, &browse.root_path) else {
+        state.status = "Already at temporary root".to_string();
+        return;
+    };
+    open_temporary_path(state, parent);
+}
+
+fn open_temporary_path(state: &mut AppState, next_path: String) {
+    let Some(provider) = state
+        .temporary_browse
+        .as_ref()
+        .and_then(|browse| browse.browse_provider.clone())
+    else {
+        state.status = "Remote browsing is unavailable for this temporary root".to_string();
+        return;
+    };
+    match provider(&next_path) {
+        Ok(entries) => {
+            if let Some(browse) = state.temporary_browse.as_mut() {
+                browse.current_path = next_path.clone();
+                browse.entries = entries;
+            }
+            state.file_offset = 0;
+            state.status = format!("browsing {next_path}");
+        }
+        Err(err) => {
+            state.status = format!("remote browse failed: {err}");
+        }
+    }
+}
+
+fn remote_child_path(root_path: &str, child_path: &str) -> String {
+    let child = child_path.trim().trim_matches('/');
+    if child.is_empty() || child == "." {
+        return root_path.to_string();
+    }
+    if root_path == "~" {
+        format!("~/{child}")
+    } else {
+        format!("{}/{}", root_path.trim_end_matches('/'), child)
+    }
+}
+
+fn remote_parent_path(current_path: &str, root_path: &str) -> Option<String> {
+    if current_path == root_path {
+        return None;
+    }
+    if current_path.starts_with("~/") {
+        let parent = current_path.rsplit_once('/').map(|(parent, _)| parent)?;
+        return Some(if parent == "~" || parent.is_empty() {
+            "~".to_string()
+        } else {
+            parent.to_string()
+        });
+    }
+    let parent = current_path.trim_end_matches('/').rsplit_once('/')?.0;
+    let parent = if parent.is_empty() { "/" } else { parent };
+    if root_path != "/" && !parent.starts_with(root_path.trim_end_matches('/')) {
+        Some(root_path.to_string())
+    } else {
+        Some(parent.to_string())
+    }
+}
+
 fn move_down(
     state: &mut AppState,
     root_count: usize,
@@ -1354,7 +1682,7 @@ fn request_selected_cancel(
 fn toggle_selected_file_mark(
     conn: &Connection,
     selected_root: Option<&db::RootRow>,
-    selected_file: Option<&db::FileRow>,
+    selected_file: Option<&FileViewRow>,
     state: &mut AppState,
 ) -> anyhow::Result<()> {
     let Some(root) = selected_root else {
