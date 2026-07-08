@@ -4,7 +4,7 @@ pub(super) fn queue_selected_root(
     db_path: &Path,
     root: Option<&db::RootRow>,
     kind: &str,
-    machine_label: Option<&str>,
+    selected_paths: Option<&BTreeSet<String>>,
     job_tx: mpsc::UnboundedSender<TuiMessage>,
     state: &mut AppState,
 ) -> anyhow::Result<()> {
@@ -12,16 +12,130 @@ pub(super) fn queue_selected_root(
         state.status = "No root selected. Add one with `gremlin /path`.".to_string();
         return Ok(());
     };
-    let job_id = db::queue_file_job(conn, kind, std::path::Path::new(&root.path), machine_label)?;
+    let job_id = queue_root_job(conn, root, kind, selected_paths)?;
     state.background_started(format!("started {kind} job {job_id}"));
     spawn_job_runner(
         db_path.to_path_buf(),
         job_id,
         kind.to_string(),
-        machine_label.map(str::to_string),
+        None,
         job_tx,
     );
     Ok(())
+}
+
+pub(super) fn queue_or_prompt_selected_root(
+    conn: &Connection,
+    db_path: &Path,
+    root: Option<&db::RootRow>,
+    kind: &str,
+    selected_paths: &BTreeSet<String>,
+    job_tx: mpsc::UnboundedSender<TuiMessage>,
+    state: &mut AppState,
+) -> anyhow::Result<()> {
+    let Some(root) = root else {
+        state.set_status(
+            ActivityLevel::Warning,
+            "No root selected. Add one with `gremlin /path`.",
+        );
+        return Ok(());
+    };
+    if selected_paths.is_empty() {
+        return queue_selected_root(conn, db_path, Some(root), kind, None, job_tx, state);
+    }
+    state.pending_scoped_job = Some(PendingScopedJob {
+        kind: kind.to_string(),
+        root_id: root.id.clone(),
+    });
+    state.focus = FocusPane::Roots;
+    state.set_status(
+        ActivityLevel::Info,
+        format!(
+            "{kind}: run against all files or {} marked path(s)?",
+            selected_paths.len()
+        ),
+    );
+    Ok(())
+}
+
+pub(super) fn handle_scoped_job_choice(
+    conn: &Connection,
+    db_path: &Path,
+    roots: &[db::RootRow],
+    selected_paths: &BTreeSet<String>,
+    key: KeyCode,
+    job_tx: mpsc::UnboundedSender<TuiMessage>,
+    state: &mut AppState,
+) -> anyhow::Result<()> {
+    let Some(pending) = state.pending_scoped_job.clone() else {
+        return Ok(());
+    };
+    match key {
+        KeyCode::Char('a') | KeyCode::Char('A') => {
+            state.pending_scoped_job = None;
+            let root = roots.iter().find(|root| root.id == pending.root_id);
+            queue_selected_root(conn, db_path, root, &pending.kind, None, job_tx, state)?;
+        }
+        KeyCode::Char('m') | KeyCode::Char('M') => {
+            state.pending_scoped_job = None;
+            let root = roots.iter().find(|root| root.id == pending.root_id);
+            queue_selected_root(
+                conn,
+                db_path,
+                root,
+                &pending.kind,
+                Some(selected_paths),
+                job_tx,
+                state,
+            )?;
+        }
+        KeyCode::Esc => {
+            state.pending_scoped_job = None;
+            state.set_status(ActivityLevel::Warning, "job scope selection canceled");
+        }
+        _ => {
+            state.set_status(
+                ActivityLevel::Info,
+                "choose a for all files, m for marked paths, or Esc",
+            );
+        }
+    }
+    Ok(())
+}
+
+fn queue_root_job(
+    conn: &Connection,
+    root: &db::RootRow,
+    kind: &str,
+    selected_paths: Option<&BTreeSet<String>>,
+) -> anyhow::Result<String> {
+    let mut params = serde_json::json!({ "path": root.path });
+    if let Some(selected_paths) = selected_paths.filter(|paths| !paths.is_empty()) {
+        params["scope"] = serde_json::json!({
+            "mode": "selected_paths",
+            "paths": selected_paths.iter().cloned().collect::<Vec<_>>(),
+        });
+    }
+    let job_id = db::create_job(conn, kind, Some(&root.machine_id), Some(&root.id), params)?;
+    let event = crate::events::EventEnvelope {
+        event_kind: crate::events::EventKind::JobCreated,
+        job_id: Some(job_id.clone()),
+        sequence: Some(1),
+        created_at: crate::util::now_rfc3339(),
+        payload: crate::events::EventPayload::Job {
+            kind: kind.to_string(),
+            path: Some(root.path.clone()),
+            message: Some(if selected_paths.is_some_and(|paths| !paths.is_empty()) {
+                "queued marked paths".to_string()
+            } else {
+                "queued".to_string()
+            }),
+            files_seen: selected_paths.map(|paths| paths.len() as u64),
+            errors: None,
+        },
+    };
+    db::persist_event(conn, &event)?;
+    Ok(job_id)
 }
 
 pub(super) fn request_selected_cancel(

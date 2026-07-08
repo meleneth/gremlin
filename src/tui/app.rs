@@ -31,7 +31,7 @@ pub(super) async fn run_loop(
     conn: &Connection,
     db_path: &Path,
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    machine_label: Option<String>,
+    _machine_label: Option<String>,
     initial_browse: Option<InitialBrowse>,
 ) -> anyhow::Result<()> {
     let (job_tx, mut job_rx) = mpsc::unbounded_channel::<TuiMessage>();
@@ -166,6 +166,18 @@ pub(super) async fn run_loop(
                     handle_temporary_import_choice(&mut state, key.code, job_tx.clone());
                     continue;
                 }
+                if state.pending_scoped_job.is_some() {
+                    handle_scoped_job_choice(
+                        conn,
+                        db_path,
+                        &roots,
+                        &selected_paths,
+                        key.code,
+                        job_tx.clone(),
+                        &mut state,
+                    )?;
+                    continue;
+                }
                 match key.code {
                     KeyCode::Char('q') => {
                         if state.active_background_jobs > 0 {
@@ -201,34 +213,34 @@ pub(super) async fn run_loop(
                     }
                     KeyCode::Up => move_up(&mut state),
                     KeyCode::Char('s') => {
-                        queue_selected_root(
+                        queue_or_prompt_selected_root(
                             conn,
                             db_path,
                             selected_persisted_root(&roots, &state),
                             "scan",
-                            machine_label.as_deref(),
+                            &selected_paths,
                             job_tx.clone(),
                             &mut state,
                         )?;
                     }
                     KeyCode::Char('h') => {
-                        queue_selected_root(
+                        queue_or_prompt_selected_root(
                             conn,
                             db_path,
                             selected_persisted_root(&roots, &state),
                             "hash",
-                            machine_label.as_deref(),
+                            &selected_paths,
                             job_tx.clone(),
                             &mut state,
                         )?;
                     }
                     KeyCode::Char('v') => {
-                        queue_selected_root(
+                        queue_or_prompt_selected_root(
                             conn,
                             db_path,
                             selected_persisted_root(&roots, &state),
                             "verify",
-                            machine_label.as_deref(),
+                            &selected_paths,
                             job_tx.clone(),
                             &mut state,
                         )?;

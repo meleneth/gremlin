@@ -35,6 +35,10 @@ impl Widget for AppScreen<'_> {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
             .split(vertical[2]);
+        let bottom = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .split(vertical[4]);
 
         HeaderPane {
             state: self.state,
@@ -84,10 +88,11 @@ impl Widget for AppScreen<'_> {
             state: self.state,
         }
         .render(vertical[3], buf);
+        ActivityPane { state: self.state }.render(bottom[0], buf);
         EventsPane {
             events: self.events,
             state: self.state,
         }
-        .render(vertical[4], buf);
+        .render(bottom[1], buf);
     }
 }

@@ -9,6 +9,7 @@ impl Widget for RootsPane<'_> {
         let root_count = visible_root_count(self.state, self.roots.len());
         let needs_attention = self.state.pending_delete_root_id.is_some()
             || self.state.pending_import.is_some()
+            || self.state.pending_scoped_job.is_some()
             || self.state.transfer_source_root_id.is_some();
         let items = if root_count == 0 {
             vec![ListItem::new(

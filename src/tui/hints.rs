@@ -44,6 +44,9 @@ pub(super) fn active_command_hint(state: &AppState, has_temporary_browse: bool) 
     if state.pending_import.is_some() {
         return "n root only  f fast stat import  h SHA-256 hash import  Esc cancel";
     }
+    if state.pending_scoped_job.is_some() {
+        return "a all files in root  m marked paths only  Esc cancel";
+    }
     if state.transfer_run_plan_id.is_some() {
         return "transfer running  c request cancel  Tab inspect panes";
     }

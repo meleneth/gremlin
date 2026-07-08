@@ -236,6 +236,7 @@ pub fn scan_to_db(
         &machine_id,
         &root_id,
         &job_id,
+        &JobScope::default(),
     )?;
     print_scan_summary(&summary, options);
     Ok(summary)
@@ -262,12 +263,15 @@ pub fn hash_to_db(
         serde_json::json!({ "path": lossy(&root_path), "all": hash_all }),
     )?;
     let summary = run_hash_job(
-        conn,
-        &root_path,
-        &skip_paths,
-        &machine_id,
-        &root_id,
-        &job_id,
+        RootJobContext {
+            conn,
+            root_path: &root_path,
+            skip_paths: &skip_paths,
+            machine_id: &machine_id,
+            root_id: &root_id,
+            job_id: &job_id,
+            scope: &JobScope::default(),
+        },
         hash_all,
     )?;
     print_hash_summary(&summary, options);
@@ -335,12 +339,15 @@ pub fn verify_to_db(
         serde_json::json!({ "path": lossy(&root_path), "accept": accept }),
     )?;
     let summary = run_verify_job(
-        conn,
-        &root_path,
-        &skip_paths,
-        &machine_id,
-        &root_id,
-        &job_id,
+        RootJobContext {
+            conn,
+            root_path: &root_path,
+            skip_paths: &skip_paths,
+            machine_id: &machine_id,
+            root_id: &root_id,
+            job_id: &job_id,
+            scope: &JobScope::default(),
+        },
         accept,
     )?;
     print_verify_summary(&summary, options);
@@ -376,11 +383,19 @@ pub fn run_queued_job(
         Some(root_id) => root_id,
         None => db::ensure_root(conn, &machine_id, &lossy(&root_path))?,
     };
+    let scope = JobScope::from_params(&params)?;
 
     match job.kind.as_str() {
         "scan" => {
-            let summary =
-                run_scan_job(conn, &root_path, &skip_paths, &machine_id, &root_id, job_id)?;
+            let summary = run_scan_job(
+                conn,
+                &root_path,
+                &skip_paths,
+                &machine_id,
+                &root_id,
+                job_id,
+                &scope,
+            )?;
             print_scan_summary(&summary, options);
         }
         "hash" => {
@@ -389,12 +404,15 @@ pub fn run_queued_job(
                 .and_then(|value| value.as_bool())
                 .unwrap_or(false);
             let summary = run_hash_job(
-                conn,
-                &root_path,
-                &skip_paths,
-                &machine_id,
-                &root_id,
-                job_id,
+                RootJobContext {
+                    conn,
+                    root_path: &root_path,
+                    skip_paths: &skip_paths,
+                    machine_id: &machine_id,
+                    root_id: &root_id,
+                    job_id,
+                    scope: &scope,
+                },
                 hash_all,
             )?;
             print_hash_summary(&summary, options);
@@ -405,12 +423,15 @@ pub fn run_queued_job(
                 .and_then(|value| value.as_bool())
                 .unwrap_or(false);
             let summary = run_verify_job(
-                conn,
-                &root_path,
-                &skip_paths,
-                &machine_id,
-                &root_id,
-                job_id,
+                RootJobContext {
+                    conn,
+                    root_path: &root_path,
+                    skip_paths: &skip_paths,
+                    machine_id: &machine_id,
+                    root_id: &root_id,
+                    job_id,
+                    scope: &scope,
+                },
                 accept,
             )?;
             print_verify_summary(&summary, options);
@@ -420,6 +441,59 @@ pub fn run_queued_job(
     Ok(())
 }
 
+#[derive(Debug, Clone, Default)]
+struct JobScope {
+    selected_paths: Option<BTreeSet<String>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RootJobContext<'a> {
+    conn: &'a Connection,
+    root_path: &'a Path,
+    skip_paths: &'a [PathBuf],
+    machine_id: &'a str,
+    root_id: &'a str,
+    job_id: &'a str,
+    scope: &'a JobScope,
+}
+
+impl JobScope {
+    fn from_params(params: &serde_json::Value) -> anyhow::Result<Self> {
+        let Some(scope) = params.get("scope") else {
+            return Ok(Self::default());
+        };
+        let mode = scope
+            .get("mode")
+            .and_then(|value| value.as_str())
+            .unwrap_or("root");
+        if mode != "selected_paths" {
+            return Ok(Self::default());
+        }
+        let paths = scope
+            .get("paths")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| anyhow::anyhow!("selected_paths scope requires paths array"))?
+            .iter()
+            .filter_map(|value| value.as_str())
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        Ok(Self {
+            selected_paths: (!paths.is_empty()).then_some(paths),
+        })
+    }
+
+    fn includes(&self, relative_path: &str) -> bool {
+        self.selected_paths
+            .as_ref()
+            .map(|paths| paths.contains(relative_path))
+            .unwrap_or(true)
+    }
+
+    fn is_scoped(&self) -> bool {
+        self.selected_paths.is_some()
+    }
+}
+
 fn run_scan_job(
     conn: &Connection,
     root_path: &Path,
@@ -427,6 +501,7 @@ fn run_scan_job(
     machine_id: &str,
     root_id: &str,
     job_id: &str,
+    scope: &JobScope,
 ) -> anyhow::Result<ScanSummary> {
     db::start_job(conn, job_id)?;
     let previous = previous_observations(conn, machine_id, root_id)?;
@@ -472,6 +547,9 @@ fn run_scan_job(
                 }
                 match file_meta(root_path, entry.path()) {
                     Ok(meta) => {
+                        if !scope.includes(&meta.relative_path) {
+                            continue;
+                        }
                         progress.current_path = Some(meta.relative_path.clone());
                         let delta = classify_scan_delta(&meta, previous.get(&meta.relative_path));
                         seen.insert(meta.relative_path.clone());
@@ -530,7 +608,9 @@ fn run_scan_job(
     persist_progress(conn, job_id, &mut sequence, &progress, None)?;
 
     for old in previous.values() {
-        if !seen.contains(&old.relative_path) {
+        if !seen.contains(&old.relative_path)
+            && (!scope.is_scoped() || scope.includes(&old.relative_path))
+        {
             deltas.push(ScanDelta {
                 kind: DeltaKind::Missing,
                 relative_path: old.relative_path.clone(),
@@ -564,15 +644,16 @@ fn run_scan_job(
     Ok(scan_summary(job_id, files_seen, errors, deltas))
 }
 
-fn run_hash_job(
-    conn: &Connection,
-    root_path: &Path,
-    skip_paths: &[PathBuf],
-    machine_id: &str,
-    root_id: &str,
-    job_id: &str,
-    hash_all: bool,
-) -> anyhow::Result<HashSummary> {
+fn run_hash_job(ctx: RootJobContext<'_>, hash_all: bool) -> anyhow::Result<HashSummary> {
+    let RootJobContext {
+        conn,
+        root_path,
+        skip_paths,
+        machine_id,
+        root_id,
+        job_id,
+        scope,
+    } = ctx;
     db::start_job(conn, job_id)?;
     let previous = previous_observations(conn, machine_id, root_id)?;
     let mut sequence = db::next_sequence(conn, job_id)?;
@@ -617,6 +698,9 @@ fn run_hash_job(
                     persist_progress(conn, job_id, &mut sequence, &progress, None)?;
                     continue;
                 };
+                if !scope.includes(&meta.relative_path) {
+                    continue;
+                }
                 progress.current_path = Some(meta.relative_path.clone());
                 progress.files_seen += 1;
                 if !hash_all && !needs_hash(&meta, previous.get(&meta.relative_path)) {
@@ -839,15 +923,16 @@ fn run_chunk_hash_job(
     })
 }
 
-fn run_verify_job(
-    conn: &Connection,
-    root_path: &Path,
-    skip_paths: &[PathBuf],
-    machine_id: &str,
-    root_id: &str,
-    job_id: &str,
-    accept: bool,
-) -> anyhow::Result<VerifySummary> {
+fn run_verify_job(ctx: RootJobContext<'_>, accept: bool) -> anyhow::Result<VerifySummary> {
+    let RootJobContext {
+        conn,
+        root_path,
+        skip_paths,
+        machine_id,
+        root_id,
+        job_id,
+        scope,
+    } = ctx;
     db::start_job(conn, job_id)?;
     let baselines = hash_baselines(conn, machine_id, root_id)?;
     let mut seen = BTreeSet::new();
@@ -879,6 +964,9 @@ fn run_verify_job(
                     continue;
                 }
                 let current_path = relative_path(root_path, path).unwrap_or_else(|_| lossy(path));
+                if !scope.includes(&current_path) {
+                    continue;
+                }
                 progress.current_path = Some(current_path);
                 progress.files_seen += 1;
                 progress.phase = "processing";
@@ -949,7 +1037,9 @@ fn run_verify_job(
         }
     }
     for baseline in baselines.values() {
-        if !seen.contains(&baseline.relative_path) {
+        if !seen.contains(&baseline.relative_path)
+            && (!scope.is_scoped() || scope.includes(&baseline.relative_path))
+        {
             let finding = VerifyFinding {
                 kind: VerifyKind::Missing,
                 relative_path: baseline.relative_path.clone(),
@@ -1908,6 +1998,81 @@ mod tests {
             .any(|event| event.event_kind == "job_canceled"));
     }
 
+    fn queue_scoped_test_job(
+        conn: &Connection,
+        kind: &str,
+        root_path: &Path,
+        selected_paths: &[&str],
+    ) -> String {
+        let machine_id = db::ensure_local_machine_with_label(conn, None).unwrap();
+        let root_id = db::ensure_root(conn, &machine_id, &lossy(root_path)).unwrap();
+        db::create_job(
+            conn,
+            kind,
+            Some(&machine_id),
+            Some(&root_id),
+            serde_json::json!({
+                "path": lossy(root_path),
+                "all": true,
+                "scope": {
+                    "mode": "selected_paths",
+                    "paths": selected_paths,
+                },
+            }),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn queued_scan_honors_selected_path_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        std::fs::write(dir.path().join("b.txt"), b"b").unwrap();
+        let db_path = dir.path().join("gremlin.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+        db::init_schema(&conn).unwrap();
+        let job_id = queue_scoped_test_job(&conn, "scan", dir.path(), &["a.txt"]);
+
+        run_queued_job(&conn, &job_id, &db_path, None, OutputOptions::default()).unwrap();
+
+        assert_eq!(db::table_count(&conn, "path_observations").unwrap(), 1);
+        let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+        let root_id = db::ensure_root(&conn, &machine_id, &lossy(dir.path())).unwrap();
+        assert!(db::path_observation_for_root_path(&conn, &root_id, "a.txt")
+            .unwrap()
+            .is_some());
+        assert!(db::path_observation_for_root_path(&conn, &root_id, "b.txt")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn queued_hash_honors_selected_path_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        std::fs::write(dir.path().join("b.txt"), b"b").unwrap();
+        let db_path = dir.path().join("gremlin.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+        db::init_schema(&conn).unwrap();
+        scan_to_db(&conn, dir.path(), &db_path, None, OutputOptions::default()).unwrap();
+        let job_id = queue_scoped_test_job(&conn, "hash", dir.path(), &["a.txt"]);
+
+        run_queued_job(&conn, &job_id, &db_path, None, OutputOptions::default()).unwrap();
+
+        let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+        let root_id = db::ensure_root(&conn, &machine_id, &lossy(dir.path())).unwrap();
+        assert!(db::path_observation_for_root_path(&conn, &root_id, "a.txt")
+            .unwrap()
+            .unwrap()
+            .content_id
+            .is_some());
+        assert!(db::path_observation_for_root_path(&conn, &root_id, "b.txt")
+            .unwrap()
+            .unwrap()
+            .content_id
+            .is_none());
+    }
+
     #[test]
     fn scan_reports_new_changed_and_missing() {
         let dir = tempfile::tempdir().unwrap();
@@ -1982,6 +2147,39 @@ mod tests {
         .unwrap();
         assert_eq!(clean.ok, 1);
         assert_eq!(clean.changed, 0);
+    }
+
+    #[test]
+    fn queued_verify_honors_selected_path_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"a").unwrap();
+        std::fs::write(dir.path().join("b.txt"), b"b").unwrap();
+        let db_path = dir.path().join("gremlin.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+        db::init_schema(&conn).unwrap();
+        hash_to_db(
+            &conn,
+            dir.path(),
+            &db_path,
+            None,
+            true,
+            OutputOptions::default(),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"changed a").unwrap();
+        std::fs::write(dir.path().join("b.txt"), b"changed b").unwrap();
+        let job_id = queue_scoped_test_job(&conn, "verify", dir.path(), &["b.txt"]);
+
+        run_queued_job(&conn, &job_id, &db_path, None, OutputOptions::default()).unwrap();
+
+        let events = db::events_for_job(&conn, &job_id).unwrap();
+        let findings = events
+            .iter()
+            .filter(|event| event.event_kind == "verify_finding")
+            .map(|event| serde_json::from_str::<serde_json::Value>(&event.payload_json).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0]["relative_path"], "b.txt");
     }
 
     #[test]

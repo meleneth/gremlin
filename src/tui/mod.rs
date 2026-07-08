@@ -39,6 +39,7 @@ struct AppState {
     retarget_draft: Option<RetargetDraft>,
     pending_delete_root_id: Option<String>,
     pending_import: Option<PendingTemporaryImport>,
+    pending_scoped_job: Option<PendingScopedJob>,
     active_background_jobs: usize,
     activities: VecDeque<ActivityMessage>,
     last_plan: Option<PlanSnapshot>,
@@ -310,6 +311,12 @@ struct RetargetDraft {
 #[derive(Debug, Clone)]
 struct PendingTemporaryImport {
     remote_path: String,
+}
+
+#[derive(Debug, Clone)]
+struct PendingScopedJob {
+    kind: String,
+    root_id: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

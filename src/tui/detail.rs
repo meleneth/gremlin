@@ -166,3 +166,41 @@ impl Widget for InfoBar<'_> {
             .render(area, buf);
     }
 }
+
+pub(super) struct ActivityPane<'a> {
+    pub(super) state: &'a AppState,
+}
+
+impl Widget for ActivityPane<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        let mut activities = self
+            .state
+            .activities
+            .iter()
+            .rev()
+            .take(area.height.saturating_sub(2).max(1) as usize)
+            .collect::<Vec<_>>();
+        activities.reverse();
+        let items = if activities.is_empty() {
+            vec![ListItem::new("No activity yet").style(theme::muted())]
+        } else {
+            activities
+                .into_iter()
+                .map(|activity| {
+                    ListItem::new(Line::from(vec![
+                        Span::styled(
+                            format!("{:<4}", activity.level.label()),
+                            activity.level.style(),
+                        ),
+                        Span::raw(" "),
+                        Span::styled(truncate(&activity.message, 80), activity.level.style()),
+                    ]))
+                })
+                .collect()
+        };
+        List::new(items)
+            .style(theme::panel())
+            .block(panel_block("Activity", false))
+            .render(area, buf);
+    }
+}

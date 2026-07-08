@@ -180,6 +180,22 @@ fn command_hints_include_root_verify() {
 }
 
 #[test]
+fn command_hints_explain_scoped_job_choice() {
+    let state = AppState {
+        pending_scoped_job: Some(PendingScopedJob {
+            kind: "verify".to_string(),
+            root_id: "root_1".to_string(),
+        }),
+        ..AppState::default()
+    };
+
+    assert_eq!(
+        active_command_hint(&state, false),
+        "a all files in root  m marked paths only  Esc cancel"
+    );
+}
+
+#[test]
 fn transfer_plan_selection_moves_focus_to_roots() {
     let root = db::RootRow {
         id: "root_1".to_string(),
