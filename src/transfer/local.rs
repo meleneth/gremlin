@@ -5,7 +5,7 @@ pub(super) fn copy_local_to_local(
     source_path: &Path,
     dest_path: &Path,
     paranoid: bool,
-    on_progress: &mut dyn FnMut(u64, u64, f64) -> anyhow::Result<()>,
+    on_progress: &mut TransferProgressCallback<'_>,
 ) -> anyhow::Result<CopyOutcome> {
     let source_meta = std::fs::metadata(source_path)
         .with_context(|| format!("reading source {}", source_path.display()))?;
@@ -65,7 +65,8 @@ pub(super) fn copy_local_to_local(
     }
 
     let parent_created = ensure_dest_parent(dest_path)?;
-    let copy_hash = copy_with_hash(source_path, dest_path, Some(on_progress))?;
+    let mut progress = |done: u64, total: u64, rate: f64| on_progress(done, total, rate, None);
+    let copy_hash = copy_with_hash(source_path, dest_path, Some(&mut progress))?;
     if copy_hash.bytes != entry.size_bytes {
         anyhow::bail!(
             "copied byte count mismatch for {}: planned {}, copied {}",

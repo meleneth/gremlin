@@ -46,7 +46,11 @@ struct TransferProgressEventInput<'a> {
     file_bytes_done: u64,
     file_bytes_total: u64,
     bytes_per_second: f64,
+    message: Option<&'a str>,
 }
+
+type TransferProgressCallback<'a> =
+    dyn FnMut(u64, u64, f64, Option<&str>) -> anyhow::Result<()> + 'a;
 
 struct CopyContext<'a> {
     conn: &'a Connection,

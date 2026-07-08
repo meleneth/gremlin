@@ -297,6 +297,7 @@ struct TransferProgressSnapshot {
     file_bytes_total: u64,
     bytes_per_second: f64,
     errors: u64,
+    message: Option<String>,
 }
 
 #[derive(Debug, Clone)]

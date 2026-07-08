@@ -92,7 +92,8 @@ pub fn run_transfer_plan(
         let started_at = Instant::now();
         let mut on_progress = |file_bytes_done: u64,
                                file_bytes_total: u64,
-                               bytes_per_second: f64|
+                               bytes_per_second: f64,
+                               message: Option<&str>|
          -> anyhow::Result<()> {
             persist_transfer_progress_event(
                 conn,
@@ -109,6 +110,7 @@ pub fn run_transfer_plan(
                     file_bytes_done,
                     file_bytes_total,
                     bytes_per_second,
+                    message,
                 },
             )
         };
@@ -315,7 +317,7 @@ pub(super) fn copy_one_entry(
     source_path: &TransferEndpoint,
     dest_path: &TransferEndpoint,
     paranoid: bool,
-    on_progress: &mut dyn FnMut(u64, u64, f64) -> anyhow::Result<()>,
+    on_progress: &mut TransferProgressCallback<'_>,
 ) -> anyhow::Result<CopyOutcome> {
     match (source_path, dest_path) {
         (TransferEndpoint::Local(source), TransferEndpoint::Local(dest)) => {

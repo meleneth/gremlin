@@ -129,6 +129,10 @@ pub(super) fn transfer_progress_snapshot(payload_json: &str) -> Option<TransferP
             .get("errors")
             .and_then(|value| value.as_u64())
             .unwrap_or(0),
+        message: payload
+            .get("message")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
     })
 }
 
@@ -143,7 +147,7 @@ pub(super) fn transfer_progress_lines(progress: &TransferProgressSnapshot) -> St
             .saturating_add(1)
             .min(progress.files_total)
     };
-    format!(
+    let mut lines = format!(
         "Job  {} {:>3}% {}/{} @ {}/s\nFile {} {:>3}% {}/{} ({}/{})\nPath {} | errors {}",
         progress_bar(
             progress.bytes_done,
@@ -166,7 +170,11 @@ pub(super) fn transfer_progress_lines(progress: &TransferProgressSnapshot) -> St
         progress.files_total,
         truncate(&progress.current_path, 54),
         progress.errors
-    )
+    );
+    if let Some(message) = progress.message.as_deref() {
+        lines.push_str(&format!("\nChunk {}", truncate(message, 72)));
+    }
+    lines
 }
 
 pub(super) fn byte_progress_summary(payload_json: &str) -> Option<String> {

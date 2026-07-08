@@ -4,7 +4,7 @@ pub(super) fn copy_ssh_to_local(
     entry: &db::TransferPlanEntryRow,
     source: &TransferEndpoint,
     dest_path: &Path,
-    on_progress: &mut dyn FnMut(u64, u64, f64) -> anyhow::Result<()>,
+    on_progress: &mut TransferProgressCallback<'_>,
 ) -> anyhow::Result<CopyOutcome> {
     if std::fs::metadata(dest_path).is_ok() {
         anyhow::bail!("destination exists: {}", dest_path.display());
@@ -86,7 +86,7 @@ pub(super) fn copy_local_to_ssh(
     entry: &db::TransferPlanEntryRow,
     source_path: &Path,
     dest: &TransferEndpoint,
-    on_progress: &mut dyn FnMut(u64, u64, f64) -> anyhow::Result<()>,
+    on_progress: &mut TransferProgressCallback<'_>,
 ) -> anyhow::Result<CopyOutcome> {
     let source_meta = std::fs::metadata(source_path)
         .with_context(|| format!("reading source {}", source_path.display()))?;
@@ -182,7 +182,7 @@ pub(super) fn copy_ssh_to_local_chunked(
     entry: &db::TransferPlanEntryRow,
     source: &TransferEndpoint,
     temp_path: &Path,
-    on_progress: &mut dyn FnMut(u64, u64, f64) -> anyhow::Result<()>,
+    on_progress: &mut TransferProgressCallback<'_>,
 ) -> anyhow::Result<CopyHashResult> {
     let TransferEndpoint::Ssh { host, path } = source else {
         anyhow::bail!("source is not SSH");
@@ -200,13 +200,22 @@ pub(super) fn copy_ssh_to_local_chunked(
     let mut sha256_hasher = Sha256::new();
     let mut copied = 0_u64;
     let started_at = Instant::now();
-    for chunk in transfer_chunks(entry.size_bytes) {
+    let chunks = transfer_chunks(entry.size_bytes);
+    let chunk_total = chunks.len() as u64;
+    for chunk in chunks {
+        let mut chunk_state = "fetching remote chunk";
         let bytes = if let Some(checkpoint) =
             matching_copy_chunk_checkpoint(conn, plan_id, entry, chunk)?
         {
             match local_chunk_bytes(temp_path, chunk) {
-                Ok(bytes) if format!("{:x}", md5::compute(&bytes)) == checkpoint.digest => bytes,
-                _ => fetch_verified_remote_chunk(host, path, chunk)?,
+                Ok(bytes) if format!("{:x}", md5::compute(&bytes)) == checkpoint.digest => {
+                    chunk_state = "reused local checkpoint";
+                    bytes
+                }
+                _ => {
+                    chunk_state = "checkpoint miss; fetched remote chunk";
+                    fetch_verified_remote_chunk(host, path, chunk)?
+                }
             }
         } else {
             fetch_verified_remote_chunk(host, path, chunk)?
@@ -227,6 +236,7 @@ pub(super) fn copy_ssh_to_local_chunked(
             copied,
             entry.size_bytes,
             rate_per_second(copied, started_at),
+            Some(&chunk_progress_message(chunk, chunk_total, chunk_state)),
         )?;
     }
     dest.sync_all()
@@ -245,7 +255,7 @@ pub(super) fn copy_local_to_ssh_chunked(
     entry: &db::TransferPlanEntryRow,
     source_path: &Path,
     dest: &TransferEndpoint,
-    on_progress: &mut dyn FnMut(u64, u64, f64) -> anyhow::Result<()>,
+    on_progress: &mut TransferProgressCallback<'_>,
 ) -> anyhow::Result<()> {
     let TransferEndpoint::Ssh { host, path } = dest else {
         anyhow::bail!("destination is not SSH");
@@ -257,14 +267,16 @@ pub(super) fn copy_local_to_ssh_chunked(
                 .arg(format!(": > {}", remote_shell_path(path))),
         )
         .with_context(|| format!("creating empty remote file {host}:{path}"))?;
-        on_progress(0, 0, 0.0)?;
+        on_progress(0, 0, 0.0, Some("created empty remote file"))?;
         return Ok(());
     }
     let mut source = std::fs::File::open(source_path)
         .with_context(|| format!("opening source {}", source_path.display()))?;
     let mut copied = 0_u64;
     let started_at = Instant::now();
-    for chunk in transfer_chunks(entry.size_bytes) {
+    let chunks = transfer_chunks(entry.size_bytes);
+    let chunk_total = chunks.len() as u64;
+    for chunk in chunks {
         let mut bytes = vec![0_u8; chunk.size as usize];
         source
             .seek(SeekFrom::Start(chunk.offset))
@@ -274,14 +286,17 @@ pub(super) fn copy_local_to_ssh_chunked(
             .with_context(|| format!("reading {}", source_path.display()))?;
         let local_md5 = format!("{:x}", md5::compute(&bytes));
         let checkpoint = matching_copy_chunk_checkpoint(conn, plan_id, entry, chunk)?;
+        let mut chunk_state = "wrote remote chunk";
         let remote_md5 = if checkpoint
             .as_ref()
             .is_some_and(|checkpoint| checkpoint.digest == local_md5)
         {
             let remote_md5 = remote_chunk_md5(host, path, chunk.index)?;
             if remote_md5 == local_md5 {
+                chunk_state = "reused remote checkpoint";
                 remote_md5
             } else {
+                chunk_state = "checkpoint miss; rewrote remote chunk";
                 write_remote_chunk(host, path, chunk.index, &bytes)?;
                 remote_chunk_md5(host, path, chunk.index)?
             }
@@ -304,6 +319,7 @@ pub(super) fn copy_local_to_ssh_chunked(
             copied,
             entry.size_bytes,
             rate_per_second(copied, started_at),
+            Some(&chunk_progress_message(chunk, chunk_total, chunk_state)),
         )?;
     }
     Ok(())
@@ -332,6 +348,21 @@ pub(super) fn transfer_chunks(total: u64) -> Vec<TransferChunk> {
         index += 1;
     }
     chunks
+}
+
+pub(super) fn chunk_progress_message(
+    chunk: TransferChunk,
+    chunk_total: u64,
+    state: &str,
+) -> String {
+    format!(
+        "{}/{} {} offset={} size={}",
+        chunk.index + 1,
+        chunk_total,
+        state,
+        chunk.offset,
+        chunk.size
+    )
 }
 
 pub(super) fn matching_copy_chunk_checkpoint(

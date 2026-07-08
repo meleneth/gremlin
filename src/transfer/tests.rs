@@ -728,6 +728,24 @@ fn transfer_chunks_use_fixed_size_offsets_with_remainder() {
 }
 
 #[test]
+fn chunk_progress_message_names_state_and_position() {
+    let chunk = TransferChunk {
+        index: 1,
+        offset: crate::fswork::DEFAULT_CHUNK_SIZE_BYTES,
+        size: crate::fswork::DEFAULT_CHUNK_SIZE_BYTES,
+    };
+
+    assert_eq!(
+        chunk_progress_message(chunk, 4, "reused local checkpoint"),
+        format!(
+            "2/4 reused local checkpoint offset={} size={}",
+            crate::fswork::DEFAULT_CHUNK_SIZE_BYTES,
+            crate::fswork::DEFAULT_CHUNK_SIZE_BYTES
+        )
+    );
+}
+
+#[test]
 fn transfer_copy_chunk_checkpoints_round_trip() {
     let conn = Connection::open_in_memory().unwrap();
     db::init_schema(&conn).unwrap();
