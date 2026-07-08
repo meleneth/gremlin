@@ -236,7 +236,7 @@ impl Widget for ActivityPane<'_> {
         };
         List::new(items)
             .style(theme::panel())
-            .block(panel_block("Activity", false))
+            .block(panel_block("Activity Log", false))
             .render(area, buf);
     }
 }

@@ -967,7 +967,7 @@ fn detail_pane_renders_selected_file_hashes() {
 fn app_screen_renders_empty_state_widgets() {
     let state = AppState::default();
     let selected_paths = BTreeSet::new();
-    let mut buffer = Buffer::empty(Rect::new(0, 0, 100, 32));
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 120, 42));
 
     AppScreen {
         state: &state,
@@ -992,6 +992,8 @@ fn app_screen_renders_empty_state_widgets() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(text.contains("Gremlin"));
+    assert!(text.contains("Jobs"));
+    assert!(text.contains("Activity Log"));
     assert!(text.contains("No roots yet"));
     assert!(text.contains("No indexed files"));
     assert!(text.contains("No transfer plan yet"));

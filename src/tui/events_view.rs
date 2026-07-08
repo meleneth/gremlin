@@ -28,11 +28,7 @@ impl Widget for EventsPane<'_> {
         };
         List::new(items)
             .style(theme::panel())
-            .block(focus_block(
-                "Activity Log",
-                FocusPane::Events,
-                self.state.focus,
-            ))
+            .block(focus_block("Jobs", FocusPane::Events, self.state.focus))
             .render(area, buf);
     }
 }
