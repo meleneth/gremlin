@@ -1212,9 +1212,10 @@ fn root_transfer_endpoint(conn: &Connection, root: &RootRow) -> anyhow::Result<T
     let machine = db::machine_by_id(conn, &root.machine_id)?
         .ok_or_else(|| anyhow::anyhow!("machine not found for root {}", root.id))?;
     if machine.platform.as_deref() == Some("ssh") {
+        let path = ssh_root_remote_path(&machine.label, &root.path);
         return Ok(TransferEndpoint::Ssh {
             host: machine.label,
-            path: root.path.clone(),
+            path,
         });
     }
     anyhow::bail!(
@@ -1222,6 +1223,13 @@ fn root_transfer_endpoint(conn: &Connection, root: &RootRow) -> anyhow::Result<T
         machine.id,
         machine.platform.as_deref().unwrap_or("unknown")
     )
+}
+
+fn ssh_root_remote_path(host: &str, root_path: &str) -> String {
+    root_path
+        .strip_prefix(&format!("{host}:"))
+        .unwrap_or(root_path)
+        .to_string()
 }
 
 fn endpoint_join(root: &TransferEndpoint, relative_path: &str) -> anyhow::Result<TransferEndpoint> {
@@ -2094,6 +2102,22 @@ mod tests {
             "/srv/root/dir/file.txt"
         );
         assert_eq!(remote_join("~", "dir/file.txt").unwrap(), "~/dir/file.txt");
+    }
+
+    #[test]
+    fn ssh_root_remote_path_strips_matching_host_prefix() {
+        assert_eq!(
+            ssh_root_remote_path("nas01", "nas01:/srv/archive/photos"),
+            "/srv/archive/photos"
+        );
+        assert_eq!(
+            ssh_root_remote_path("nas01", "/srv/archive/photos"),
+            "/srv/archive/photos"
+        );
+        assert_eq!(
+            ssh_root_remote_path("nas02", "nas01:/srv/archive/photos"),
+            "nas01:/srv/archive/photos"
+        );
     }
 
     #[test]

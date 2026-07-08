@@ -895,22 +895,67 @@ fn import_ssh_root(
     mode: tui::ImportMode,
 ) -> anyhow::Result<tui::ImportResult> {
     let conn = db::open_existing(db_path)?;
-    let root_id = db::ensure_root(&conn, machine_id, remote_path)?;
+    let host = parsed
+        .machine_hint
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("SSH target missing machine hint"))?;
+    let execution_path = resolve_ssh_absolute_path(host, remote_path)?;
+    let root_path = ssh_root_display_path(host, &execution_path);
+    let root_id = db::ensure_root(&conn, machine_id, &root_path)?;
     let files_imported = match mode {
         tui::ImportMode::No => 0,
         tui::ImportMode::Fast => {
-            import_ssh_fast_stat(&conn, parsed, machine_id, &root_id, remote_path)?
+            import_ssh_fast_stat(&conn, parsed, machine_id, &root_id, &execution_path)?
         }
-        tui::ImportMode::Hash => {
-            import_ssh_worker_hash(&conn, parsed, machine_id, &root_id, remote_path)?
-        }
+        tui::ImportMode::Hash => import_ssh_worker_hash(
+            &conn,
+            parsed,
+            machine_id,
+            &root_id,
+            &execution_path,
+            &root_path,
+        )?,
     };
     Ok(tui::ImportResult {
         mode,
         root_id,
-        root_path: remote_path.to_string(),
+        root_path,
         files_imported,
     })
+}
+
+fn resolve_ssh_absolute_path(host: &str, remote_path: &str) -> anyhow::Result<String> {
+    let shell_path = remote_shell_path(remote_path);
+    let command = format!(
+        "p={shell_path}; if [ -d \"$p\" ]; then cd \"$p\" && pwd -P; else d=$(dirname \"$p\") && b=$(basename \"$p\") && cd \"$d\" && printf '%s/%s\\n' \"$(pwd -P)\" \"$b\"; fi"
+    );
+    let output = Command::new("ssh")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ConnectTimeout=2")
+        .arg(host)
+        .arg(command)
+        .output()
+        .with_context(|| format!("resolving SSH path {host}:{remote_path}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "ssh path resolution failed for {host}:{remote_path}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let resolved = String::from_utf8(output.stdout)
+        .context("remote path resolution output was not UTF-8")?
+        .trim()
+        .to_string();
+    if resolved.is_empty() {
+        anyhow::bail!("ssh path resolution returned an empty path for {host}:{remote_path}");
+    }
+    Ok(resolved)
+}
+
+fn ssh_root_display_path(host: &str, remote_path: &str) -> String {
+    format!("{host}:{remote_path}")
 }
 
 #[derive(Debug)]
@@ -952,6 +997,7 @@ fn import_ssh_worker_hash(
     machine_id: &str,
     root_id: &str,
     remote_path: &str,
+    root_path: &str,
 ) -> anyhow::Result<u64> {
     let host = parsed
         .machine_hint
@@ -987,7 +1033,7 @@ fn import_ssh_worker_hash(
     let target = import::EventImportTarget {
         machine_id: machine_id.to_string(),
         root_id: root_id.to_string(),
-        root_path: remote_path.to_string(),
+        root_path: root_path.to_string(),
     };
     let result = import::import_events_file_for_target_silent(conn, &temp_path, Some(&target));
     let _ = std::fs::remove_file(&temp_path);
@@ -1214,4 +1260,26 @@ fn print_transfer_entry(entry: &db::TransferPlanEntryRow) {
         entry.dest_content_id.as_deref().unwrap_or("-"),
         entry.metadata_json
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssh_root_display_path_includes_host_and_path() {
+        assert_eq!(
+            ssh_root_display_path("nas01", "/srv/archive/photos"),
+            "nas01:/srv/archive/photos"
+        );
+    }
+
+    #[test]
+    fn remote_path_basename_handles_host_qualified_file_paths() {
+        assert_eq!(
+            remote_path_basename("nas01:/srv/archive/foo.png"),
+            "foo.png"
+        );
+        assert_eq!(remote_path_basename("/srv/archive/foo.png"), "foo.png");
+    }
 }
