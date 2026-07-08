@@ -1247,6 +1247,11 @@ fn persist_progress(
             files_done: progress.files_done,
             files_skipped: progress.files_skipped,
             errors: progress.errors,
+            bytes_done: None,
+            bytes_total: None,
+            file_bytes_done: None,
+            file_bytes_total: None,
+            bytes_per_second: None,
             message,
         },
     )

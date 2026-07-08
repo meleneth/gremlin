@@ -1,5 +1,6 @@
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 
 use anyhow::Context;
 use rusqlite::Connection;
@@ -27,6 +28,26 @@ struct TransferFileEventInput<'a> {
     action: &'a str,
     message: Option<&'a str>,
     error: Option<&'a str>,
+}
+
+struct TransferProgressEventInput<'a> {
+    current_path: &'a str,
+    files_total: u64,
+    files_seen: u64,
+    files_done: u64,
+    files_skipped: u64,
+    errors: u64,
+    bytes_done: u64,
+    bytes_total: u64,
+    file_bytes_done: u64,
+    file_bytes_total: u64,
+    bytes_per_second: f64,
+}
+
+struct CopyContext<'a> {
+    conn: &'a Connection,
+    job_id: &'a str,
+    dest_root: &'a RootRow,
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +182,11 @@ pub fn plan_selected_files(
                     files_done: selected.len() as u64,
                     files_skipped: 0,
                     errors: 0,
+                    bytes_done: None,
+                    bytes_total: None,
+                    file_bytes_done: None,
+                    file_bytes_total: None,
+                    bytes_per_second: None,
                     message: Some(format!("transfer plan {plan_id} created")),
                 },
             };
@@ -272,6 +298,7 @@ pub fn run_transfer_plan(
         ..TransferRunResult::default()
     };
     let total = entries.len() as u64;
+    let total_bytes = entries.iter().map(|entry| entry.size_bytes).sum::<u64>();
 
     for entry in entries {
         let source_path = endpoint_join(&source_endpoint, &entry.relative_path)?;
@@ -279,15 +306,42 @@ pub fn run_transfer_plan(
         let source_display = source_path.display_path();
         let dest_display = dest_path.display_path();
         let current = entry.relative_path.as_str();
+        let bytes_before_file = result.bytes_copied;
+        let started_at = Instant::now();
+        let mut on_progress = |file_bytes_done: u64,
+                               file_bytes_total: u64,
+                               bytes_per_second: f64|
+         -> anyhow::Result<()> {
+            persist_transfer_progress_event(
+                conn,
+                &job_id,
+                TransferProgressEventInput {
+                    current_path: current,
+                    files_total: total,
+                    files_seen: result.copied + result.skipped + result.errors,
+                    files_done: result.copied,
+                    files_skipped: result.skipped,
+                    errors: result.errors,
+                    bytes_done: bytes_before_file + file_bytes_done,
+                    bytes_total: total_bytes,
+                    file_bytes_done,
+                    file_bytes_total,
+                    bytes_per_second,
+                },
+            )
+        };
 
         let copy_result = copy_one_entry(
-            conn,
-            &job_id,
-            &dest_root,
+            CopyContext {
+                conn,
+                job_id: &job_id,
+                dest_root: &dest_root,
+            },
             &entry,
             &source_path,
             &dest_path,
             paranoid,
+            &mut on_progress,
         );
         match copy_result {
             Ok(CopyOutcome::Copied(bytes)) => {
@@ -341,6 +395,11 @@ pub fn run_transfer_plan(
                 files_done: result.copied,
                 files_skipped: result.skipped,
                 errors: result.errors,
+                bytes_done: Some(result.bytes_copied),
+                bytes_total: Some(total_bytes),
+                file_bytes_done: Some(entry.size_bytes),
+                file_bytes_total: Some(entry.size_bytes),
+                bytes_per_second: Some(rate_per_second(entry.size_bytes, started_at)),
                 message: None,
             },
         };
@@ -379,29 +438,42 @@ enum CopyOutcome {
 }
 
 fn copy_one_entry(
-    conn: &Connection,
-    job_id: &str,
-    dest_root: &RootRow,
+    ctx: CopyContext<'_>,
     entry: &db::TransferPlanEntryRow,
     source_path: &TransferEndpoint,
     dest_path: &TransferEndpoint,
     paranoid: bool,
+    on_progress: &mut dyn FnMut(u64, u64, f64) -> anyhow::Result<()>,
 ) -> anyhow::Result<CopyOutcome> {
     match (source_path, dest_path) {
         (TransferEndpoint::Local(source), TransferEndpoint::Local(dest)) => {
-            copy_local_to_local(conn, job_id, dest_root, entry, source, dest, paranoid)
+            copy_local_to_local(ctx, entry, source, dest, paranoid, on_progress)
         }
         (TransferEndpoint::Ssh { .. }, TransferEndpoint::Local(dest)) => {
             if paranoid {
                 anyhow::bail!("--paranoid is not supported for SSH transfers yet");
             }
-            copy_ssh_to_local(conn, job_id, dest_root, entry, source_path, dest)
+            copy_ssh_to_local(
+                ctx.conn,
+                ctx.job_id,
+                ctx.dest_root,
+                entry,
+                source_path,
+                dest,
+            )
         }
         (TransferEndpoint::Local(source), TransferEndpoint::Ssh { .. }) => {
             if paranoid {
                 anyhow::bail!("--paranoid is not supported for SSH transfers yet");
             }
-            copy_local_to_ssh(conn, job_id, dest_root, entry, source, dest_path)
+            copy_local_to_ssh(
+                ctx.conn,
+                ctx.job_id,
+                ctx.dest_root,
+                entry,
+                source,
+                dest_path,
+            )
         }
         (TransferEndpoint::Ssh { .. }, TransferEndpoint::Ssh { .. }) => {
             anyhow::bail!("remote-to-remote transfer run is not supported yet")
@@ -410,13 +482,12 @@ fn copy_one_entry(
 }
 
 fn copy_local_to_local(
-    conn: &Connection,
-    job_id: &str,
-    dest_root: &RootRow,
+    ctx: CopyContext<'_>,
     entry: &db::TransferPlanEntryRow,
     source_path: &Path,
     dest_path: &Path,
     paranoid: bool,
+    on_progress: &mut dyn FnMut(u64, u64, f64) -> anyhow::Result<()>,
 ) -> anyhow::Result<CopyOutcome> {
     let source_meta = std::fs::metadata(source_path)
         .with_context(|| format!("reading source {}", source_path.display()))?;
@@ -437,9 +508,9 @@ fn copy_local_to_local(
             let verified_content_id = if paranoid {
                 sync_for_paranoid_readback(dest_path, None)?;
                 let readback_hash = hash_existing_file(dest_path)?;
-                verify_copy_hash(conn, entry, &readback_hash)?;
+                verify_copy_hash(ctx.conn, entry, &readback_hash)?;
                 Some(db::ensure_content_object(
-                    conn,
+                    ctx.conn,
                     readback_hash.bytes,
                     &readback_hash.blake3,
                     &readback_hash.sha256,
@@ -447,10 +518,15 @@ fn copy_local_to_local(
             } else {
                 None
             };
-            insert_dest_observation(conn, dest_root, entry, verified_content_id.as_deref())?;
+            insert_dest_observation(
+                ctx.conn,
+                ctx.dest_root,
+                entry,
+                verified_content_id.as_deref(),
+            )?;
             persist_transfer_file_event(
-                conn,
-                job_id,
+                ctx.conn,
+                ctx.job_id,
                 TransferFileEventInput {
                     event_kind: EventKind::TransferSkipped,
                     relative_path: &entry.relative_path,
@@ -468,7 +544,7 @@ fn copy_local_to_local(
     }
 
     let parent_created = ensure_dest_parent(dest_path)?;
-    let copy_hash = copy_with_hash(source_path, dest_path)?;
+    let copy_hash = copy_with_hash(source_path, dest_path, Some(on_progress))?;
     if copy_hash.bytes != entry.size_bytes {
         anyhow::bail!(
             "copied byte count mismatch for {}: planned {}, copied {}",
@@ -477,7 +553,7 @@ fn copy_local_to_local(
             copy_hash.bytes
         );
     }
-    verify_copy_hash(conn, entry, &copy_hash)?;
+    verify_copy_hash(ctx.conn, entry, &copy_hash)?;
     if paranoid {
         sync_for_paranoid_readback(dest_path, parent_created)?;
         let readback_hash = hash_existing_file(dest_path)?;
@@ -492,12 +568,16 @@ fn copy_local_to_local(
         }
     }
 
-    let content_id =
-        db::ensure_content_object(conn, copy_hash.bytes, &copy_hash.blake3, &copy_hash.sha256)?;
-    insert_dest_observation(conn, dest_root, entry, Some(&content_id))?;
+    let content_id = db::ensure_content_object(
+        ctx.conn,
+        copy_hash.bytes,
+        &copy_hash.blake3,
+        &copy_hash.sha256,
+    )?;
+    insert_dest_observation(ctx.conn, ctx.dest_root, entry, Some(&content_id))?;
     persist_transfer_file_event(
-        conn,
-        job_id,
+        ctx.conn,
+        ctx.job_id,
         TransferFileEventInput {
             event_kind: EventKind::TransferCompleted,
             relative_path: &entry.relative_path,
@@ -783,21 +863,39 @@ fn run_command(command: &mut Command) -> anyhow::Result<()> {
     anyhow::bail!("{:?} failed: {}", command, stderr.trim());
 }
 
-fn copy_with_hash(source_path: &Path, dest_path: &Path) -> anyhow::Result<CopyHashResult> {
+fn copy_with_hash(
+    source_path: &Path,
+    dest_path: &Path,
+    on_progress: Option<&mut dyn FnMut(u64, u64, f64) -> anyhow::Result<()>>,
+) -> anyhow::Result<CopyHashResult> {
     let mut source = std::fs::File::open(source_path)
         .with_context(|| format!("opening source {}", source_path.display()))?;
+    let total = source
+        .metadata()
+        .with_context(|| format!("reading metadata for {}", source_path.display()))?
+        .len();
     let mut dest = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(dest_path)
         .with_context(|| format!("creating destination {}", dest_path.display()))?;
-    hash_stream_to_writer(&mut source, Some(&mut dest), source_path)
+    hash_stream_to_writer(
+        &mut source,
+        Some(&mut dest),
+        source_path,
+        total,
+        on_progress,
+    )
 }
 
 fn hash_existing_file(path: &Path) -> anyhow::Result<CopyHashResult> {
     let mut file =
         std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    hash_stream_to_writer(&mut file, None, path)
+    let total = file
+        .metadata()
+        .with_context(|| format!("reading metadata for {}", path.display()))?
+        .len();
+    hash_stream_to_writer(&mut file, None, path, total, None)
 }
 
 fn sync_for_paranoid_readback(dest_path: &Path, parent: Option<PathBuf>) -> anyhow::Result<()> {
@@ -818,6 +916,8 @@ fn hash_stream_to_writer(
     reader: &mut std::fs::File,
     mut writer: Option<&mut std::fs::File>,
     path: &Path,
+    total: u64,
+    mut on_progress: Option<&mut dyn FnMut(u64, u64, f64) -> anyhow::Result<()>>,
 ) -> anyhow::Result<CopyHashResult> {
     use std::io::{Read, Write};
 
@@ -825,6 +925,7 @@ fn hash_stream_to_writer(
     let mut sha256_hasher = Sha256::new();
     let mut bytes = 0_u64;
     let mut buf = [0_u8; 64 * 1024];
+    let started_at = Instant::now();
 
     loop {
         let read = reader
@@ -842,6 +943,9 @@ fn hash_stream_to_writer(
                 .with_context(|| format!("writing copy for {}", path.display()))?;
         }
         bytes += read as u64;
+        if let Some(callback) = on_progress.as_deref_mut() {
+            callback(bytes, total, rate_per_second(bytes, started_at))?;
+        }
     }
     if let Some(writer) = writer {
         writer
@@ -1020,6 +1124,45 @@ fn persist_transfer_file_event(
         },
     };
     db::persist_event(conn, &envelope)
+}
+
+fn persist_transfer_progress_event(
+    conn: &Connection,
+    job_id: &str,
+    input: TransferProgressEventInput<'_>,
+) -> anyhow::Result<()> {
+    let envelope = EventEnvelope {
+        event_kind: EventKind::JobProgress,
+        job_id: Some(job_id.to_string()),
+        sequence: None,
+        created_at: now_rfc3339(),
+        payload: EventPayload::JobProgress {
+            phase: "copying".to_string(),
+            current_path: Some(input.current_path.to_string()),
+            files_total: Some(input.files_total),
+            files_seen: input.files_seen,
+            files_done: input.files_done,
+            files_skipped: input.files_skipped,
+            errors: input.errors,
+            bytes_done: Some(input.bytes_done),
+            bytes_total: Some(input.bytes_total),
+            file_bytes_done: Some(input.file_bytes_done),
+            file_bytes_total: Some(input.file_bytes_total),
+            bytes_per_second: Some(input.bytes_per_second),
+            message: None,
+        },
+    };
+    db::persist_event(conn, &envelope)?;
+    Ok(())
+}
+
+fn rate_per_second(bytes: u64, started_at: Instant) -> f64 {
+    let elapsed = started_at.elapsed().as_secs_f64();
+    if elapsed <= f64::EPSILON {
+        0.0
+    } else {
+        bytes as f64 / elapsed
+    }
 }
 
 fn safe_join(root: &str, relative_path: &str) -> anyhow::Result<PathBuf> {

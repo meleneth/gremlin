@@ -830,20 +830,20 @@ fn render_events(
 
 fn event_header() -> String {
     format!(
-        "{:<2} {:<18} {:<5} {:<9} {:<10} {:>9}",
-        "", "JOB", "KIND", "STATUS", "PHASE", "DONE"
+        "{:<2} {:<18} {:<5} {:<9} {:<10} {:<24}",
+        "", "JOB", "KIND", "STATUS", "PHASE", "PROGRESS"
     )
 }
 
 fn event_row(marker: &str, row: &db::JobEventRow) -> String {
     format!(
-        "{:<2} {:<18} {:<5} {:<9} {:<10} {:>9}",
+        "{:<2} {:<18} {:<5} {:<9} {:<10} {:<24}",
         marker,
         short_id(&row.job_id),
         truncate(&row.job_kind, 5),
         truncate(&event_status(row), 9),
         truncate(row.phase.as_deref().unwrap_or("-"), 10),
-        progress_count(row)
+        truncate(&progress_count(row), 24)
     )
 }
 
@@ -868,10 +868,58 @@ fn event_status(row: &db::JobEventRow) -> String {
 }
 
 fn progress_count(row: &db::JobEventRow) -> String {
+    if let Some(progress) = byte_progress_summary(&row.payload_json) {
+        return progress;
+    }
     if row.files_skipped > 0 || row.errors > 0 {
         format!("{}/{}/{}", row.files_done, row.files_skipped, row.errors)
     } else {
         format!("{}/{}", row.files_done, row.files_seen)
+    }
+}
+
+fn byte_progress_summary(payload_json: &str) -> Option<String> {
+    let payload: serde_json::Value = serde_json::from_str(payload_json).ok()?;
+    if payload.get("type")?.as_str()? != "job_progress" {
+        return None;
+    }
+    let done = payload.get("bytes_done")?.as_u64()?;
+    let total = payload.get("bytes_total")?.as_u64()?;
+    if total == 0 {
+        return None;
+    }
+    let rate = payload
+        .get("bytes_per_second")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(0.0);
+    Some(format!(
+        "{} {:>3}% {:>7}/s",
+        progress_bar(done, total, 8),
+        ((done.saturating_mul(100)) / total).min(100),
+        transfer_rate(rate)
+    ))
+}
+
+fn progress_bar(done: u64, total: u64, width: usize) -> String {
+    let filled = if total == 0 {
+        0
+    } else {
+        ((done.min(total) as usize) * width) / total as usize
+    };
+    format!(
+        "[{}{}]",
+        "#".repeat(filled),
+        "-".repeat(width.saturating_sub(filled))
+    )
+}
+
+fn transfer_rate(bytes_per_second: f64) -> String {
+    if bytes_per_second >= 1024.0 * 1024.0 {
+        format!("{:.1} MiB", bytes_per_second / 1024.0 / 1024.0)
+    } else if bytes_per_second >= 1024.0 {
+        format!("{:.1} KiB", bytes_per_second / 1024.0)
+    } else {
+        format!("{:.0} B", bytes_per_second)
     }
 }
 
@@ -1119,5 +1167,19 @@ mod tests {
             bytes: 2048,
         }];
         assert_eq!(plan_summary_line(&summary), "copy 2 2.00 KiB");
+    }
+
+    #[test]
+    fn formats_byte_progress_summary() {
+        let payload = serde_json::json!({
+            "type": "job_progress",
+            "bytes_done": 512,
+            "bytes_total": 1024,
+            "bytes_per_second": 1048576.0
+        });
+        assert_eq!(
+            byte_progress_summary(&payload.to_string()).unwrap(),
+            "[####----]  50% 1.0 MiB/s"
+        );
     }
 }

@@ -77,6 +77,11 @@ pub enum EventPayload {
         files_done: u64,
         files_skipped: u64,
         errors: u64,
+        bytes_done: Option<u64>,
+        bytes_total: Option<u64>,
+        file_bytes_done: Option<u64>,
+        file_bytes_total: Option<u64>,
+        bytes_per_second: Option<f64>,
         message: Option<String>,
     },
     DirectorySeen {
