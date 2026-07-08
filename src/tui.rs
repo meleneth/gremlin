@@ -1540,13 +1540,17 @@ fn transfer_progress_lines(progress: &TransferProgressSnapshot) -> String {
     let overall_percent = progress_percent(progress.bytes_done, progress.bytes_total);
     let file_percent = progress_percent(progress.file_bytes_done, progress.file_bytes_total);
     format!(
-        "Transfer: {} {}% {}/{} @ {}/s\nFile: {} {}% {}/{}\nNow: {} | files {}/{} | errors {}",
-        progress_bar(progress.bytes_done, progress.bytes_total, 12),
+        "Overall {} {:>3}% {}/{} @ {}/s\nCurrent {} {:>3}% {}/{}\nNow: {} | files {}/{} | errors {}",
+        progress_bar(progress.bytes_done, progress.bytes_total, DETAIL_PROGRESS_WIDTH),
         overall_percent,
         human_size(progress.bytes_done),
         human_size(progress.bytes_total),
         transfer_rate(progress.bytes_per_second),
-        progress_bar(progress.file_bytes_done, progress.file_bytes_total, 12),
+        progress_bar(
+            progress.file_bytes_done,
+            progress.file_bytes_total,
+            DETAIL_PROGRESS_WIDTH
+        ),
         file_percent,
         human_size(progress.file_bytes_done),
         human_size(progress.file_bytes_total),
@@ -1573,7 +1577,7 @@ fn byte_progress_summary(payload_json: &str) -> Option<String> {
         .unwrap_or(0.0);
     Some(format!(
         "{} {:>3}% {:>7}/s",
-        progress_bar(done, total, 8),
+        progress_bar(done, total, EVENT_PROGRESS_WIDTH),
         ((done.saturating_mul(100)) / total).min(100),
         transfer_rate(rate)
     ))
@@ -1587,17 +1591,32 @@ fn progress_percent(done: u64, total: u64) -> u64 {
         .min(100)
 }
 
+const DETAIL_PROGRESS_WIDTH: usize = 28;
+const EVENT_PROGRESS_WIDTH: usize = 14;
+const PARTIAL_BLOCKS: [&str; 8] = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"];
+
 fn progress_bar(done: u64, total: u64, width: usize) -> String {
-    let filled = if total == 0 {
+    if width == 0 {
+        return "[]".to_string();
+    }
+    let clamped_done = done.min(total);
+    let eighths_total = if total == 0 {
         0
     } else {
-        ((done.min(total) as usize) * width) / total as usize
+        ((clamped_done as u128) * (width as u128) * 8) / (total as u128)
     };
-    format!(
-        "[{}{}]",
-        "#".repeat(filled),
-        "-".repeat(width.saturating_sub(filled))
-    )
+    let full = (eighths_total / 8).min(width as u128) as usize;
+    let partial = (eighths_total % 8) as usize;
+    let mut bar = String::with_capacity(width + 2);
+    bar.push('▕');
+    bar.push_str(&"█".repeat(full));
+    if full < width {
+        bar.push_str(PARTIAL_BLOCKS[partial]);
+        let empty = width.saturating_sub(full + usize::from(partial > 0));
+        bar.push_str(&"░".repeat(empty));
+    }
+    bar.push('▏');
+    bar
 }
 
 fn transfer_rate(bytes_per_second: f64) -> String {
@@ -2899,8 +2918,15 @@ mod tests {
         });
         assert_eq!(
             byte_progress_summary(&payload.to_string()).unwrap(),
-            "[####----]  50% 1.0 MiB/s"
+            "▕███████░░░░░░░▏  50% 1.0 MiB/s"
         );
+    }
+
+    #[test]
+    fn progress_bar_uses_partial_blocks_at_static_width() {
+        assert_eq!(progress_bar(1, 4, 4), "▕█░░░▏");
+        assert_eq!(progress_bar(1, 8, 4), "▕▌░░░▏");
+        assert_eq!(progress_bar(4, 4, 4), "▕████▏");
     }
 
     #[test]
@@ -2920,9 +2946,9 @@ mod tests {
         let progress = transfer_progress_snapshot(&payload.to_string()).unwrap();
         let lines = transfer_progress_lines(&progress);
 
-        assert!(lines.contains("Transfer: [######------] 50%"));
+        assert!(lines.contains("Overall ▕██████████████░░░░░░░░░░░░░░▏  50%"));
         assert!(lines.contains("@ 2.0 MiB/s"));
-        assert!(lines.contains("File: [######------] 50%"));
+        assert!(lines.contains("Current ▕██████████████░░░░░░░░░░░░░░▏  50%"));
         assert!(lines.contains("files 2/4 | errors 1"));
     }
 
