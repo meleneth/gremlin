@@ -148,5 +148,8 @@ RSpec.describe "Gremlin local file CLI integration" do
     expect(verify.fetch("changed")).to eq(0)
     expect(verify.fetch("missing")).to eq(0)
     expect(verify.fetch("errors")).to eq(0)
+
+    repeat_plan = gremlin!("transfer", "plan", fixture_root, dest_root, "--all")
+    expect(repeat_plan.stdout).to include("skip:\t3")
   end
 end

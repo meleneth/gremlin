@@ -2219,64 +2219,141 @@ pub fn cached_directory_entries(
     parent: &str,
 ) -> rusqlite::Result<Vec<CachedDirectoryEntry>> {
     let parent = normalize_cached_parent(parent);
+    let mut entries = cached_child_directories(conn, root_id, &parent)?;
+    entries.extend(cached_child_files(conn, root_id, &parent)?);
+    Ok(entries)
+}
+
+fn cached_child_directories(
+    conn: &Connection,
+    root_id: &str,
+    parent: &str,
+) -> rusqlite::Result<Vec<CachedDirectoryEntry>> {
+    if parent == "." {
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT
+                substr(relative_path, 1, instr(relative_path, '/') - 1) AS child_name,
+                COUNT(*),
+                COALESCE(SUM(size_bytes), 0)
+            FROM path_observations
+            WHERE root_id = ?1 AND instr(relative_path, '/') > 0
+            GROUP BY child_name
+            ORDER BY child_name ASC
+            "#,
+        )?;
+        let rows = stmt.query_map(params![root_id], |row| {
+            let name: String = row.get(0)?;
+            Ok(CachedDirectoryEntry {
+                kind: "dir".to_string(),
+                name: name.clone(),
+                relative_path: name,
+                file_count: row.get(1)?,
+                size_bytes: row.get(2)?,
+                modified_at: None,
+                content_id: None,
+                status: None,
+            })
+        })?;
+        return rows.collect();
+    }
+
+    let prefix = format!("{parent}/");
+    let start = prefix.chars().count() + 1;
+    let like = format!("{}%", escape_like_pattern(&prefix));
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT
+            child_name,
+            COUNT(*),
+            COALESCE(SUM(size_bytes), 0)
+        FROM (
+            SELECT
+                substr(
+                    substr(relative_path, ?3),
+                    1,
+                    instr(substr(relative_path, ?3), '/') - 1
+                ) AS child_name,
+                size_bytes
+            FROM path_observations
+            WHERE root_id = ?1
+              AND relative_path LIKE ?2 ESCAPE '\'
+              AND instr(substr(relative_path, ?3), '/') > 0
+        )
+        GROUP BY child_name
+        ORDER BY child_name ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(params![root_id, like, start as i64], |row| {
+        let name: String = row.get(0)?;
+        Ok(CachedDirectoryEntry {
+            kind: "dir".to_string(),
+            name: name.clone(),
+            relative_path: format!("{parent}/{name}"),
+            file_count: row.get(1)?,
+            size_bytes: row.get(2)?,
+            modified_at: None,
+            content_id: None,
+            status: None,
+        })
+    })?;
+    rows.collect()
+}
+
+fn cached_child_files(
+    conn: &Connection,
+    root_id: &str,
+    parent: &str,
+) -> rusqlite::Result<Vec<CachedDirectoryEntry>> {
+    if parent == "." {
+        let mut stmt = conn.prepare(
+            r#"
+            SELECT relative_path, size_bytes, modified_at, content_id, status
+            FROM path_observations
+            WHERE root_id = ?1 AND instr(relative_path, '/') = 0
+            ORDER BY relative_path ASC
+            "#,
+        )?;
+        let rows = stmt.query_map(params![root_id], cached_file_entry_from_row)?;
+        return rows.collect();
+    }
+
+    let prefix = format!("{parent}/");
+    let start = prefix.chars().count() + 1;
+    let like = format!("{}%", escape_like_pattern(&prefix));
     let mut stmt = conn.prepare(
         r#"
         SELECT relative_path, size_bytes, modified_at, content_id, status
         FROM path_observations
         WHERE root_id = ?1
+          AND relative_path LIKE ?2 ESCAPE '\'
+          AND instr(substr(relative_path, ?3), '/') = 0
         ORDER BY relative_path ASC
         "#,
     )?;
-    let rows = stmt.query_map(params![root_id], |row| {
-        Ok(FileRow {
-            relative_path: row.get(0)?,
-            size_bytes: row.get(1)?,
-            modified_at: row.get(2)?,
-            content_id: row.get(3)?,
-            status: row.get(4)?,
-        })
-    })?;
+    let rows = stmt.query_map(
+        params![root_id, like, start as i64],
+        cached_file_entry_from_row,
+    )?;
+    rows.collect()
+}
 
-    let mut dirs = BTreeMap::<String, CachedDirectoryEntry>::new();
-    let mut files = Vec::new();
-    for row in rows {
-        let row = row?;
-        let Some((name, child_path, is_dir)) = cached_child_for_parent(&row.relative_path, &parent)
-        else {
-            continue;
-        };
-        if is_dir {
-            let entry = dirs
-                .entry(child_path.clone())
-                .or_insert_with(|| CachedDirectoryEntry {
-                    kind: "dir".to_string(),
-                    name,
-                    relative_path: child_path,
-                    file_count: 0,
-                    size_bytes: 0,
-                    modified_at: None,
-                    content_id: None,
-                    status: None,
-                });
-            entry.file_count += 1;
-            entry.size_bytes += row.size_bytes;
-        } else {
-            files.push(CachedDirectoryEntry {
-                kind: "file".to_string(),
-                name,
-                relative_path: row.relative_path,
-                file_count: 1,
-                size_bytes: row.size_bytes,
-                modified_at: row.modified_at,
-                content_id: row.content_id,
-                status: Some(row.status),
-            });
-        }
-    }
-
-    let mut entries = dirs.into_values().collect::<Vec<_>>();
-    entries.extend(files);
-    Ok(entries)
+fn cached_file_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CachedDirectoryEntry> {
+    let relative_path: String = row.get(0)?;
+    let name = Path::new(&relative_path)
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| relative_path.clone());
+    Ok(CachedDirectoryEntry {
+        kind: "file".to_string(),
+        name,
+        relative_path,
+        file_count: 1,
+        size_bytes: row.get(1)?,
+        modified_at: row.get(2)?,
+        content_id: row.get(3)?,
+        status: Some(row.get(4)?),
+    })
 }
 
 fn normalize_cached_parent(parent: &str) -> String {
@@ -2285,27 +2362,6 @@ fn normalize_cached_parent(parent: &str) -> String {
         ".".to_string()
     } else {
         trimmed.to_string()
-    }
-}
-
-fn cached_child_for_parent(relative_path: &str, parent: &str) -> Option<(String, String, bool)> {
-    let rest = if parent == "." {
-        relative_path
-    } else {
-        relative_path.strip_prefix(&format!("{parent}/"))?
-    };
-    if rest.is_empty() {
-        return None;
-    }
-    if let Some((name, _)) = rest.split_once('/') {
-        let child_path = if parent == "." {
-            name.to_string()
-        } else {
-            format!("{parent}/{name}")
-        };
-        Some((name.to_string(), child_path, true))
-    } else {
-        Some((rest.to_string(), relative_path.to_string(), false))
     }
 }
 

@@ -91,14 +91,21 @@ pub(super) async fn run_loop(
                     };
                     state.background_finished_job(&job_id, level, status);
                 }
-                TuiMessage::TransferFinished { plan_id, status } => {
+                TuiMessage::TransferFinished {
+                    plan_id,
+                    copied: _copied,
+                    skipped: _skipped,
+                    errors,
+                    canceled,
+                    status,
+                } => {
                     if state.transfer_run_plan_id.as_deref() == Some(plan_id.as_str()) {
                         state.transfer_run_plan_id = None;
                     }
                     refresh_last_plan(conn, &mut state, &plan_id)?;
                     let level = if status.contains("failed") {
                         ActivityLevel::Error
-                    } else if status.contains("canceled") || !status.contains("errors 0") {
+                    } else if canceled || errors > 0 {
                         ActivityLevel::Warning
                     } else {
                         ActivityLevel::Success
@@ -214,7 +221,12 @@ pub(super) async fn run_loop(
             );
         })?;
 
-        if event::poll(Duration::from_millis(250))? {
+        let poll_timeout = if state.active_background_jobs > 0 {
+            Duration::from_millis(250)
+        } else {
+            Duration::from_secs(5)
+        };
+        if event::poll(poll_timeout)? {
             if let Event::Key(key) = event::read()? {
                 if is_interrupt_key(key) {
                     request_immediate_quit(conn, &mut state)?;

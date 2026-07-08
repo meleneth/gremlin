@@ -67,29 +67,56 @@ pub(super) fn spawn_transfer_runner(
                 }
             }
         })();
-        let status = match result {
+        let (status, copied, skipped, errors, canceled) = match result {
             Ok(result) if result.canceled => {
-                format!(
+                let status = format!(
                     "canceled transfer {}: copied {} ({}) skipped {} errors {}",
                     short_id(&result.plan_id),
                     result.copied,
                     human_size(result.bytes_copied),
                     result.skipped,
                     result.errors
+                );
+                (
+                    status,
+                    result.copied,
+                    result.skipped,
+                    result.errors,
+                    result.canceled,
                 )
             }
             Ok(result) => {
-                format!(
+                let status = format!(
                     "completed transfer {}: copied {} ({}) skipped {} errors {}",
                     short_id(&result.plan_id),
                     result.copied,
                     human_size(result.bytes_copied),
                     result.skipped,
                     result.errors
+                );
+                (
+                    status,
+                    result.copied,
+                    result.skipped,
+                    result.errors,
+                    result.canceled,
                 )
             }
-            Err(err) => format!("failed transfer {}: {err}", short_id(&plan_id)),
+            Err(err) => (
+                format!("failed transfer {}: {err}", short_id(&plan_id)),
+                0,
+                0,
+                1,
+                false,
+            ),
         };
-        let _ = job_tx.send(TuiMessage::TransferFinished { plan_id, status });
+        let _ = job_tx.send(TuiMessage::TransferFinished {
+            plan_id,
+            copied,
+            skipped,
+            errors,
+            canceled,
+            status,
+        });
     });
 }

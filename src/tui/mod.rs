@@ -384,6 +384,10 @@ enum TuiMessage {
     },
     TransferFinished {
         plan_id: String,
+        copied: u64,
+        skipped: u64,
+        errors: u64,
+        canceled: bool,
         status: String,
     },
     ImportFinished(String),
