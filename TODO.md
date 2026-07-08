@@ -52,8 +52,8 @@
 
 - Add compare flow between two roots or checksum collections.
 - Add more transfer plan filters and output formats after the copy runner requirements settle.
-- Persist copy chunk checkpoints beyond the current in-process chunk-verified one-sided SSH runner.
-- Use stored path-observation chunk hashes to resume transfer plans instead of restarting incomplete files.
+- Add explicit TUI/CLI resume status for persisted transfer chunk checkpoints.
+- Use stored path-observation chunk hashes to resume transfer plans even when copy checkpoints are missing.
 - Make resume distinguish size-only skips from hash-verified skips.
 - Add remote-to-remote transfer execution after one-sided SSH copies settle.
 - Add SSH paranoid readback/hash verification after remote writes.

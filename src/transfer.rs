@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
@@ -48,6 +48,7 @@ struct TransferProgressEventInput<'a> {
 struct CopyContext<'a> {
     conn: &'a Connection,
     job_id: &'a str,
+    plan_id: &'a str,
     dest_root: &'a RootRow,
 }
 
@@ -344,6 +345,7 @@ pub fn run_transfer_plan(
             CopyContext {
                 conn,
                 job_id: &job_id,
+                plan_id,
                 dest_root: &dest_root,
             },
             &entry,
@@ -539,29 +541,13 @@ fn copy_one_entry(
             if paranoid {
                 anyhow::bail!("--paranoid is not supported for SSH transfers yet");
             }
-            copy_ssh_to_local(
-                ctx.conn,
-                ctx.job_id,
-                ctx.dest_root,
-                entry,
-                source_path,
-                dest,
-                on_progress,
-            )
+            copy_ssh_to_local(ctx, entry, source_path, dest, on_progress)
         }
         (TransferEndpoint::Local(source), TransferEndpoint::Ssh { .. }) => {
             if paranoid {
                 anyhow::bail!("--paranoid is not supported for SSH transfers yet");
             }
-            copy_local_to_ssh(
-                ctx.conn,
-                ctx.job_id,
-                ctx.dest_root,
-                entry,
-                source,
-                dest_path,
-                on_progress,
-            )
+            copy_local_to_ssh(ctx, entry, source, dest_path, on_progress)
         }
         (TransferEndpoint::Ssh { .. }, TransferEndpoint::Ssh { .. }) => {
             anyhow::bail!("remote-to-remote transfer run is not supported yet")
@@ -681,9 +667,7 @@ fn copy_local_to_local(
 }
 
 fn copy_ssh_to_local(
-    conn: &Connection,
-    job_id: &str,
-    dest_root: &RootRow,
+    ctx: CopyContext<'_>,
     entry: &db::TransferPlanEntryRow,
     source: &TransferEndpoint,
     dest_path: &Path,
@@ -693,20 +677,24 @@ fn copy_ssh_to_local(
         anyhow::bail!("destination exists: {}", dest_path.display());
     }
     let parent = ensure_dest_parent(dest_path)?;
-    let temp_path = dest_path.with_extension(format!(
-        "gremlin-copy-{}.tmp",
-        uuid::Uuid::new_v4().simple()
-    ));
-    let copy_result = copy_ssh_to_local_chunked(source, &temp_path, entry.size_bytes, on_progress)
-        .with_context(|| {
-            format!(
-                "copying {} to {}",
-                source.display_path(),
-                dest_path.display()
-            )
-        });
+    let temp_path = transfer_temp_path(dest_path);
+    let copy_result = copy_ssh_to_local_chunked(
+        ctx.conn,
+        ctx.job_id,
+        ctx.plan_id,
+        entry,
+        source,
+        &temp_path,
+        on_progress,
+    )
+    .with_context(|| {
+        format!(
+            "copying {} to {}",
+            source.display_path(),
+            dest_path.display()
+        )
+    });
     if let Err(err) = copy_result {
-        let _ = std::fs::remove_file(&temp_path);
         return Err(err);
     }
     let copy_hash = copy_result?;
@@ -719,21 +707,25 @@ fn copy_ssh_to_local(
             copy_hash.bytes
         );
     }
-    if let Err(err) = verify_copy_hash(conn, entry, &copy_hash) {
+    if let Err(err) = verify_copy_hash(ctx.conn, entry, &copy_hash) {
         let _ = std::fs::remove_file(&temp_path);
         return Err(err);
     }
     std::fs::rename(&temp_path, dest_path)
         .with_context(|| format!("installing copy at {}", dest_path.display()))?;
     sync_for_paranoid_readback(dest_path, parent)?;
-    let content_id =
-        db::ensure_content_object(conn, copy_hash.bytes, &copy_hash.blake3, &copy_hash.sha256)?;
-    insert_dest_observation(conn, dest_root, entry, Some(&content_id))?;
+    let content_id = db::ensure_content_object(
+        ctx.conn,
+        copy_hash.bytes,
+        &copy_hash.blake3,
+        &copy_hash.sha256,
+    )?;
+    insert_dest_observation(ctx.conn, ctx.dest_root, entry, Some(&content_id))?;
     let source_display = source.display_path();
     let dest_display = dest_path.display().to_string();
     persist_transfer_file_event(
-        conn,
-        job_id,
+        ctx.conn,
+        ctx.job_id,
         TransferFileEventInput {
             event_kind: EventKind::TransferCompleted,
             relative_path: &entry.relative_path,
@@ -749,9 +741,7 @@ fn copy_ssh_to_local(
 }
 
 fn copy_local_to_ssh(
-    conn: &Connection,
-    job_id: &str,
-    dest_root: &RootRow,
+    ctx: CopyContext<'_>,
     entry: &db::TransferPlanEntryRow,
     source_path: &Path,
     dest: &TransferEndpoint,
@@ -771,39 +761,57 @@ fn copy_local_to_ssh(
         );
     }
     let source_hash = hash_existing_file(source_path)?;
-    verify_copy_hash(conn, entry, &source_hash)?;
+    verify_copy_hash(ctx.conn, entry, &source_hash)?;
 
     let TransferEndpoint::Ssh { host, path } = dest else {
         anyhow::bail!("destination is not SSH");
     };
     let parent = remote_parent(path);
+    if remote_path_exists(host, path)? {
+        let checkpoint_count = db::transfer_copy_chunk_count_for_entry(
+            ctx.conn,
+            ctx.plan_id,
+            &entry.relative_path,
+            &entry.dest_relative_path,
+        )?;
+        if checkpoint_count == 0 {
+            anyhow::bail!("remote destination exists: {host}:{path}");
+        }
+    }
     run_command(Command::new("ssh").arg(host).arg(format!(
-        "test ! -e {} && mkdir -p {}",
+        "test -f {} || mkdir -p {}",
         remote_shell_path(path),
         remote_shell_path(&parent)
     )))
     .with_context(|| format!("preparing remote destination {host}:{path}"))?;
-    copy_local_to_ssh_chunked(source_path, dest, entry.size_bytes, on_progress).with_context(
-        || {
-            format!(
-                "copying {} to {}",
-                source_path.display(),
-                dest.display_path()
-            )
-        },
-    )?;
+    copy_local_to_ssh_chunked(
+        ctx.conn,
+        ctx.job_id,
+        ctx.plan_id,
+        entry,
+        source_path,
+        dest,
+        on_progress,
+    )
+    .with_context(|| {
+        format!(
+            "copying {} to {}",
+            source_path.display(),
+            dest.display_path()
+        )
+    })?;
     let content_id = db::ensure_content_object(
-        conn,
+        ctx.conn,
         source_hash.bytes,
         &source_hash.blake3,
         &source_hash.sha256,
     )?;
-    insert_dest_observation(conn, dest_root, entry, Some(&content_id))?;
+    insert_dest_observation(ctx.conn, ctx.dest_root, entry, Some(&content_id))?;
     let source_display = source_path.display().to_string();
     let dest_display = dest.display_path();
     persist_transfer_file_event(
-        conn,
-        job_id,
+        ctx.conn,
+        ctx.job_id,
         TransferFileEventInput {
             event_kind: EventKind::TransferCompleted,
             relative_path: &entry.relative_path,
@@ -819,51 +827,58 @@ fn copy_local_to_ssh(
 }
 
 fn copy_ssh_to_local_chunked(
+    conn: &Connection,
+    job_id: &str,
+    plan_id: &str,
+    entry: &db::TransferPlanEntryRow,
     source: &TransferEndpoint,
     temp_path: &Path,
-    total: u64,
     on_progress: &mut dyn FnMut(u64, u64, f64) -> anyhow::Result<()>,
 ) -> anyhow::Result<CopyHashResult> {
     let TransferEndpoint::Ssh { host, path } = source else {
         anyhow::bail!("source is not SSH");
     };
     let mut dest = std::fs::OpenOptions::new()
+        .read(true)
         .write(true)
-        .create_new(true)
+        .create(true)
+        .truncate(false)
         .open(temp_path)
         .with_context(|| format!("creating {}", temp_path.display()))?;
+    dest.set_len(entry.size_bytes)
+        .with_context(|| format!("sizing {}", temp_path.display()))?;
     let mut blake3_hasher = blake3::Hasher::new();
     let mut sha256_hasher = Sha256::new();
     let mut copied = 0_u64;
     let started_at = Instant::now();
-    for chunk in transfer_chunks(total) {
-        let remote_md5 = remote_chunk_md5(host, path, chunk.index)?;
-        let bytes = remote_chunk_bytes(host, path, chunk.index)?;
+    for chunk in transfer_chunks(entry.size_bytes) {
+        let bytes = if let Some(checkpoint) =
+            matching_copy_chunk_checkpoint(conn, plan_id, entry, chunk)?
+        {
+            match local_chunk_bytes(temp_path, chunk) {
+                Ok(bytes) if format!("{:x}", md5::compute(&bytes)) == checkpoint.digest => bytes,
+                _ => fetch_verified_remote_chunk(host, path, chunk)?,
+            }
+        } else {
+            fetch_verified_remote_chunk(host, path, chunk)?
+        };
         if bytes.len() as u64 != chunk.size {
-            anyhow::bail!(
-                "remote chunk size mismatch for {} chunk {}: expected {}, got {}",
-                path,
-                chunk.index,
-                chunk.size,
-                bytes.len()
-            );
+            anyhow::bail!("chunk {} size changed while copying {}", chunk.index, path);
         }
         let local_md5 = format!("{:x}", md5::compute(&bytes));
-        if local_md5 != remote_md5 {
-            anyhow::bail!(
-                "MD5 chunk mismatch for {} chunk {}: remote {}, copied {}",
-                path,
-                chunk.index,
-                remote_md5,
-                local_md5
-            );
-        }
+        dest.seek(SeekFrom::Start(chunk.offset))
+            .with_context(|| format!("seeking {}", temp_path.display()))?;
         dest.write_all(&bytes)
             .with_context(|| format!("writing {}", temp_path.display()))?;
+        persist_copy_chunk_checkpoint(conn, job_id, plan_id, entry, chunk, &local_md5)?;
         blake3_hasher.update(&bytes);
         sha256_hasher.update(&bytes);
         copied += bytes.len() as u64;
-        on_progress(copied, total, rate_per_second(copied, started_at))?;
+        on_progress(
+            copied,
+            entry.size_bytes,
+            rate_per_second(copied, started_at),
+        )?;
     }
     dest.sync_all()
         .with_context(|| format!("syncing {}", temp_path.display()))?;
@@ -875,15 +890,18 @@ fn copy_ssh_to_local_chunked(
 }
 
 fn copy_local_to_ssh_chunked(
+    conn: &Connection,
+    job_id: &str,
+    plan_id: &str,
+    entry: &db::TransferPlanEntryRow,
     source_path: &Path,
     dest: &TransferEndpoint,
-    total: u64,
     on_progress: &mut dyn FnMut(u64, u64, f64) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let TransferEndpoint::Ssh { host, path } = dest else {
         anyhow::bail!("destination is not SSH");
     };
-    if total == 0 {
+    if entry.size_bytes == 0 {
         run_command(
             Command::new("ssh")
                 .arg(host)
@@ -897,14 +915,31 @@ fn copy_local_to_ssh_chunked(
         .with_context(|| format!("opening source {}", source_path.display()))?;
     let mut copied = 0_u64;
     let started_at = Instant::now();
-    for chunk in transfer_chunks(total) {
+    for chunk in transfer_chunks(entry.size_bytes) {
         let mut bytes = vec![0_u8; chunk.size as usize];
+        source
+            .seek(SeekFrom::Start(chunk.offset))
+            .with_context(|| format!("seeking {}", source_path.display()))?;
         source
             .read_exact(&mut bytes)
             .with_context(|| format!("reading {}", source_path.display()))?;
         let local_md5 = format!("{:x}", md5::compute(&bytes));
-        write_remote_chunk(host, path, chunk.index, &bytes)?;
-        let remote_md5 = remote_chunk_md5(host, path, chunk.index)?;
+        let checkpoint = matching_copy_chunk_checkpoint(conn, plan_id, entry, chunk)?;
+        let remote_md5 = if checkpoint
+            .as_ref()
+            .is_some_and(|checkpoint| checkpoint.digest == local_md5)
+        {
+            let remote_md5 = remote_chunk_md5(host, path, chunk.index)?;
+            if remote_md5 == local_md5 {
+                remote_md5
+            } else {
+                write_remote_chunk(host, path, chunk.index, &bytes)?;
+                remote_chunk_md5(host, path, chunk.index)?
+            }
+        } else {
+            write_remote_chunk(host, path, chunk.index, &bytes)?;
+            remote_chunk_md5(host, path, chunk.index)?
+        };
         if remote_md5 != local_md5 {
             anyhow::bail!(
                 "MD5 chunk mismatch after SSH write for {} chunk {}: local {}, remote {}",
@@ -914,8 +949,13 @@ fn copy_local_to_ssh_chunked(
                 remote_md5
             );
         }
+        persist_copy_chunk_checkpoint(conn, job_id, plan_id, entry, chunk, &local_md5)?;
         copied += chunk.size;
-        on_progress(copied, total, rate_per_second(copied, started_at))?;
+        on_progress(
+            copied,
+            entry.size_bytes,
+            rate_per_second(copied, started_at),
+        )?;
     }
     Ok(())
 }
@@ -923,6 +963,7 @@ fn copy_local_to_ssh_chunked(
 #[derive(Debug, Clone, Copy)]
 struct TransferChunk {
     index: u64,
+    offset: u64,
     size: u64,
 }
 
@@ -933,11 +974,106 @@ fn transfer_chunks(total: u64) -> Vec<TransferChunk> {
     let mut index = 0_u64;
     while offset < total {
         let size = (total - offset).min(chunk_size);
-        chunks.push(TransferChunk { index, size });
+        chunks.push(TransferChunk {
+            index,
+            offset,
+            size,
+        });
         offset += size;
         index += 1;
     }
     chunks
+}
+
+fn matching_copy_chunk_checkpoint(
+    conn: &Connection,
+    plan_id: &str,
+    entry: &db::TransferPlanEntryRow,
+    chunk: TransferChunk,
+) -> rusqlite::Result<Option<db::TransferCopyChunkRow>> {
+    db::transfer_copy_chunk(
+        conn,
+        plan_id,
+        &entry.relative_path,
+        &entry.dest_relative_path,
+        crate::fswork::DEFAULT_CHUNK_SIZE_BYTES,
+        chunk.index,
+        "md5",
+    )
+    .map(|checkpoint| {
+        checkpoint.filter(|checkpoint| {
+            checkpoint.offset_bytes == chunk.offset
+                && checkpoint.size_bytes == chunk.size
+                && checkpoint.chunk_size_bytes == crate::fswork::DEFAULT_CHUNK_SIZE_BYTES
+                && checkpoint.chunk_index == chunk.index
+                && checkpoint.algorithm == "md5"
+        })
+    })
+}
+
+fn persist_copy_chunk_checkpoint(
+    conn: &Connection,
+    job_id: &str,
+    plan_id: &str,
+    entry: &db::TransferPlanEntryRow,
+    chunk: TransferChunk,
+    md5_digest: &str,
+) -> rusqlite::Result<()> {
+    db::upsert_transfer_copy_chunk(
+        conn,
+        db::TransferCopyChunkInput {
+            plan_id,
+            relative_path: &entry.relative_path,
+            dest_relative_path: &entry.dest_relative_path,
+            chunk_size_bytes: crate::fswork::DEFAULT_CHUNK_SIZE_BYTES,
+            chunk_index: chunk.index,
+            offset_bytes: chunk.offset,
+            size_bytes: chunk.size,
+            algorithm: "md5",
+            digest: md5_digest,
+            job_id,
+        },
+    )
+}
+
+fn local_chunk_bytes(path: &Path, chunk: TransferChunk) -> anyhow::Result<Vec<u8>> {
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    file.seek(SeekFrom::Start(chunk.offset))
+        .with_context(|| format!("seeking {}", path.display()))?;
+    let mut bytes = vec![0_u8; chunk.size as usize];
+    file.read_exact(&mut bytes)
+        .with_context(|| format!("reading {}", path.display()))?;
+    Ok(bytes)
+}
+
+fn fetch_verified_remote_chunk(
+    host: &str,
+    path: &str,
+    chunk: TransferChunk,
+) -> anyhow::Result<Vec<u8>> {
+    let remote_md5 = remote_chunk_md5(host, path, chunk.index)?;
+    let bytes = remote_chunk_bytes(host, path, chunk.index)?;
+    if bytes.len() as u64 != chunk.size {
+        anyhow::bail!(
+            "remote chunk size mismatch for {} chunk {}: expected {}, got {}",
+            path,
+            chunk.index,
+            chunk.size,
+            bytes.len()
+        );
+    }
+    let local_md5 = format!("{:x}", md5::compute(&bytes));
+    if local_md5 != remote_md5 {
+        anyhow::bail!(
+            "MD5 chunk mismatch for {} chunk {}: remote {}, copied {}",
+            path,
+            chunk.index,
+            remote_md5,
+            local_md5
+        );
+    }
+    Ok(bytes)
 }
 
 fn remote_chunk_md5(host: &str, path: &str, chunk_index: u64) -> anyhow::Result<String> {
@@ -1018,6 +1154,23 @@ fn write_remote_chunk(
     } else {
         anyhow::bail!("remote chunk write failed for {host}:{path} chunk {chunk_index}");
     }
+}
+
+fn transfer_temp_path(dest_path: &Path) -> PathBuf {
+    let file_name = dest_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("copy");
+    dest_path.with_file_name(format!(".{file_name}.gremlin-part"))
+}
+
+fn remote_path_exists(host: &str, path: &str) -> anyhow::Result<bool> {
+    let status = Command::new("ssh")
+        .arg(host)
+        .arg(format!("test -e {}", remote_shell_path(path)))
+        .status()
+        .with_context(|| format!("checking remote path {host}:{path}"))?;
+    Ok(status.success())
 }
 
 fn ensure_dest_parent(dest_path: &Path) -> anyhow::Result<Option<PathBuf>> {
@@ -1957,11 +2110,66 @@ mod tests {
         let chunks = transfer_chunks(chunk_size * 2 + 7);
         assert_eq!(chunks.len(), 3);
         assert_eq!(chunks[0].index, 0);
+        assert_eq!(chunks[0].offset, 0);
         assert_eq!(chunks[0].size, chunk_size);
         assert_eq!(chunks[1].index, 1);
+        assert_eq!(chunks[1].offset, chunk_size);
         assert_eq!(chunks[1].size, chunk_size);
         assert_eq!(chunks[2].index, 2);
+        assert_eq!(chunks[2].offset, chunk_size * 2);
         assert_eq!(chunks[2].size, 7);
+    }
+
+    #[test]
+    fn transfer_copy_chunk_checkpoints_round_trip() {
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+        let source_id = db::ensure_root(&conn, &machine_id, "/tmp/source").unwrap();
+        let dest_id = db::ensure_root(&conn, &machine_id, "/tmp/dest").unwrap();
+        let plan_id = db::create_transfer_plan(
+            &conn,
+            None,
+            &source_id,
+            &dest_id,
+            None,
+            serde_json::json!({}),
+        )
+        .unwrap();
+        let entry = db::TransferPlanEntryRow {
+            relative_path: "some/file.bin".to_string(),
+            dest_relative_path: "some/file.bin".to_string(),
+            size_bytes: 7,
+            source_content_id: None,
+            dest_content_id: None,
+            action: "copy".to_string(),
+            reason: "test".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+        let chunk = TransferChunk {
+            index: 2,
+            offset: crate::fswork::DEFAULT_CHUNK_SIZE_BYTES * 2,
+            size: 7,
+        };
+
+        persist_copy_chunk_checkpoint(&conn, "job_1", &plan_id, &entry, chunk, "abc").unwrap();
+        let checkpoint = matching_copy_chunk_checkpoint(&conn, &plan_id, &entry, chunk)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(checkpoint.digest, "abc");
+        assert_eq!(checkpoint.offset_bytes, chunk.offset);
+        assert_eq!(checkpoint.size_bytes, chunk.size);
+        assert_eq!(
+            db::transfer_copy_chunk_count_for_entry(
+                &conn,
+                &plan_id,
+                &entry.relative_path,
+                &entry.dest_relative_path
+            )
+            .unwrap(),
+            1
+        );
     }
 
     #[test]

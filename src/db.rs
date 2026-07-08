@@ -118,6 +118,30 @@ pub struct TransferPlanEntryRow {
 }
 
 #[derive(Debug, Clone)]
+pub struct TransferCopyChunkInput<'a> {
+    pub plan_id: &'a str,
+    pub relative_path: &'a str,
+    pub dest_relative_path: &'a str,
+    pub chunk_size_bytes: u64,
+    pub chunk_index: u64,
+    pub offset_bytes: u64,
+    pub size_bytes: u64,
+    pub algorithm: &'a str,
+    pub digest: &'a str,
+    pub job_id: &'a str,
+}
+
+#[derive(Debug, Clone)]
+pub struct TransferCopyChunkRow {
+    pub chunk_size_bytes: u64,
+    pub chunk_index: u64,
+    pub offset_bytes: u64,
+    pub size_bytes: u64,
+    pub algorithm: String,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct TransferPlanActionSummary {
     pub action: String,
     pub files: i64,
@@ -453,6 +477,22 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             metadata_json TEXT,
             UNIQUE(plan_id, relative_path)
         );
+
+        CREATE TABLE IF NOT EXISTS transfer_copy_chunks (
+            id TEXT PRIMARY KEY,
+            plan_id TEXT NOT NULL REFERENCES transfer_plans(id),
+            relative_path TEXT NOT NULL,
+            dest_relative_path TEXT NOT NULL,
+            chunk_size_bytes INTEGER NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            offset_bytes INTEGER NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            algorithm TEXT NOT NULL,
+            digest TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            verified_at TEXT NOT NULL,
+            UNIQUE(plan_id, relative_path, dest_relative_path, chunk_size_bytes, chunk_index, algorithm)
+        );
         "#,
     )?;
     ensure_column(
@@ -630,6 +670,10 @@ pub fn delete_root(
     )?;
     tx.execute(
         "DELETE FROM transfer_plan_entries WHERE plan_id IN (SELECT id FROM transfer_plans WHERE source_root_id = ?1 OR dest_root_id = ?1)",
+        params![root_id],
+    )?;
+    tx.execute(
+        "DELETE FROM transfer_copy_chunks WHERE plan_id IN (SELECT id FROM transfer_plans WHERE source_root_id = ?1 OR dest_root_id = ?1)",
         params![root_id],
     )?;
     tx.execute(
@@ -1454,6 +1498,107 @@ pub fn transfer_plan_entries_filtered(
     )?;
     let rows = stmt.query_map(params![plan_id], transfer_plan_entry_from_row)?;
     rows.collect()
+}
+
+pub fn upsert_transfer_copy_chunk(
+    conn: &Connection,
+    input: TransferCopyChunkInput<'_>,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        r#"
+        INSERT INTO transfer_copy_chunks
+            (id, plan_id, relative_path, dest_relative_path, chunk_size_bytes, chunk_index,
+             offset_bytes, size_bytes, algorithm, digest, job_id, verified_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+        ON CONFLICT(plan_id, relative_path, dest_relative_path, chunk_size_bytes, chunk_index, algorithm)
+        DO UPDATE SET
+            offset_bytes = excluded.offset_bytes,
+            size_bytes = excluded.size_bytes,
+            digest = excluded.digest,
+            job_id = excluded.job_id,
+            verified_at = excluded.verified_at
+        "#,
+        params![
+            new_id("copychunk"),
+            input.plan_id,
+            input.relative_path,
+            input.dest_relative_path,
+            input.chunk_size_bytes as i64,
+            input.chunk_index as i64,
+            input.offset_bytes as i64,
+            input.size_bytes as i64,
+            input.algorithm,
+            input.digest,
+            input.job_id,
+            now_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn transfer_copy_chunk(
+    conn: &Connection,
+    plan_id: &str,
+    relative_path: &str,
+    dest_relative_path: &str,
+    chunk_size_bytes: u64,
+    chunk_index: u64,
+    algorithm: &str,
+) -> rusqlite::Result<Option<TransferCopyChunkRow>> {
+    conn.query_row(
+        r#"
+        SELECT chunk_size_bytes, chunk_index, offset_bytes, size_bytes, algorithm, digest
+        FROM transfer_copy_chunks
+        WHERE plan_id = ?1
+          AND relative_path = ?2
+          AND dest_relative_path = ?3
+          AND chunk_size_bytes = ?4
+          AND chunk_index = ?5
+          AND algorithm = ?6
+        "#,
+        params![
+            plan_id,
+            relative_path,
+            dest_relative_path,
+            chunk_size_bytes as i64,
+            chunk_index as i64,
+            algorithm,
+        ],
+        |row| {
+            let chunk_size: i64 = row.get(0)?;
+            let index: i64 = row.get(1)?;
+            let offset: i64 = row.get(2)?;
+            let size: i64 = row.get(3)?;
+            Ok(TransferCopyChunkRow {
+                chunk_size_bytes: chunk_size as u64,
+                chunk_index: index as u64,
+                offset_bytes: offset as u64,
+                size_bytes: size as u64,
+                algorithm: row.get(4)?,
+                digest: row.get(5)?,
+            })
+        },
+    )
+    .optional()
+}
+
+pub fn transfer_copy_chunk_count_for_entry(
+    conn: &Connection,
+    plan_id: &str,
+    relative_path: &str,
+    dest_relative_path: &str,
+) -> rusqlite::Result<i64> {
+    conn.query_row(
+        r#"
+        SELECT COUNT(*)
+        FROM transfer_copy_chunks
+        WHERE plan_id = ?1
+          AND relative_path = ?2
+          AND dest_relative_path = ?3
+        "#,
+        params![plan_id, relative_path, dest_relative_path],
+        |row| row.get(0),
+    )
 }
 
 pub fn decide_review_transfer_plan_entry(
