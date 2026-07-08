@@ -1,4 +1,5 @@
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 
 use anyhow::Context;
 use rusqlite::Connection;
@@ -20,8 +21,8 @@ struct JobEventInput<'a> {
 struct TransferFileEventInput<'a> {
     event_kind: EventKind,
     relative_path: &'a str,
-    source_path: &'a Path,
-    dest_path: &'a Path,
+    source_path: &'a str,
+    dest_path: &'a str,
     size_bytes: u64,
     action: &'a str,
     message: Option<&'a str>,
@@ -52,6 +53,25 @@ struct CopyHashResult {
     bytes: u64,
     blake3: String,
     sha256: String,
+}
+
+#[derive(Debug, Clone)]
+enum TransferEndpoint {
+    Local(PathBuf),
+    Ssh { host: String, path: String },
+}
+
+impl TransferEndpoint {
+    fn display_path(&self) -> String {
+        match self {
+            Self::Local(path) => path.display().to_string(),
+            Self::Ssh { host, path } => format!("{host}:{path}"),
+        }
+    }
+
+    fn scp_arg(&self) -> String {
+        self.display_path()
+    }
 }
 
 pub fn plan_selected_files(
@@ -197,10 +217,8 @@ pub fn run_transfer_plan(
         .ok_or_else(|| anyhow::anyhow!("source root not found: {}", plan.source_root_id))?;
     let dest_root = db::root_by_id(conn, &plan.dest_root_id)?
         .ok_or_else(|| anyhow::anyhow!("destination root not found: {}", plan.dest_root_id))?;
-    let local_machine = local_machine_id();
-    if source_root.machine_id != local_machine || dest_root.machine_id != local_machine {
-        anyhow::bail!("transfer run currently supports local source and destination roots only");
-    }
+    let source_endpoint = root_transfer_endpoint(conn, &source_root)?;
+    let dest_endpoint = root_transfer_endpoint(conn, &dest_root)?;
     let entries = db::transfer_plan_entries_filtered(conn, plan_id, Some("copy"))?;
     if entries.is_empty() {
         anyhow::bail!("transfer plan has no copy entries: {plan_id}");
@@ -256,8 +274,10 @@ pub fn run_transfer_plan(
     let total = entries.len() as u64;
 
     for entry in entries {
-        let source_path = safe_join(&source_root.path, &entry.relative_path)?;
-        let dest_path = safe_join(&dest_root.path, &entry.relative_path)?;
+        let source_path = endpoint_join(&source_endpoint, &entry.relative_path)?;
+        let dest_path = endpoint_join(&dest_endpoint, &entry.relative_path)?;
+        let source_display = source_path.display_path();
+        let dest_display = dest_path.display_path();
         let current = entry.relative_path.as_str();
 
         let copy_result = copy_one_entry(
@@ -285,8 +305,8 @@ pub fn run_transfer_plan(
                     TransferFileEventInput {
                         event_kind: EventKind::TransferFailed,
                         relative_path: &entry.relative_path,
-                        source_path: &source_path,
-                        dest_path: &dest_path,
+                        source_path: &source_display,
+                        dest_path: &dest_display,
                         size_bytes: entry.size_bytes,
                         action: "error",
                         message: None,
@@ -363,6 +383,37 @@ fn copy_one_entry(
     job_id: &str,
     dest_root: &RootRow,
     entry: &db::TransferPlanEntryRow,
+    source_path: &TransferEndpoint,
+    dest_path: &TransferEndpoint,
+    paranoid: bool,
+) -> anyhow::Result<CopyOutcome> {
+    match (source_path, dest_path) {
+        (TransferEndpoint::Local(source), TransferEndpoint::Local(dest)) => {
+            copy_local_to_local(conn, job_id, dest_root, entry, source, dest, paranoid)
+        }
+        (TransferEndpoint::Ssh { .. }, TransferEndpoint::Local(dest)) => {
+            if paranoid {
+                anyhow::bail!("--paranoid is not supported for SSH transfers yet");
+            }
+            copy_ssh_to_local(conn, job_id, dest_root, entry, source_path, dest)
+        }
+        (TransferEndpoint::Local(source), TransferEndpoint::Ssh { .. }) => {
+            if paranoid {
+                anyhow::bail!("--paranoid is not supported for SSH transfers yet");
+            }
+            copy_local_to_ssh(conn, job_id, dest_root, entry, source, dest_path)
+        }
+        (TransferEndpoint::Ssh { .. }, TransferEndpoint::Ssh { .. }) => {
+            anyhow::bail!("remote-to-remote transfer run is not supported yet")
+        }
+    }
+}
+
+fn copy_local_to_local(
+    conn: &Connection,
+    job_id: &str,
+    dest_root: &RootRow,
+    entry: &db::TransferPlanEntryRow,
     source_path: &Path,
     dest_path: &Path,
     paranoid: bool,
@@ -403,8 +454,8 @@ fn copy_one_entry(
                 TransferFileEventInput {
                     event_kind: EventKind::TransferSkipped,
                     relative_path: &entry.relative_path,
-                    source_path,
-                    dest_path,
+                    source_path: &source_path.display().to_string(),
+                    dest_path: &dest_path.display().to_string(),
                     size_bytes: entry.size_bytes,
                     action: "skip",
                     message: Some("destination already has planned size"),
@@ -450,8 +501,8 @@ fn copy_one_entry(
         TransferFileEventInput {
             event_kind: EventKind::TransferCompleted,
             relative_path: &entry.relative_path,
-            source_path,
-            dest_path,
+            source_path: &source_path.display().to_string(),
+            dest_path: &dest_path.display().to_string(),
             size_bytes: entry.size_bytes,
             action: "copy",
             message: Some("copied"),
@@ -459,6 +510,149 @@ fn copy_one_entry(
         },
     )?;
     Ok(CopyOutcome::Copied(copy_hash.bytes))
+}
+
+fn copy_ssh_to_local(
+    conn: &Connection,
+    job_id: &str,
+    dest_root: &RootRow,
+    entry: &db::TransferPlanEntryRow,
+    source: &TransferEndpoint,
+    dest_path: &Path,
+) -> anyhow::Result<CopyOutcome> {
+    if std::fs::metadata(dest_path).is_ok() {
+        anyhow::bail!("destination exists: {}", dest_path.display());
+    }
+    let parent = ensure_dest_parent(dest_path)?;
+    let temp_path = dest_path.with_extension(format!(
+        "gremlin-copy-{}.tmp",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let scp_result = run_command(
+        Command::new("scp")
+            .arg(source.scp_arg())
+            .arg(temp_path.as_os_str()),
+    )
+    .with_context(|| {
+        format!(
+            "copying {} to {}",
+            source.display_path(),
+            dest_path.display()
+        )
+    });
+    if let Err(err) = scp_result {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(err);
+    }
+    let copy_hash = hash_existing_file(&temp_path)?;
+    if copy_hash.bytes != entry.size_bytes {
+        let _ = std::fs::remove_file(&temp_path);
+        anyhow::bail!(
+            "copied byte count mismatch for {}: planned {}, copied {}",
+            entry.relative_path,
+            entry.size_bytes,
+            copy_hash.bytes
+        );
+    }
+    if let Err(err) = verify_copy_hash(conn, entry, &copy_hash) {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(err);
+    }
+    std::fs::rename(&temp_path, dest_path)
+        .with_context(|| format!("installing copy at {}", dest_path.display()))?;
+    sync_for_paranoid_readback(dest_path, parent)?;
+    let content_id =
+        db::ensure_content_object(conn, copy_hash.bytes, &copy_hash.blake3, &copy_hash.sha256)?;
+    insert_dest_observation(conn, dest_root, entry, Some(&content_id))?;
+    let source_display = source.display_path();
+    let dest_display = dest_path.display().to_string();
+    persist_transfer_file_event(
+        conn,
+        job_id,
+        TransferFileEventInput {
+            event_kind: EventKind::TransferCompleted,
+            relative_path: &entry.relative_path,
+            source_path: &source_display,
+            dest_path: &dest_display,
+            size_bytes: entry.size_bytes,
+            action: "copy",
+            message: Some("copied over ssh"),
+            error: None,
+        },
+    )?;
+    Ok(CopyOutcome::Copied(copy_hash.bytes))
+}
+
+fn copy_local_to_ssh(
+    conn: &Connection,
+    job_id: &str,
+    dest_root: &RootRow,
+    entry: &db::TransferPlanEntryRow,
+    source_path: &Path,
+    dest: &TransferEndpoint,
+) -> anyhow::Result<CopyOutcome> {
+    let source_meta = std::fs::metadata(source_path)
+        .with_context(|| format!("reading source {}", source_path.display()))?;
+    if !source_meta.is_file() {
+        anyhow::bail!("source is not a regular file: {}", source_path.display());
+    }
+    if source_meta.len() != entry.size_bytes {
+        anyhow::bail!(
+            "source size changed for {}: planned {} bytes, found {} bytes",
+            entry.relative_path,
+            entry.size_bytes,
+            source_meta.len()
+        );
+    }
+    let source_hash = hash_existing_file(source_path)?;
+    verify_copy_hash(conn, entry, &source_hash)?;
+
+    let TransferEndpoint::Ssh { host, path } = dest else {
+        anyhow::bail!("destination is not SSH");
+    };
+    let parent = remote_parent(path);
+    run_command(Command::new("ssh").arg(host).arg(format!(
+        "test ! -e {} && mkdir -p {}",
+        remote_shell_path(path),
+        remote_shell_path(&parent)
+    )))
+    .with_context(|| format!("preparing remote destination {host}:{path}"))?;
+    run_command(
+        Command::new("scp")
+            .arg(source_path.as_os_str())
+            .arg(dest.scp_arg()),
+    )
+    .with_context(|| {
+        format!(
+            "copying {} to {}",
+            source_path.display(),
+            dest.display_path()
+        )
+    })?;
+    let content_id = db::ensure_content_object(
+        conn,
+        source_hash.bytes,
+        &source_hash.blake3,
+        &source_hash.sha256,
+    )?;
+    insert_dest_observation(conn, dest_root, entry, Some(&content_id))?;
+    let source_display = source_path.display().to_string();
+    let dest_display = dest.display_path();
+    persist_transfer_file_event(
+        conn,
+        job_id,
+        TransferFileEventInput {
+            event_kind: EventKind::TransferCompleted,
+            relative_path: &entry.relative_path,
+            source_path: &source_display,
+            dest_path: &dest_display,
+            size_bytes: entry.size_bytes,
+            action: "copy",
+            message: Some("copied over ssh"),
+            error: None,
+        },
+    )?;
+    Ok(CopyOutcome::Copied(source_hash.bytes))
 }
 
 fn ensure_dest_parent(dest_path: &Path) -> anyhow::Result<Option<PathBuf>> {
@@ -491,6 +685,102 @@ fn insert_dest_observation(
             content_id,
         },
     )
+}
+
+fn root_transfer_endpoint(conn: &Connection, root: &RootRow) -> anyhow::Result<TransferEndpoint> {
+    if root.machine_id == local_machine_id() {
+        return Ok(TransferEndpoint::Local(PathBuf::from(&root.path)));
+    }
+    let machine = db::machine_by_id(conn, &root.machine_id)?
+        .ok_or_else(|| anyhow::anyhow!("machine not found for root {}", root.id))?;
+    if machine.platform.as_deref() == Some("ssh") {
+        return Ok(TransferEndpoint::Ssh {
+            host: machine.label,
+            path: root.path.clone(),
+        });
+    }
+    anyhow::bail!(
+        "transfer run does not support machine {} ({})",
+        machine.id,
+        machine.platform.as_deref().unwrap_or("unknown")
+    )
+}
+
+fn endpoint_join(root: &TransferEndpoint, relative_path: &str) -> anyhow::Result<TransferEndpoint> {
+    match root {
+        TransferEndpoint::Local(root) => Ok(TransferEndpoint::Local(safe_join(
+            root.to_string_lossy().as_ref(),
+            relative_path,
+        )?)),
+        TransferEndpoint::Ssh { host, path } => Ok(TransferEndpoint::Ssh {
+            host: host.clone(),
+            path: remote_join(path, relative_path)?,
+        }),
+    }
+}
+
+fn remote_join(root: &str, relative_path: &str) -> anyhow::Result<String> {
+    let rel = Path::new(relative_path);
+    if rel.is_absolute() {
+        anyhow::bail!("refusing absolute transfer path: {relative_path}");
+    }
+    let mut parts = Vec::new();
+    for component in rel.components() {
+        match component {
+            Component::Normal(value) => parts.push(value.to_string_lossy().to_string()),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                anyhow::bail!("refusing unsafe transfer path: {relative_path}");
+            }
+        }
+    }
+    if parts.is_empty() {
+        anyhow::bail!("empty transfer path");
+    }
+    let suffix = parts.join("/");
+    let root = root.trim_end_matches('/');
+    if root.is_empty() || root == "." {
+        Ok(suffix)
+    } else {
+        Ok(format!("{root}/{suffix}"))
+    }
+}
+
+fn remote_parent(path: &str) -> String {
+    path.rsplit_once('/')
+        .map(|(parent, _)| {
+            if parent.is_empty() {
+                "/".to_string()
+            } else {
+                parent.to_string()
+            }
+        })
+        .unwrap_or_else(|| ".".to_string())
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn remote_shell_path(path: &str) -> String {
+    if path == "~" {
+        "$HOME".to_string()
+    } else if let Some(rest) = path.strip_prefix("~/") {
+        format!("$HOME/{}", shell_quote(rest))
+    } else {
+        shell_quote(path)
+    }
+}
+
+fn run_command(command: &mut Command) -> anyhow::Result<()> {
+    let output = command
+        .output()
+        .with_context(|| format!("running {:?}", command))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    anyhow::bail!("{:?} failed: {}", command, stderr.trim());
 }
 
 fn copy_with_hash(source_path: &Path, dest_path: &Path) -> anyhow::Result<CopyHashResult> {
@@ -721,8 +1011,8 @@ fn persist_transfer_file_event(
         created_at: now_rfc3339(),
         payload: EventPayload::TransferFile {
             relative_path: input.relative_path.to_string(),
-            source_path: input.source_path.display().to_string(),
-            dest_path: input.dest_path.display().to_string(),
+            source_path: input.source_path.to_string(),
+            dest_path: input.dest_path.to_string(),
             size_bytes: input.size_bytes,
             action: input.action.to_string(),
             message: input.message.map(str::to_string),
@@ -954,6 +1244,25 @@ mod tests {
             safe_join("/tmp/root", "dir/file.txt").unwrap(),
             std::path::Path::new("/tmp/root").join("dir/file.txt")
         );
+    }
+
+    #[test]
+    fn remote_join_rejects_parent_paths() {
+        assert!(remote_join("/srv/root", "../escape.txt").is_err());
+        assert!(remote_join("/srv/root", "/tmp/absolute.txt").is_err());
+        assert_eq!(
+            remote_join("/srv/root", "dir/file.txt").unwrap(),
+            "/srv/root/dir/file.txt"
+        );
+        assert_eq!(remote_join("~", "dir/file.txt").unwrap(), "~/dir/file.txt");
+    }
+
+    #[test]
+    fn shell_quote_handles_single_quotes() {
+        assert_eq!(shell_quote("/srv/has space"), "'/srv/has space'");
+        assert_eq!(shell_quote("/srv/it's"), "'/srv/it'\\''s'");
+        assert_eq!(remote_shell_path("~"), "$HOME");
+        assert_eq!(remote_shell_path("~/dir/it's"), "$HOME/'dir/it'\\''s'");
     }
 
     #[test]

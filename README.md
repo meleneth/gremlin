@@ -116,7 +116,7 @@ In the Lospec500-themed TUI, Space marks/unmarks the selected file in a persiste
 
 `transfer list` shows recent dry-run plans. `transfer show PLAN_ID` prints the plan summary and capped file entries; use `--action copy`, `--action conflict`, or another action name to filter entries.
 
-`transfer run PLAN_ID` is the first conservative local copy runner. It only executes plan entries whose action is `copy`, creates parent directories, refuses overwrites, hashes the source stream while copying, compares that stream to the planned source content hash when one exists, records a `transfer_copy` job with per-file events, and writes the resulting content id onto the destination observation. It does not read the destination back after writing unless `--paranoid` is set; paranoid mode fsyncs the file and parent directory before hashing the destination.
+`transfer run PLAN_ID` is the conservative copy runner. It only executes plan entries whose action is `copy`, creates parent directories, refuses overwrites, compares copied bytes to the planned source content hash when one exists, records a `transfer_copy` job with per-file events, and writes the resulting content id onto the destination observation. Local-to-local copies hash the source stream while copying. SSH-to-local copies use `scp` into a temporary local file, hash it, then rename it into place. Local-to-SSH copies hash the local source first, verify the remote destination does not exist with `ssh`, then copy with `scp`. Remote-to-remote copies are not implemented. `--paranoid` is currently local-only; it fsyncs the file and parent directory before hashing the destination.
 
 `target inspect` classifies obvious target forms without touching the database:
 
@@ -137,7 +137,7 @@ Most scan/hash/verify commands print a compact summary plus capped highlights. U
 
 Future seams deliberately left open:
 
-- SSH remote dispatch: run `gremlin worker hash ... --jsonl --out ...` remotely, stream progress, and import results without manual file shuffling.
+- SSH remote scan/hash dispatch: run `gremlin worker hash ... --jsonl --out ...` remotely, stream progress, and import results without manual file shuffling.
 - Remote browsing: cache directory observations, let `host:` start at the default remote location, navigate from there, and promote browsed directories into tracked roots.
 - Manifest reconciliation: use imported SFV/CFV/PAR2 checksum collections as verification baselines where possible.
 - SMB path mapping: add machine/root mapping without changing content identity.
@@ -150,4 +150,4 @@ Future seams deliberately left open:
 
 - Path storage uses UTF-8 lossy display strings; raw non-UTF-8 Unix path support should be added later.
 - Import preserves evidence and checksum entries. Target-aware worker imports can update projected root state for completed hash events, but full reconciliation from arbitrary checksum collections is not implemented.
-- No deletion, daemon, remote SSH dispatch, or metadata extraction is implemented. Transfer execution is local-only and intentionally conservative.
+- No deletion, daemon, remote SSH scan/hash dispatch, or metadata extraction is implemented. Transfer execution supports local-to-local and one-sided SSH copies through `ssh`/`scp`; remote-to-remote and paranoid SSH readback are not implemented.

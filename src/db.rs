@@ -21,6 +21,13 @@ pub struct RootRow {
 }
 
 #[derive(Debug, Clone)]
+pub struct MachineRow {
+    pub id: String,
+    pub label: String,
+    pub platform: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct FileRow {
     pub relative_path: String,
     pub size_bytes: i64,
@@ -549,6 +556,25 @@ pub fn ensure_machine_hint(
         params![id, label, platform, now],
     )?;
     Ok(id)
+}
+
+pub fn machine_by_id(conn: &Connection, machine_id: &str) -> rusqlite::Result<Option<MachineRow>> {
+    conn.query_row(
+        r#"
+        SELECT id, label, platform
+        FROM machines
+        WHERE id = ?1
+        "#,
+        params![machine_id],
+        |row| {
+            Ok(MachineRow {
+                id: row.get(0)?,
+                label: row.get(1)?,
+                platform: row.get(2)?,
+            })
+        },
+    )
+    .optional()
 }
 
 pub fn create_job(
