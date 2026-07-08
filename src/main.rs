@@ -33,19 +33,26 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         None => {
             let Some(target) = cli.target.as_deref() else {
+                if cli.no_tui {
+                    anyhow::bail!("nothing to do: pass a command or target, or omit --no-tui");
+                }
                 let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
                 let conn = db::open_or_create(&db)?;
                 db::init_schema(&conn)?;
                 tui::run_with_options(&conn, &db, machine_label).await?;
                 return Ok(());
             };
-            run_default_target(
+            let db = run_default_target(
                 &config_ctx,
                 cli.db.clone(),
                 target,
                 machine_label.as_deref(),
                 output,
             )?;
+            if !cli.no_tui {
+                let conn = db::open_existing(&db)?;
+                tui::run_with_options(&conn, &db, machine_label).await?;
+            }
         }
         Some(Commands::Init) => {
             let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
@@ -278,6 +285,26 @@ async fn main() -> anyhow::Result<()> {
                     parsed.kind, machine_id, root_id, root_path
                 );
             }
+            TargetCommands::Ls { target, kind, path } => {
+                let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
+                let conn = db::open_existing(&db)?;
+                let parsed = targets::parse_target(&target, kind)?;
+                let (machine_id, root_path) =
+                    resolve_target_identity(&conn, &parsed, machine_label.as_deref())?;
+                let root = db::find_root_by_machine_path(&conn, &machine_id, &root_path)?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "target is not a known root yet: {target}. Run `gremlin target add {target}` or import observations for it first"
+                        )
+                    })?;
+                let entries = db::cached_directory_entries(&conn, &root.id, &path)?;
+                if entries.is_empty() {
+                    println!("empty:\t{path}");
+                }
+                for entry in entries {
+                    print_cached_directory_entry(&entry);
+                }
+            }
         },
         Some(Commands::Transfer { command }) => match command {
             TransferCommands::List => {
@@ -375,7 +402,7 @@ fn run_default_target(
     target: &str,
     machine_label: Option<&str>,
     output: fswork::OutputOptions,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<std::path::PathBuf> {
     let text_output = fswork::OutputOptions {
         json: false,
         ..output
@@ -417,7 +444,7 @@ fn run_default_target(
             println!("next:\tremote worker/import is not implemented yet");
         }
     }
-    Ok(())
+    Ok(db_path)
 }
 
 fn resolve_target_identity(
@@ -597,6 +624,36 @@ fn print_transfer_plan(
     }
     println!("note:\tplanning only; no files were copied");
     Ok(())
+}
+
+fn print_cached_directory_entry(entry: &db::CachedDirectoryEntry) {
+    if entry.kind == "dir" {
+        println!(
+            "dir:\t{}\t{}\t{} files\t{}",
+            entry.name,
+            entry.relative_path,
+            entry.file_count,
+            util::human_size(entry.size_bytes as u64)
+        );
+    } else {
+        println!(
+            "file:\t{}\t{}\t{}\t{}\t{}\t{}",
+            entry.name,
+            entry.relative_path,
+            util::human_size(entry.size_bytes as u64),
+            entry.status.as_deref().unwrap_or("-"),
+            entry.modified_at.as_deref().unwrap_or("-"),
+            entry
+                .content_id
+                .as_deref()
+                .map(short_id)
+                .unwrap_or("stat-only")
+        );
+    }
+}
+
+fn short_id(value: &str) -> &str {
+    value.get(..value.len().min(18)).unwrap_or(value)
 }
 
 fn print_transfer_plan_row(

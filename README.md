@@ -14,6 +14,8 @@ The TUI may drive jobs, but it must not contain scan/hash/copy logic directly. F
 
 ```bash
 gremlin /archive/photos
+gremlin nas01:
+gremlin --no-tui nas01:
 
 gremlin init --db ./gremlin.db
 gremlin config init --default-db ./gremlin.db --machine-label workstation
@@ -44,6 +46,8 @@ gremlin job run JOB_ID --db ./gremlin.db
 gremlin target inspect TARGET
 gremlin target add TARGET --db ./gremlin.db
 gremlin target add nas01: --db ./gremlin.db
+gremlin target ls nas01: --db ./gremlin.db
+gremlin target ls nas01: --path folder --db ./gremlin.db
 gremlin status TARGET --db ./gremlin.db
 gremlin transfer plan SOURCE DEST --db ./gremlin.db
 gremlin transfer list --db ./gremlin.db
@@ -53,7 +57,7 @@ gremlin transfer run PLAN_ID --paranoid --db ./gremlin.db
 gremlin tui --db ./gremlin.db
 ```
 
-`--db` is a global override and may appear before or after a subcommand. If it is omitted, Gremlin checks `GREMLIN_DB`, then `default_db` in the config file.
+`--db` is a global override and may appear before or after a subcommand. If it is omitted, Gremlin checks `GREMLIN_DB`, then `default_db` in the config file. Positional target flows open the TUI by default; use `--no-tui` when you want only the command-line registration/status output.
 
 For the smooth target flow, Gremlin can also auto-create a default database at:
 
@@ -88,7 +92,7 @@ gremlin --no-config --db ./scratch.db init
 gremlin --machine-label laptop scan ~/archive
 ```
 
-`gremlin TARGET` classifies a target. For local directories it creates/reuses the database and root, runs a lightweight stat scan, and prints status plus new/changed/missing highlights. For SSH-like and URL targets it registers metadata and prints status/hints without attempting remote execution.
+`gremlin TARGET` classifies a target, prepares/reuses the matching root, then opens the TUI unless `--no-tui` is supplied. For local directories it also runs a lightweight stat scan and prints status plus new/changed/missing highlights. For SSH-like and URL targets it registers metadata and prints status/hints without attempting remote execution.
 
 `scan` walks a directory tree and records stat-level path observations. It reports new, changed, and missing paths. Missing paths are report-only in v0; no deletion or missing projection is performed.
 
@@ -124,6 +128,8 @@ gremlin target inspect https://example.invalid/listing.json
 ```
 
 Use `--kind local-path|file-url|ssh|url` only when you want to force interpretation. `target add` creates or reuses the matching machine/root record, and `status TARGET` gives a fast projected summary when that root is already known. SSH targets may be written as `host:/path` or `host:`; `host:` means the login default directory and is stored as `~`.
+
+`target ls TARGET` lists cached child directories and files for a known root without touching the filesystem or network. Use `--path DIR` to list a cached subdirectory. This is currently backed by projected file observations, so it becomes useful after local scans/hashes or target-aware worker imports.
 
 Most scan/hash/verify commands print a compact summary plus capped highlights. Use `--details` and `--limit N` to control result detail. `--json` is available for `status`, `scan`, `hash`, and `verify`.
 

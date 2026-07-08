@@ -163,4 +163,63 @@ fn import_events_can_project_into_default_ssh_target() {
     assert_eq!(status["files"], 1);
     assert_eq!(status["content_objects"], 1);
     assert_eq!(status["latest_job"]["kind"], "import_events");
+
+    let root_listing = gremlin()
+        .args([
+            "--no-config",
+            "--db",
+            db.to_str().unwrap(),
+            "target",
+            "ls",
+            "nas01:",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let root_listing = String::from_utf8(root_listing).unwrap();
+    assert!(root_listing.contains("dir:\tfolder\tfolder\t1 files\t5 B"));
+
+    let folder_listing = gremlin()
+        .args([
+            "--no-config",
+            "--db",
+            db.to_str().unwrap(),
+            "target",
+            "ls",
+            "nas01:",
+            "--path",
+            "folder",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let folder_listing = String::from_utf8(folder_listing).unwrap();
+    assert!(folder_listing.contains("file:\ta.txt\tfolder/a.txt\t5 B\tpresent"));
+}
+
+#[test]
+fn positional_ssh_target_can_run_without_tui() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("gremlin.db");
+
+    let output = gremlin()
+        .args([
+            "--no-config",
+            "--no-tui",
+            "--db",
+            db.to_str().unwrap(),
+            "nas01:",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("target Ssh"));
+    assert!(output.contains("path=~"));
 }

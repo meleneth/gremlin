@@ -20,6 +20,8 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_config: bool,
     #[arg(long, global = true)]
+    pub no_tui: bool,
+    #[arg(long, global = true)]
     pub machine_label: Option<String>,
     #[arg(long, global = true)]
     pub details: bool,
@@ -133,6 +135,13 @@ pub enum TargetCommands {
         kind: Option<TargetKind>,
         #[arg(long)]
         label: Option<String>,
+    },
+    Ls {
+        target: String,
+        #[arg(long, value_enum)]
+        kind: Option<TargetKind>,
+        #[arg(long, default_value = ".")]
+        path: String,
     },
 }
 

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -27,6 +27,18 @@ pub struct FileRow {
     pub modified_at: Option<String>,
     pub content_id: Option<String>,
     pub status: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct CachedDirectoryEntry {
+    pub kind: String,
+    pub name: String,
+    pub relative_path: String,
+    pub file_count: i64,
+    pub size_bytes: i64,
+    pub modified_at: Option<String>,
+    pub content_id: Option<String>,
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1289,6 +1301,102 @@ pub fn recent_files_for_root(
         })
     })?;
     rows.collect()
+}
+
+pub fn cached_directory_entries(
+    conn: &Connection,
+    root_id: &str,
+    parent: &str,
+) -> rusqlite::Result<Vec<CachedDirectoryEntry>> {
+    let parent = normalize_cached_parent(parent);
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT relative_path, size_bytes, modified_at, content_id, status
+        FROM path_observations
+        WHERE root_id = ?1
+        ORDER BY relative_path ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(params![root_id], |row| {
+        Ok(FileRow {
+            relative_path: row.get(0)?,
+            size_bytes: row.get(1)?,
+            modified_at: row.get(2)?,
+            content_id: row.get(3)?,
+            status: row.get(4)?,
+        })
+    })?;
+
+    let mut dirs = BTreeMap::<String, CachedDirectoryEntry>::new();
+    let mut files = Vec::new();
+    for row in rows {
+        let row = row?;
+        let Some((name, child_path, is_dir)) = cached_child_for_parent(&row.relative_path, &parent)
+        else {
+            continue;
+        };
+        if is_dir {
+            let entry = dirs
+                .entry(child_path.clone())
+                .or_insert_with(|| CachedDirectoryEntry {
+                    kind: "dir".to_string(),
+                    name,
+                    relative_path: child_path,
+                    file_count: 0,
+                    size_bytes: 0,
+                    modified_at: None,
+                    content_id: None,
+                    status: None,
+                });
+            entry.file_count += 1;
+            entry.size_bytes += row.size_bytes;
+        } else {
+            files.push(CachedDirectoryEntry {
+                kind: "file".to_string(),
+                name,
+                relative_path: row.relative_path,
+                file_count: 1,
+                size_bytes: row.size_bytes,
+                modified_at: row.modified_at,
+                content_id: row.content_id,
+                status: Some(row.status),
+            });
+        }
+    }
+
+    let mut entries = dirs.into_values().collect::<Vec<_>>();
+    entries.extend(files);
+    Ok(entries)
+}
+
+fn normalize_cached_parent(parent: &str) -> String {
+    let trimmed = parent.trim().trim_matches('/');
+    if trimmed.is_empty() || trimmed == "." {
+        ".".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn cached_child_for_parent(relative_path: &str, parent: &str) -> Option<(String, String, bool)> {
+    let rest = if parent == "." {
+        relative_path
+    } else {
+        relative_path.strip_prefix(&format!("{parent}/"))?
+    };
+    if rest.is_empty() {
+        return None;
+    }
+    if let Some((name, _)) = rest.split_once('/') {
+        let child_path = if parent == "." {
+            name.to_string()
+        } else {
+            format!("{parent}/{name}")
+        };
+        Some((name.to_string(), child_path, true))
+    } else {
+        Some((rest.to_string(), relative_path.to_string(), false))
+    }
 }
 
 pub fn root_summary(conn: &Connection, root_id: &str) -> rusqlite::Result<RootSummary> {
