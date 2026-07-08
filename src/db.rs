@@ -116,6 +116,14 @@ pub struct PathObservationRow {
 }
 
 #[derive(Debug, Clone)]
+pub struct CollisionRow {
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub modified_at: Option<String>,
+    pub content_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct HashBaselineRow {
     pub relative_path: String,
     pub size_bytes: u64,
@@ -1464,6 +1472,72 @@ pub fn path_observations_for_root(
         })
     })?;
     rows.collect()
+}
+
+pub fn content_collisions_for_root(
+    conn: &Connection,
+    root_id: &str,
+    content_id: &str,
+    exclude_relative_path: &str,
+) -> rusqlite::Result<Vec<CollisionRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT relative_path, size_bytes, modified_at, content_id
+        FROM path_observations
+        WHERE root_id = ?1
+          AND content_id = ?2
+          AND relative_path != ?3
+        ORDER BY relative_path ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        params![root_id, content_id, exclude_relative_path],
+        collision_from_row,
+    )?;
+    rows.collect()
+}
+
+pub fn filename_size_date_collisions_for_root(
+    conn: &Connection,
+    root_id: &str,
+    basename: &str,
+    size_bytes: u64,
+    modified_at: Option<&str>,
+    exclude_relative_path: &str,
+) -> rusqlite::Result<Vec<CollisionRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT relative_path, size_bytes, modified_at, content_id
+        FROM path_observations
+        WHERE root_id = ?1
+          AND basename = ?2
+          AND size_bytes = ?3
+          AND (modified_at = ?4 OR (modified_at IS NULL AND ?4 IS NULL))
+          AND relative_path != ?5
+        ORDER BY relative_path ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        params![
+            root_id,
+            basename,
+            size_bytes as i64,
+            modified_at,
+            exclude_relative_path
+        ],
+        collision_from_row,
+    )?;
+    rows.collect()
+}
+
+fn collision_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CollisionRow> {
+    let size: i64 = row.get(1)?;
+    Ok(CollisionRow {
+        relative_path: row.get(0)?,
+        size_bytes: size as u64,
+        modified_at: row.get(2)?,
+        content_id: row.get(3)?,
+    })
 }
 
 pub fn hash_baselines_for_root(

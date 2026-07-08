@@ -1035,7 +1035,35 @@ fn build_transfer_plan(
         };
 
         let dest = db::path_observation_for_root_path(conn, &dest_root.id, relative_path)?;
+        let source_basename = basename(Path::new(&source.relative_path))
+            .unwrap_or_else(|_| source.relative_path.clone());
+        let hash_collisions = match source.content_id.as_deref() {
+            Some(content_id) => db::content_collisions_for_root(
+                conn,
+                &dest_root.id,
+                content_id,
+                &source.relative_path,
+            )?,
+            None => Vec::new(),
+        };
+        let filename_collisions = db::filename_size_date_collisions_for_root(
+            conn,
+            &dest_root.id,
+            &source_basename,
+            source.size_bytes,
+            source.modified_at.as_deref(),
+            &source.relative_path,
+        )?;
+        let needs_review = !hash_collisions.is_empty() || !filename_collisions.is_empty();
         let (action, reason, dest_content_id) = match dest.as_ref() {
+            None if needs_review => (
+                "review",
+                "destination root has hash or filename/size/date collisions; review before copy",
+                hash_collisions
+                    .first()
+                    .or_else(|| filename_collisions.first())
+                    .and_then(|row| row.content_id.as_deref()),
+            ),
             None => ("copy", "destination path is not indexed", None),
             Some(dest) => {
                 match (
@@ -1073,6 +1101,8 @@ fn build_transfer_plan(
                 metadata_json: serde_json::json!({
                     "source_modified_at": source.modified_at,
                     "dest_modified_at": dest.as_ref().and_then(|row| row.modified_at.clone()),
+                    "hash_collisions": collision_metadata(&hash_collisions),
+                    "filename_size_date_collisions": collision_metadata(&filename_collisions),
                 }),
             },
         )?;
@@ -1080,6 +1110,19 @@ fn build_transfer_plan(
 
     let summary = db::transfer_plan_action_summary(conn, &plan_id)?;
     Ok((plan_id, summary))
+}
+
+fn collision_metadata(rows: &[db::CollisionRow]) -> Vec<serde_json::Value> {
+    rows.iter()
+        .map(|row| {
+            serde_json::json!({
+                "relative_path": row.relative_path,
+                "size_bytes": row.size_bytes,
+                "modified_at": row.modified_at,
+                "content_id": row.content_id,
+            })
+        })
+        .collect()
 }
 
 fn persist_job_event(
@@ -1252,6 +1295,54 @@ mod tests {
         let events = db::events_for_job(&conn, &result.job_id).unwrap();
         assert_eq!(events.first().unwrap().event_kind, "job_created");
         assert_eq!(events.last().unwrap().event_kind, "job_completed");
+    }
+
+    #[test]
+    fn plans_review_when_destination_root_has_same_content_elsewhere() {
+        let (conn, machine_id, source, dest) = setup();
+        let content_id = db::ensure_content_object(&conn, 10, "abc", "def").unwrap();
+        observe(
+            &conn,
+            &machine_id,
+            &source.id,
+            "incoming/foo.png",
+            10,
+            Some(&content_id),
+        );
+        observe(
+            &conn,
+            &machine_id,
+            &dest.id,
+            "existing/foo.png",
+            10,
+            Some(&content_id),
+        );
+        db::toggle_selection_entry(&conn, &source.id, "incoming/foo.png").unwrap();
+
+        let result = plan_selected_files(&conn, &source, &dest).unwrap();
+        let entry = only_entry(&conn, &result.plan_id);
+
+        assert_eq!(entry.action, "review");
+        assert!(entry.reason.contains("collisions"));
+        assert!(entry.metadata_json.contains("existing/foo.png"));
+        assert!(entry.metadata_json.contains("hash_collisions"));
+    }
+
+    #[test]
+    fn plans_review_when_destination_root_has_same_name_size_date_elsewhere() {
+        let (conn, machine_id, source, dest) = setup();
+        observe(&conn, &machine_id, &source.id, "incoming/foo.png", 10, None);
+        observe(&conn, &machine_id, &dest.id, "existing/foo.png", 10, None);
+        db::toggle_selection_entry(&conn, &source.id, "incoming/foo.png").unwrap();
+
+        let result = plan_selected_files(&conn, &source, &dest).unwrap();
+        let entry = only_entry(&conn, &result.plan_id);
+
+        assert_eq!(entry.action, "review");
+        assert!(entry.metadata_json.contains("existing/foo.png"));
+        assert!(entry
+            .metadata_json
+            .contains("filename_size_date_collisions"));
     }
 
     #[test]
