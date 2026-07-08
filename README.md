@@ -6,6 +6,32 @@ This project is heavily vibe-coded with Codex using GPT-5.
 
 The current version is still intentionally conservative: a single Rust CLI crate, a Tokio runtime baseline, a local SQLite database, append-only job events, projected query tables, stat-only scanning, file hashing, JSONL worker/import seams, persisted transfer plans, a local hash-checked copy runner, and a Ratatui TUI.
 
+## Build and Install
+
+Gremlin is a standard Rust binary crate. From the repository root:
+
+```bash
+cargo run -- --help
+cargo run -- tui
+
+cargo build
+cargo build --release
+
+cargo install --path .
+gremlin --help
+```
+
+`cargo install --path .` installs the `gremlin` binary into Cargo's bin directory, usually `~/.cargo/bin`. Make sure that directory is on `PATH` if `gremlin` is not found after install.
+
+For a one-off release binary without installing it:
+
+```bash
+cargo build --release
+./target/release/gremlin --help
+```
+
+SSH import flows that run `gremlin worker hash --jsonl` on a remote host need a compatible `gremlin` binary available on that remote host's `PATH`.
+
 ## Architecture Rule
 
 The TUI may drive jobs, but it must not contain scan/hash/copy logic directly. File work is represented as commands and jobs. Jobs emit events. Events are persisted as durable history. The database projects current query state from those events and command results.
