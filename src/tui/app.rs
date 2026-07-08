@@ -36,10 +36,32 @@ pub(super) async fn run_loop(
 ) -> anyhow::Result<()> {
     let (job_tx, mut job_rx) = mpsc::unbounded_channel::<TuiMessage>();
     let mut state = AppState {
-        status: "ready".to_string(),
+        status: "loading database...".to_string(),
         temporary_browse: initial_browse.map(TemporaryBrowse::from),
         ..AppState::default()
     };
+    let loading_selected_paths = BTreeSet::new();
+    let loading_events = Vec::new();
+    terminal.draw(|frame| {
+        frame.render_widget(
+            AppScreen {
+                state: &state,
+                roots: &[],
+                files: &[],
+                selected_paths: &loading_selected_paths,
+                selected_root: None,
+                selected_temporary: selected_temporary_browse(&state),
+                summary: None,
+                selection: None,
+                events: &loading_events,
+                root_count: visible_root_count(&state, 0),
+                transfer_progress: None,
+                detail_file_offset: 0,
+            },
+            frame.area(),
+        );
+    })?;
+    state.status = "ready".to_string();
     loop {
         while let Ok(message) = job_rx.try_recv() {
             match message {
@@ -172,6 +194,19 @@ pub(super) async fn run_loop(
 
         if event::poll(Duration::from_millis(250))? {
             if let Event::Key(key) = event::read()? {
+                if is_interrupt_key(key) {
+                    if state.active_background_jobs > 0 {
+                        state.set_status(
+                            ActivityLevel::Warning,
+                            format!(
+                                "{} background job(s) still running; wait or cancel before quitting",
+                                state.active_background_jobs
+                            ),
+                        );
+                        continue;
+                    }
+                    break;
+                }
                 if state.file_filter_editing {
                     handle_file_filter_input(&mut state, key.code);
                     continue;

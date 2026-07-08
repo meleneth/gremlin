@@ -137,6 +137,22 @@ fn command_hints_prioritize_modal_prompts() {
 }
 
 #[test]
+fn ctrl_c_and_ctrl_d_are_interrupt_keys() {
+    assert!(is_interrupt_key(KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL
+    )));
+    assert!(is_interrupt_key(KeyEvent::new(
+        KeyCode::Char('d'),
+        KeyModifiers::CONTROL
+    )));
+    assert!(!is_interrupt_key(KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::NONE
+    )));
+}
+
+#[test]
 fn command_hints_explain_temporary_file_browse_actions() {
     let state = AppState {
         focus: FocusPane::Files,
