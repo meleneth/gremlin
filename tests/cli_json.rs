@@ -365,6 +365,8 @@ fn positional_ssh_target_can_run_without_tui() {
     assert!(output.contains("target Ssh"));
     assert!(output.contains("root=temporary"));
     assert!(output.contains("path=~"));
+    assert!(!output.contains("warning:\tSSH fastscan failed"));
+    assert!(!output.contains("empty:\t."));
 
     let status = command_json(&[
         "--no-config",

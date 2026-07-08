@@ -594,6 +594,16 @@ fn run_default_target(
                 "target {:?}\tmachine={}\troot=temporary\tpath={}",
                 parsed.kind, machine_id, root_path
             );
+            if !will_open_tui {
+                println!(
+                    "next:\tuse `gremlin target add {}` to persist this root",
+                    parsed.original
+                );
+                return Ok(DefaultTargetResult {
+                    db_path,
+                    initial_browse,
+                });
+            }
             let browse_provider = ssh_browse_provider(parsed.clone());
             let import_provider =
                 ssh_import_provider(parsed.clone(), machine_id.clone(), db_path.clone());
