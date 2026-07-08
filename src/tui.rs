@@ -13,7 +13,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratatui::Terminal;
 use rusqlite::Connection;
 use tokio::sync::mpsc;
@@ -541,7 +541,7 @@ async fn run_loop(
             let vertical = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(3),
+                    Constraint::Length(4),
                     Constraint::Min(5),
                     Constraint::Length(14),
                     Constraint::Length(3),
@@ -557,7 +557,7 @@ async fn run_loop(
                 .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
                 .split(vertical[2]);
 
-            render_header(frame, vertical[0]);
+            render_header(frame, vertical[0], &state, selected_temporary.is_some());
             render_roots(frame, middle[0], &roots, &state);
             render_files(frame, middle[1], &files, &selected_paths, &state);
             render_detail_panel(
@@ -741,16 +741,64 @@ async fn run_loop(
     Ok(())
 }
 
-fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect) {
-    let header = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "  q quit | Tab panes | arrows move | Space mark | i import | s scan | h hash | x remove root | c cancel | t plan | Enter | p load | r run | a accept | d drop | e retarget",
-            theme::muted(),
-        ),
-    ]))
-    .style(theme::panel())
-    .block(panel_block("Gremlin", true));
+fn render_header(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    state: &AppState,
+    has_temporary_browse: bool,
+) {
+    let header = Paragraph::new(command_hint_lines(state, has_temporary_browse))
+        .style(theme::panel())
+        .wrap(Wrap { trim: true })
+        .block(panel_block("Commands", true));
     frame.render_widget(header, area);
+}
+
+fn command_hint_lines(state: &AppState, has_temporary_browse: bool) -> Vec<Line<'static>> {
+    let mode = active_command_hint(state, has_temporary_browse);
+    vec![
+        Line::from(vec![
+            Span::styled("Global  ", theme::header()),
+            Span::styled(
+                "q quit  Tab focus  arrows move  c cancel job",
+                theme::muted(),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("Here    ", theme::header()),
+            Span::styled(mode, theme::panel()),
+        ]),
+    ]
+}
+
+fn active_command_hint(state: &AppState, has_temporary_browse: bool) -> &'static str {
+    if state.retarget_draft.is_some() {
+        return "type destination path  Enter apply  Esc cancel";
+    }
+    if state.pending_delete_root_id.is_some() {
+        return "y confirm remove root from database  n/Esc cancel";
+    }
+    if state.pending_import.is_some() {
+        return "n root only  f fast stat import  h SHA-256 hash import  Esc cancel";
+    }
+    if state.transfer_run_plan_id.is_some() {
+        return "transfer running  c request cancel  Tab inspect panes";
+    }
+    if state.transfer_source_root_id.is_some() {
+        return "choose destination root  Enter create plan  Esc cancel source";
+    }
+    match state.focus {
+        FocusPane::Roots if has_temporary_browse && state.selected_root == 0 => {
+            "Tab files  i import browsed path  t copy from browsed path  Backspace up from Files"
+        }
+        FocusPane::Roots => "Space mark in Files  s scan  h hash  t choose source  p load plan  x remove root",
+        FocusPane::Files if has_temporary_browse && state.selected_root == 0 => {
+            "Enter open directory  Backspace parent  i import selected/current  t copy selected/current"
+        }
+        FocusPane::Files => "Space mark/unmark  t choose source from root  v change columns",
+        FocusPane::Plan => "r run copy entries  a accept review  d drop review  e retarget review",
+        FocusPane::Events => "c request cancel for selected job  Tab return to roots",
+    }
 }
 
 fn render_roots(
@@ -2481,6 +2529,57 @@ mod tests {
             "~/photos"
         );
         assert!(state.status.contains("remote directory ~/photos"));
+    }
+
+    #[test]
+    fn command_hints_prioritize_modal_prompts() {
+        let state = AppState {
+            pending_import: Some(PendingTemporaryImport {
+                remote_path: "~/photos".to_string(),
+            }),
+            ..AppState::default()
+        };
+
+        assert_eq!(
+            active_command_hint(&state, true),
+            "n root only  f fast stat import  h SHA-256 hash import  Esc cancel"
+        );
+    }
+
+    #[test]
+    fn command_hints_explain_temporary_file_browse_actions() {
+        let state = AppState {
+            focus: FocusPane::Files,
+            selected_root: 0,
+            temporary_browse: Some(TemporaryBrowse {
+                label: "nas01:".to_string(),
+                machine_id: "machine_remote".to_string(),
+                root_path: "~".to_string(),
+                current_path: "~/photos".to_string(),
+                entries: Vec::new(),
+                browse_provider: None,
+                import_provider: None,
+            }),
+            ..AppState::default()
+        };
+
+        assert_eq!(
+            active_command_hint(&state, true),
+            "Enter open directory  Backspace parent  i import selected/current  t copy selected/current"
+        );
+    }
+
+    #[test]
+    fn command_hints_explain_destination_selection() {
+        let state = AppState {
+            transfer_source_root_id: Some("root_1".to_string()),
+            ..AppState::default()
+        };
+
+        assert_eq!(
+            active_command_hint(&state, false),
+            "choose destination root  Enter create plan  Esc cancel source"
+        );
     }
 
     #[test]
