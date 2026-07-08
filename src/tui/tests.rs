@@ -262,6 +262,124 @@ fn page_navigation_jumps_within_active_pane() {
 }
 
 #[test]
+fn verifies_latest_checksum_collection_for_selected_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("gremlin.db");
+    let conn = db::open_or_create(&db_path).unwrap();
+    db::init_schema(&conn).unwrap();
+    let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+    let root_id = db::ensure_root(&conn, &machine_id, "/tmp/root").unwrap();
+    let content_id = db::ensure_content_object(
+        &conn,
+        4,
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss",
+    )
+    .unwrap();
+    db::insert_path_observation(
+        &conn,
+        db::PathObservationInput {
+            machine_id: &machine_id,
+            root_id: &root_id,
+            relative_path: "ok.txt",
+            basename: "ok.txt",
+            parent_path: ".",
+            size_bytes: 4,
+            modified_at: None,
+            content_id: Some(&content_id),
+        },
+    )
+    .unwrap();
+    let collection_id =
+        db::create_checksum_collection(&conn, "test collection", "jsonl_import", None).unwrap();
+    db::insert_checksum_entry(
+        &conn,
+        db::ChecksumEntryInput {
+            collection_id: &collection_id,
+            relative_path: "ok.txt",
+            basename: "ok.txt",
+            size_bytes: 4,
+            modified_at: None,
+            blake3: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            sha256: Some("ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss"),
+            metadata_json: serde_json::json!({}),
+        },
+    )
+    .unwrap();
+    db::insert_checksum_entry(
+        &conn,
+        db::ChecksumEntryInput {
+            collection_id: &collection_id,
+            relative_path: "missing.txt",
+            basename: "missing.txt",
+            size_bytes: 7,
+            modified_at: None,
+            blake3: None,
+            sha256: None,
+            metadata_json: serde_json::json!({}),
+        },
+    )
+    .unwrap();
+    let root = db::root_by_id(&conn, &root_id).unwrap().unwrap();
+    let mut state = AppState::default();
+
+    verify_latest_collection_for_root(&conn, Some(&root), &mut state).unwrap();
+
+    let result = state.collection_result.as_ref().unwrap();
+    assert_eq!(state.focus, FocusPane::Plan);
+    assert_eq!(result.collection_id, collection_id);
+    assert_eq!(result.ok, 1);
+    assert_eq!(result.missing, 1);
+    assert!(result.rows.iter().any(|row| row.kind == "missing"));
+}
+
+#[test]
+fn plan_pane_renders_collection_result_rows() {
+    let collection = CollectionSnapshot {
+        collection_id: "collection_1".to_string(),
+        collection_name: "imported".to_string(),
+        root_id: "root_1".to_string(),
+        root_path: "/tmp/root".to_string(),
+        entries: 1,
+        ok: 0,
+        size_only: 0,
+        missing: 1,
+        size_mismatch: 0,
+        hash_mismatch: 0,
+        unverified: 0,
+        extras: 0,
+        rows: vec![CollectionResultRow {
+            kind: "missing".to_string(),
+            relative_path: "lost.bin".to_string(),
+            expected_size_bytes: 12,
+            actual_size_bytes: None,
+        }],
+    };
+    let state = AppState {
+        collection_result: Some(collection),
+        focus: FocusPane::Plan,
+        ..AppState::default()
+    };
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 8));
+
+    PlanReviewPane {
+        plan: None,
+        collection: state.collection_result.as_ref(),
+        state: &state,
+    }
+    .render(buffer.area, &mut buffer);
+
+    let text = buffer
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("Collection"));
+    assert!(text.contains("missing"));
+    assert!(text.contains("lost.bin"));
+}
+
+#[test]
 fn detail_selection_waits_for_stable_file_offset() {
     let start = Instant::now();
     let mut state = AppState {

@@ -69,12 +69,14 @@ impl Widget for AppScreen<'_> {
                 file: self.files.get(self.detail_file_offset),
                 selected_paths: self.selected_paths,
                 plan: self.state.last_plan.as_ref(),
+                collection: self.state.collection_result.as_ref(),
                 transfer_progress: self.transfer_progress,
             },
         }
         .render(lower[0], buf);
         PlanReviewPane {
             plan: self.state.last_plan.as_ref(),
+            collection: self.state.collection_result.as_ref(),
             state: self.state,
         }
         .render(lower[1], buf);

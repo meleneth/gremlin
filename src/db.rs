@@ -193,6 +193,15 @@ pub struct ChecksumCollectionRow {
 }
 
 #[derive(Debug, Clone)]
+pub struct RecentChecksumCollectionRow {
+    pub id: String,
+    pub name: String,
+    pub source_kind: String,
+    pub imported_at: Option<String>,
+    pub root_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ChecksumEntryRow {
     pub relative_path: String,
     pub size_bytes: u64,
@@ -1298,6 +1307,34 @@ pub fn checksum_collection_by_id(
             Ok(ChecksumCollectionRow {
                 id: row.get(0)?,
                 name: row.get(1)?,
+            })
+        },
+    )
+    .optional()
+}
+
+pub fn latest_checksum_collection_for_root(
+    conn: &Connection,
+    root_id: &str,
+) -> rusqlite::Result<Option<RecentChecksumCollectionRow>> {
+    conn.query_row(
+        r#"
+        SELECT id, name, source_kind, imported_at, root_id
+        FROM checksum_collections
+        WHERE root_id = ?1 OR root_id IS NULL
+        ORDER BY
+            CASE WHEN root_id = ?1 THEN 0 ELSE 1 END,
+            COALESCE(imported_at, generated_at, '') DESC
+        LIMIT 1
+        "#,
+        params![root_id],
+        |row| {
+            Ok(RecentChecksumCollectionRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                source_kind: row.get(2)?,
+                imported_at: row.get(3)?,
+                root_id: row.get(4)?,
             })
         },
     )

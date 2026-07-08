@@ -149,6 +149,7 @@ pub(super) fn create_transfer_plan_from_selection(
                 summary,
                 entries,
             });
+            state.collection_result = None;
             state.transfer_source_root_id = None;
             state.plan_offset = 0;
             state.focus = FocusPane::Plan;
@@ -191,6 +192,7 @@ pub(super) fn load_latest_transfer_plan(
         summary,
         entries,
     });
+    state.collection_result = None;
     state.plan_offset = 0;
     state.focus = FocusPane::Plan;
     state.status = format!("loaded transfer plan {}", short_id(&plan.id));

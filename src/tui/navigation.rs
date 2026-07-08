@@ -282,6 +282,15 @@ pub(super) fn move_down(
     }
 }
 
+pub(super) fn active_plan_row_count(state: &AppState) -> usize {
+    state
+        .collection_result
+        .as_ref()
+        .map(|collection| collection.rows.len())
+        .or_else(|| state.last_plan.as_ref().map(|plan| plan.entries.len()))
+        .unwrap_or(0)
+}
+
 pub(super) fn move_up(state: &mut AppState) {
     match state.focus {
         FocusPane::Roots => {

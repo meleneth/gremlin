@@ -235,11 +235,7 @@ pub(super) async fn run_loop(
                         state.status = format!("file fields: {}", state.file_view.label());
                     }
                     KeyCode::Down => {
-                        let plan_count = state
-                            .last_plan
-                            .as_ref()
-                            .map(|plan| plan.entries.len())
-                            .unwrap_or(0);
+                        let plan_count = active_plan_row_count(&state);
                         move_down(
                             &mut state,
                             root_count,
@@ -249,12 +245,15 @@ pub(super) async fn run_loop(
                         );
                     }
                     KeyCode::Up => move_up(&mut state),
+                    KeyCode::Char('m') => {
+                        verify_latest_collection_for_root(
+                            conn,
+                            selected_persisted_root(&roots, &state),
+                            &mut state,
+                        )?;
+                    }
                     KeyCode::PageDown => {
-                        let plan_count = state
-                            .last_plan
-                            .as_ref()
-                            .map(|plan| plan.entries.len())
-                            .unwrap_or(0);
+                        let plan_count = active_plan_row_count(&state);
                         move_page_down(
                             &mut state,
                             root_count,

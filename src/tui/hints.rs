@@ -56,11 +56,14 @@ pub(super) fn active_command_hint(state: &AppState, has_temporary_browse: bool) 
     if state.transfer_source_root_id.is_some() {
         return "choose destination root  Enter create plan  Esc cancel source";
     }
+    if state.collection_result.is_some() && state.focus == FocusPane::Plan {
+        return "collection compare result  PgUp/PgDn jump  p load transfer plan";
+    }
     match state.focus {
         FocusPane::Roots if has_temporary_browse && state.selected_root == 0 => {
             "Tab files  i import browsed path  t copy from browsed path  PgUp/PgDn jump"
         }
-        FocusPane::Roots => "Space mark in Files  s scan  h hash  v verify  t choose source  p load plan  x remove root",
+        FocusPane::Roots => "Space mark in Files  s scan  h hash  v verify  m compare collection  t source  p plan  x remove",
         FocusPane::Files if has_temporary_browse && state.selected_root == 0 => {
             "/ filter  PgUp/PgDn jump  Enter open dir  Backspace parent  i import  t copy"
         }

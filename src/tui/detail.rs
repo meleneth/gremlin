@@ -75,17 +75,34 @@ impl Widget for DetailPane<'_> {
             "Plan: -\nPress t on a source root, choose a destination root, Enter plans marked files"
                 .to_string()
         };
+        let collection_lines = data
+            .collection
+            .map(collection_detail_lines)
+            .unwrap_or_default();
         let transfer_lines = data
             .transfer_progress
             .as_ref()
             .map(transfer_progress_lines)
             .unwrap_or_else(|| "Transfer: -".to_string());
-        let text = format!("{root_lines}\n{file_lines}\n{plan_lines}\n{transfer_lines}");
+        let text =
+            format!("{root_lines}\n{file_lines}\n{plan_lines}{collection_lines}\n{transfer_lines}");
         Paragraph::new(text)
             .style(theme::panel_dark())
             .block(panel_block("Details", false))
             .render(area, buf);
     }
+}
+
+fn collection_detail_lines(collection: &CollectionSnapshot) -> String {
+    format!(
+        "\nCollection: {} | {} | entries {}\nAgainst: {} ({})\n{}",
+        short_id(&collection.collection_id),
+        truncate(&collection.collection_name, 24),
+        collection.entries,
+        truncate(&collection.root_path, 24),
+        short_id(&collection.root_id),
+        collection_summary_line(collection)
+    )
 }
 
 pub(super) struct InfoBar<'a> {

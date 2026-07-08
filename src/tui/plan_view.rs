@@ -1,13 +1,16 @@
 use super::*;
 pub(super) struct PlanReviewPane<'a> {
     pub(super) plan: Option<&'a PlanSnapshot>,
+    pub(super) collection: Option<&'a CollectionSnapshot>,
     pub(super) state: &'a AppState,
 }
 
 impl Widget for PlanReviewPane<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let needs_attention = self.state.retarget_draft.is_some();
-        let items = if let Some(plan) = self.plan {
+        let items = if let Some(collection) = self.collection {
+            collection_items(collection, self.state.plan_offset)
+        } else if let Some(plan) = self.plan {
             let mut rows = vec![ListItem::new(plan_entry_header()).style(theme::header())];
             rows.extend(
                 plan.entries
@@ -39,12 +42,84 @@ impl Widget for PlanReviewPane<'_> {
                 theme::panel()
             })
             .block(attention_focus_block(
-                "Plan",
+                if self.collection.is_some() {
+                    "Collection"
+                } else {
+                    "Plan"
+                },
                 FocusPane::Plan,
                 self.state.focus,
                 needs_attention,
             ))
             .render(area, buf);
+    }
+}
+
+fn collection_items(collection: &CollectionSnapshot, offset: usize) -> Vec<ListItem<'static>> {
+    let mut rows = vec![ListItem::new(collection_entry_header()).style(theme::header())];
+    rows.extend(
+        collection
+            .rows
+            .iter()
+            .enumerate()
+            .skip(offset)
+            .map(|(idx, row)| {
+                let marker = if idx == offset { "> " } else { "  " };
+                let style = if idx == offset {
+                    theme::selected()
+                } else {
+                    collection_kind_style(&row.kind)
+                };
+                ListItem::new(collection_entry_row(marker, row)).style(style)
+            }),
+    );
+    rows
+}
+
+pub(super) fn collection_summary_line(collection: &CollectionSnapshot) -> String {
+    format!(
+        "ok {} | missing {} | size {} | hash {} | unverified {} | size_only {} | extra {}",
+        collection.ok,
+        collection.missing,
+        collection.size_mismatch,
+        collection.hash_mismatch,
+        collection.unverified,
+        collection.size_only,
+        collection.extras
+    )
+}
+
+fn collection_entry_header() -> String {
+    format!(
+        "{:<2} {:<13} {:<22} {:>9} {:>9}",
+        "", "RESULT", "PATH", "EXPECT", "ACTUAL"
+    )
+}
+
+fn collection_entry_row(marker: &str, row: &CollectionResultRow) -> String {
+    format!(
+        "{:<2} {:<13} {:<22} {:>9} {:>9}",
+        marker,
+        truncate(&row.kind, 13),
+        truncate(&row.relative_path, 22),
+        if row.expected_size_bytes == 0 {
+            "-".to_string()
+        } else {
+            human_size(row.expected_size_bytes)
+        },
+        row.actual_size_bytes
+            .map(human_size)
+            .unwrap_or_else(|| "-".to_string())
+    )
+}
+
+fn collection_kind_style(kind: &str) -> Style {
+    match kind {
+        "ok" => theme::ok(),
+        "size_only" | "unverified" => theme::warn(),
+        "extra" => theme::muted(),
+        "missing" | "size_mismatch" | "hash_mismatch" => theme::error(),
+        _ => theme::panel(),
     }
 }
 

@@ -4,6 +4,11 @@ pub(super) fn run_current_transfer_plan(
     job_tx: mpsc::UnboundedSender<TuiMessage>,
     state: &mut AppState,
 ) {
+    if state.collection_result.is_some() {
+        state.status =
+            "Collection comparison is shown; load a transfer plan to run copies".to_string();
+        return;
+    }
     if let Some(plan_id) = state.transfer_run_plan_id.as_deref() {
         state.status = format!("transfer plan {} is already running", short_id(plan_id));
         return;
@@ -36,6 +41,10 @@ pub(super) fn decide_current_plan_entry(
 ) -> anyhow::Result<()> {
     if state.focus != FocusPane::Plan {
         state.status = "Move focus to Plan before deciding entries".to_string();
+        return Ok(());
+    }
+    if state.collection_result.is_some() {
+        state.status = "Collection comparison entries cannot be decided".to_string();
         return Ok(());
     }
     let Some(plan) = state.last_plan.as_ref() else {
@@ -79,6 +88,10 @@ pub(super) fn decide_current_plan_entry(
 pub(super) fn start_retarget_current_plan_entry(state: &mut AppState) {
     if state.focus != FocusPane::Plan {
         state.status = "Move focus to Plan before retargeting entries".to_string();
+        return;
+    }
+    if state.collection_result.is_some() {
+        state.status = "Collection comparison entries cannot be retargeted".to_string();
         return;
     }
     let Some(plan) = state.last_plan.as_ref() else {

@@ -20,6 +20,7 @@ use rusqlite::Connection;
 use tokio::sync::mpsc;
 use tokio::task;
 
+use crate::collections;
 use crate::db;
 use crate::fswork::{self, OutputOptions};
 use crate::transfer;
@@ -51,6 +52,7 @@ struct AppState {
     active_background_jobs: usize,
     activities: VecDeque<ActivityMessage>,
     last_plan: Option<PlanSnapshot>,
+    collection_result: Option<CollectionSnapshot>,
     temporary_browse: Option<TemporaryBrowse>,
     root_browse_dirs: BTreeMap<String, String>,
 }
@@ -290,6 +292,72 @@ struct PlanSnapshot {
     entries: Vec<db::TransferPlanEntryRow>,
 }
 
+#[derive(Debug, Clone)]
+struct CollectionSnapshot {
+    collection_id: String,
+    collection_name: String,
+    root_id: String,
+    root_path: String,
+    entries: usize,
+    ok: usize,
+    size_only: usize,
+    missing: usize,
+    size_mismatch: usize,
+    hash_mismatch: usize,
+    unverified: usize,
+    extras: usize,
+    rows: Vec<CollectionResultRow>,
+}
+
+#[derive(Debug, Clone)]
+struct CollectionResultRow {
+    kind: String,
+    relative_path: String,
+    expected_size_bytes: u64,
+    actual_size_bytes: Option<u64>,
+}
+
+impl From<collections::CollectionVerifySummary> for CollectionSnapshot {
+    fn from(value: collections::CollectionVerifySummary) -> Self {
+        let mut rows = value
+            .findings
+            .into_iter()
+            .map(|finding| CollectionResultRow {
+                kind: finding.kind.as_str().to_string(),
+                relative_path: finding.relative_path,
+                expected_size_bytes: finding.expected_size_bytes,
+                actual_size_bytes: finding.actual_size_bytes,
+            })
+            .collect::<Vec<_>>();
+        rows.extend(
+            value
+                .extra_files
+                .into_iter()
+                .map(|extra| CollectionResultRow {
+                    kind: "extra".to_string(),
+                    relative_path: extra.relative_path,
+                    expected_size_bytes: 0,
+                    actual_size_bytes: Some(extra.size_bytes),
+                }),
+        );
+        Self {
+            collection_id: value.collection_id,
+            collection_name: value.collection_name,
+            root_id: value.root_id,
+            root_path: value.root_path,
+            entries: value.entries,
+            ok: value.ok,
+            size_only: value.size_only,
+            missing: value.missing,
+            size_mismatch: value.size_mismatch,
+            hash_mismatch: value.hash_mismatch,
+            unverified: value.unverified,
+            extras: value.extras,
+            rows,
+        }
+    }
+}
+
 #[derive(Debug)]
 enum TuiMessage {
     Status(String),
@@ -323,6 +391,7 @@ struct DetailData<'a> {
     file: Option<&'a FileViewRow>,
     selected_paths: &'a BTreeSet<String>,
     plan: Option<&'a PlanSnapshot>,
+    collection: Option<&'a CollectionSnapshot>,
     transfer_progress: Option<TransferProgressSnapshot>,
 }
 
@@ -493,6 +562,7 @@ fn job_status_style(status: &str) -> Style {
 }
 
 mod app;
+mod collection_actions;
 mod detail;
 mod events_view;
 mod files;
@@ -510,6 +580,7 @@ mod transfer_source;
 
 pub use app::{run_with_initial_browse, run_with_options};
 
+use collection_actions::*;
 use detail::*;
 use events_view::*;
 use files::*;
