@@ -173,6 +173,13 @@ fn command_hints_explain_destination_selection() {
 }
 
 #[test]
+fn command_hints_include_root_verify() {
+    let state = AppState::default();
+
+    assert!(active_command_hint(&state, false).contains("V verify"));
+}
+
+#[test]
 fn transfer_plan_selection_moves_focus_to_roots() {
     let root = db::RootRow {
         id: "root_1".to_string(),

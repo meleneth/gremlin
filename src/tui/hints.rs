@@ -54,12 +54,12 @@ pub(super) fn active_command_hint(state: &AppState, has_temporary_browse: bool) 
         FocusPane::Roots if has_temporary_browse && state.selected_root == 0 => {
             "Tab files  i import browsed path  t copy from browsed path  Backspace up from Files"
         }
-        FocusPane::Roots => "Space mark in Files  s scan  h hash  t choose source  p load plan  x remove root",
+        FocusPane::Roots => "Space mark in Files  s scan  h hash  V verify  t choose source  p load plan  x remove root",
         FocusPane::Files if has_temporary_browse && state.selected_root == 0 => {
             "Enter open directory  Backspace parent  i import selected/current  t copy selected/current"
         }
         FocusPane::Files => {
-            "Enter open directory  Backspace parent  Space mark file/dir  t choose source  v columns"
+            "Enter open directory  Backspace parent  Space mark file/dir  V verify root  t choose source  v columns"
         }
         FocusPane::Plan => "r run copy entries  a accept review  d drop review  e retarget review",
         FocusPane::Events => "c request cancel for selected job  Tab return to roots",

@@ -222,6 +222,17 @@ pub(super) async fn run_loop(
                             &mut state,
                         )?;
                     }
+                    KeyCode::Char('V') => {
+                        queue_selected_root(
+                            conn,
+                            db_path,
+                            selected_persisted_root(&roots, &state),
+                            "verify",
+                            machine_label.as_deref(),
+                            job_tx.clone(),
+                            &mut state,
+                        )?;
+                    }
                     KeyCode::Char('c') => {
                         request_selected_cancel(conn, events.get(state.event_offset), &mut state)?;
                     }
