@@ -23,6 +23,91 @@ use crate::fswork::{self, OutputOptions};
 use crate::transfer;
 use crate::util::human_size;
 
+mod theme {
+    use ratatui::style::{Color, Modifier, Style};
+
+    // Lospec500: https://lospec.com/palette-list/lospec500
+    pub const BG: Color = Color::Rgb(0x10, 0x12, 0x1c);
+    pub const PANEL: Color = Color::Rgb(0x2c, 0x1e, 0x31);
+    pub const PANEL_DARK: Color = Color::Rgb(0x1e, 0x40, 0x44);
+    pub const BORDER: Color = Color::Rgb(0x5e, 0x5b, 0x8c);
+    pub const BORDER_ACTIVE: Color = Color::Rgb(0x36, 0xc5, 0xf4);
+    pub const TEXT: Color = Color::Rgb(0xf6, 0xe8, 0xe0);
+    pub const MUTED: Color = Color::Rgb(0xb0, 0xa7, 0xb8);
+    pub const ACCENT: Color = Color::Rgb(0xf3, 0xa8, 0x33);
+    pub const GREEN: Color = Color::Rgb(0x5a, 0xb5, 0x52);
+    pub const LIME: Color = Color::Rgb(0x9d, 0xe6, 0x4e);
+    pub const CYAN: Color = Color::Rgb(0x6d, 0xea, 0xd6);
+    pub const BLUE: Color = Color::Rgb(0x33, 0x88, 0xde);
+    pub const PINK: Color = Color::Rgb(0xc8, 0x78, 0xaf);
+    pub const RED: Color = Color::Rgb(0xec, 0x27, 0x3f);
+    pub const ORANGE: Color = Color::Rgb(0xe9, 0x85, 0x37);
+    pub const SELECT: Color = Color::Rgb(0x6b, 0x26, 0x43);
+
+    pub fn base() -> Style {
+        Style::default().fg(TEXT).bg(BG)
+    }
+
+    pub fn panel() -> Style {
+        Style::default().fg(TEXT).bg(PANEL)
+    }
+
+    pub fn panel_dark() -> Style {
+        Style::default().fg(TEXT).bg(PANEL_DARK)
+    }
+
+    pub fn active_title() -> Style {
+        Style::default()
+            .fg(PINK)
+            .bg(PANEL)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn inactive_title() -> Style {
+        Style::default()
+            .fg(MUTED)
+            .bg(PANEL)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn header() -> Style {
+        Style::default()
+            .fg(CYAN)
+            .bg(PANEL)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn selected() -> Style {
+        Style::default()
+            .fg(Color::White)
+            .bg(SELECT)
+            .add_modifier(Modifier::BOLD)
+    }
+
+    pub fn marked() -> Style {
+        Style::default().fg(LIME).bg(PANEL)
+    }
+
+    pub fn muted() -> Style {
+        Style::default().fg(MUTED).bg(PANEL)
+    }
+
+    pub fn ok() -> Style {
+        Style::default().fg(GREEN).bg(PANEL)
+    }
+
+    pub fn warn() -> Style {
+        Style::default().fg(ORANGE).bg(PANEL)
+    }
+
+    pub fn error() -> Style {
+        Style::default()
+            .fg(RED)
+            .bg(PANEL)
+            .add_modifier(Modifier::BOLD)
+    }
+}
+
 #[derive(Debug, Default)]
 struct AppState {
     focus: FocusPane,
@@ -115,6 +200,64 @@ impl FocusPane {
     }
 }
 
+fn panel_block(title: &'static str, active: bool) -> Block<'static> {
+    let border = if active {
+        theme::BORDER_ACTIVE
+    } else {
+        theme::BORDER
+    };
+    let title_style = if active {
+        theme::active_title()
+    } else {
+        theme::inactive_title()
+    };
+    Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .style(theme::panel())
+        .border_style(Style::default().fg(border).bg(theme::PANEL))
+        .title_style(title_style)
+}
+
+fn focus_block(title: &'static str, pane: FocusPane, active: FocusPane) -> Block<'static> {
+    let focused = pane == active;
+    let border = if focused {
+        theme::BORDER_ACTIVE
+    } else {
+        theme::BORDER
+    };
+    let title_style = if focused {
+        theme::active_title()
+    } else {
+        theme::inactive_title()
+    };
+    Block::default()
+        .title(pane.title(title, active))
+        .borders(Borders::ALL)
+        .style(theme::panel())
+        .border_style(Style::default().fg(border).bg(theme::PANEL))
+        .title_style(title_style)
+}
+
+fn file_status_style(status: &str) -> Style {
+    match status {
+        "present" => theme::panel(),
+        "missing" => theme::warn(),
+        "error" => theme::error(),
+        _ => theme::muted(),
+    }
+}
+
+fn job_status_style(status: &str) -> Style {
+    match status {
+        "completed" => theme::ok(),
+        "created" | "running" | "canceling" => Style::default().fg(theme::BLUE).bg(theme::PANEL),
+        "completed_with_errors" | "canceled" => theme::warn(),
+        "failed" => theme::error(),
+        _ => theme::muted(),
+    }
+}
+
 pub async fn run_with_options(
     conn: &Connection,
     db_path: &Path,
@@ -175,6 +318,7 @@ async fn run_loop(
 
         terminal.draw(|frame| {
             let area = frame.size();
+            frame.render_widget(Block::default().style(theme::base()), area);
             let vertical = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
@@ -283,12 +427,20 @@ async fn run_loop(
 
 fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect) {
     let header = Paragraph::new(Line::from(vec![
-        Span::styled("Gremlin", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(
+        Span::styled(
+            "Gremlin",
+            Style::default()
+                .fg(theme::ACCENT)
+                .bg(theme::PANEL)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
             "  q quit | Tab | arrows | Space mark | s scan | h hash | c cancel | t plan | Enter",
+            theme::muted(),
         ),
     ]))
-    .block(Block::default().borders(Borders::ALL));
+    .style(theme::panel())
+    .block(panel_block("Lospec500", false));
     frame.render_widget(header, area);
 }
 
@@ -303,7 +455,7 @@ fn render_roots(
             "No roots yet\nRun `gremlin /path` or `gremlin target add /path`",
         )]
     } else {
-        let mut rows = vec![ListItem::new(root_header())];
+        let mut rows = vec![ListItem::new(root_header()).style(theme::header())];
         rows.extend(roots.iter().enumerate().map(|(idx, root)| {
             let marker = if idx == state.selected_root {
                 "> "
@@ -315,16 +467,23 @@ fn render_roots(
             } else {
                 " "
             };
-            ListItem::new(root_row(marker, transfer_marker, root))
+            let style = if idx == state.selected_root {
+                theme::selected()
+            } else if state.transfer_source_root_id.as_deref() == Some(&root.id) {
+                theme::marked()
+            } else {
+                theme::panel()
+            };
+            ListItem::new(root_row(marker, transfer_marker, root)).style(style)
         }));
         rows
     };
     frame.render_widget(
-        List::new(items).block(
-            Block::default()
-                .title(FocusPane::Roots.title("Roots", state.focus))
-                .borders(Borders::ALL),
-        ),
+        List::new(items).style(theme::panel()).block(focus_block(
+            "Roots",
+            FocusPane::Roots,
+            state.focus,
+        )),
         area,
     );
 }
@@ -463,7 +622,9 @@ fn render_detail_panel(frame: &mut ratatui::Frame<'_>, area: Rect, data: DetailD
     };
     let text = format!("{root_lines}\n{file_lines}\n{plan_lines}");
     frame.render_widget(
-        Paragraph::new(text).block(Block::default().title("Details").borders(Borders::ALL)),
+        Paragraph::new(text)
+            .style(theme::panel_dark())
+            .block(panel_block("Details", false)),
         area,
     );
 }
@@ -495,7 +656,9 @@ fn render_info_bar(
         state.status
     );
     frame.render_widget(
-        Paragraph::new(text).block(Block::default().title("Info").borders(Borders::ALL)),
+        Paragraph::new(text)
+            .style(theme::panel())
+            .block(panel_block("Info", true)),
         area,
     );
 }
@@ -511,20 +674,27 @@ fn render_files(
     let items = if files.is_empty() {
         vec![ListItem::new("No indexed files for this root")]
     } else {
-        let mut rows = vec![ListItem::new(file_header(state.file_view))];
+        let mut rows = vec![ListItem::new(file_header(state.file_view)).style(theme::header())];
         rows.extend(visible.map(|(idx, file)| {
             let marker = if idx == state.file_offset { "> " } else { "  " };
             let selected = selected_paths.contains(&file.relative_path);
-            ListItem::new(file_row(marker, selected, file, state.file_view))
+            let style = if idx == state.file_offset {
+                theme::selected()
+            } else if selected {
+                theme::marked()
+            } else {
+                file_status_style(&file.status)
+            };
+            ListItem::new(file_row(marker, selected, file, state.file_view)).style(style)
         }));
         rows
     };
     frame.render_widget(
-        List::new(items).block(
-            Block::default()
-                .title(FocusPane::Files.title("Files", state.focus))
-                .borders(Borders::ALL),
-        ),
+        List::new(items).style(theme::panel()).block(focus_block(
+            "Files",
+            FocusPane::Files,
+            state.focus,
+        )),
         area,
     );
 }
@@ -632,23 +802,28 @@ fn render_events(
     let items = if events.is_empty() {
         vec![ListItem::new("No jobs or events for this root")]
     } else {
-        let mut rows = vec![ListItem::new(event_header())];
+        let mut rows = vec![ListItem::new(event_header()).style(theme::header())];
         rows.extend(visible.map(|(idx, row)| {
             let marker = if idx == state.event_offset {
                 "> "
             } else {
                 "  "
             };
-            ListItem::new(event_row(marker, row))
+            let style = if idx == state.event_offset {
+                theme::selected()
+            } else {
+                job_status_style(&event_status(row))
+            };
+            ListItem::new(event_row(marker, row)).style(style)
         }));
         rows
     };
     frame.render_widget(
-        List::new(items).block(
-            Block::default()
-                .title(FocusPane::Events.title("Jobs", state.focus))
-                .borders(Borders::ALL),
-        ),
+        List::new(items).style(theme::panel()).block(focus_block(
+            "Jobs",
+            FocusPane::Events,
+            state.focus,
+        )),
         area,
     );
 }
