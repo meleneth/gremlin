@@ -2597,6 +2597,66 @@ mod tests {
     }
 
     #[test]
+    fn cached_directory_entries_show_immediate_children_with_directory_sizes() {
+        let conn = Connection::open_in_memory().unwrap();
+        configure(&conn).unwrap();
+        init_schema(&conn).unwrap();
+        let machine_id = ensure_local_machine_with_label(&conn, None).unwrap();
+        let root_id = ensure_root(&conn, &machine_id, "/tmp/root").unwrap();
+        for (path, size) in [
+            ("top.txt", 1_u64),
+            ("dir/a.txt", 2),
+            ("dir/nested/b.txt", 3),
+            ("other/c.txt", 4),
+        ] {
+            insert_path_observation(
+                &conn,
+                PathObservationInput {
+                    machine_id: &machine_id,
+                    root_id: &root_id,
+                    relative_path: path,
+                    basename: path.rsplit('/').next().unwrap(),
+                    parent_path: ".",
+                    size_bytes: size,
+                    modified_at: None,
+                    content_id: None,
+                },
+            )
+            .unwrap();
+        }
+
+        let root_entries = cached_directory_entries(&conn, &root_id, ".").unwrap();
+        assert_eq!(
+            root_entries
+                .iter()
+                .map(|entry| (
+                    entry.kind.as_str(),
+                    entry.relative_path.as_str(),
+                    entry.size_bytes
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("dir", "dir", 5),
+                ("dir", "other", 4),
+                ("file", "top.txt", 1)
+            ]
+        );
+
+        let dir_entries = cached_directory_entries(&conn, &root_id, "dir").unwrap();
+        assert_eq!(
+            dir_entries
+                .iter()
+                .map(|entry| (
+                    entry.kind.as_str(),
+                    entry.relative_path.as_str(),
+                    entry.size_bytes
+                ))
+                .collect::<Vec<_>>(),
+            vec![("dir", "dir/nested", 3), ("file", "dir/a.txt", 2)]
+        );
+    }
+
+    #[test]
     fn toggles_selection_entries_and_summarizes_bytes() {
         let conn = Connection::open_in_memory().unwrap();
         configure(&conn).unwrap();

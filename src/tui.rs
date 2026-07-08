@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -123,6 +123,7 @@ struct AppState {
     pending_import: Option<PendingTemporaryImport>,
     last_plan: Option<PlanSnapshot>,
     temporary_browse: Option<TemporaryBrowse>,
+    root_browse_dirs: BTreeMap<String, String>,
 }
 
 pub type BrowseProvider =
@@ -219,6 +220,28 @@ impl From<&db::FileRow> for FileViewRow {
 }
 
 impl FileViewRow {
+    fn from_cached_directory_entry(entry: &db::CachedDirectoryEntry) -> Self {
+        let kind = if entry.kind == "dir" {
+            FileKind::Directory
+        } else {
+            FileKind::File
+        };
+        Self {
+            relative_path: entry.relative_path.clone(),
+            size_bytes: entry.size_bytes,
+            modified_at: entry.modified_at.clone(),
+            content_id: entry.content_id.clone(),
+            status: entry.status.clone().unwrap_or_else(|| {
+                if kind == FileKind::Directory {
+                    format!("dir:{}", entry.file_count)
+                } else {
+                    "present".to_string()
+                }
+            }),
+            kind,
+        }
+    }
+
     fn from_temporary_entry(entry: &InitialBrowseEntry) -> Self {
         let kind = if entry.kind == "dir" {
             FileKind::Directory
@@ -278,6 +301,7 @@ struct InfoBarData<'a> {
 struct DetailData<'a> {
     root: Option<&'a db::RootRow>,
     temporary_browse: Option<&'a TemporaryBrowse>,
+    persisted_browse_dir: Option<&'a str>,
     summary: Option<&'a db::RootSummary>,
     selection: Option<&'a db::SelectionSummary>,
     file: Option<&'a FileViewRow>,
@@ -503,10 +527,14 @@ async fn run_loop(
         let selected = selected_persisted_root(&roots, &state);
         let selected_temporary = selected_temporary_browse(&state);
         let files = match (selected, selected_temporary) {
-            (Some(root), _) => db::recent_files_for_root(conn, &root.id, 500)?
-                .iter()
-                .map(FileViewRow::from)
-                .collect(),
+            (Some(root), _) => db::cached_directory_entries(
+                conn,
+                &root.id,
+                current_persisted_root_dir(&state, &root.id),
+            )?
+            .iter()
+            .map(FileViewRow::from_cached_directory_entry)
+            .collect(),
             (None, Some(browse)) => browse
                 .entries
                 .iter()
@@ -566,6 +594,8 @@ async fn run_loop(
                 DetailData {
                     root: selected,
                     temporary_browse: selected_temporary,
+                    persisted_browse_dir: selected
+                        .map(|root| current_persisted_root_dir(&state, &root.id)),
                     summary: summary.as_ref(),
                     selection: selection_summary.as_ref(),
                     file: files.get(state.file_offset),
@@ -711,6 +741,14 @@ async fn run_loop(
                         {
                             let file = files.get(state.file_offset).cloned();
                             open_temporary_file_entry(&mut state, file.as_ref());
+                        } else if state.focus == FocusPane::Files {
+                            let root_id = selected.map(|root| root.id.clone());
+                            let file = files.get(state.file_offset).cloned();
+                            open_persisted_file_entry(
+                                &mut state,
+                                root_id.as_deref(),
+                                file.as_ref(),
+                            );
                         } else {
                             create_transfer_plan_from_selection(conn, &roots, &mut state)?;
                         }
@@ -720,6 +758,9 @@ async fn run_loop(
                             && selected_temporary_browse(&state).is_some()
                         {
                             open_temporary_parent(&mut state);
+                        } else if state.focus == FocusPane::Files {
+                            let root_id = selected.map(|root| root.id.clone());
+                            open_persisted_parent(&mut state, root_id.as_deref());
                         }
                     }
                     KeyCode::Esc => {
@@ -795,7 +836,9 @@ fn active_command_hint(state: &AppState, has_temporary_browse: bool) -> &'static
         FocusPane::Files if has_temporary_browse && state.selected_root == 0 => {
             "Enter open directory  Backspace parent  i import selected/current  t copy selected/current"
         }
-        FocusPane::Files => "Space mark/unmark  t choose source from root  v change columns",
+        FocusPane::Files => {
+            "Enter open directory  Backspace parent  Space mark file  t choose source  v columns"
+        }
         FocusPane::Plan => "r run copy entries  a accept review  d drop review  e retarget review",
         FocusPane::Events => "c request cancel for selected job  Tab return to roots",
     }
@@ -988,9 +1031,10 @@ fn render_detail_panel(frame: &mut ratatui::Frame<'_>, area: Rect, data: DetailD
     } else {
         match (data.root, data.summary) {
         (Some(root), Some(summary)) => format!(
-            "Root: {}\nPath: {}\nFiles: {} | Hashed: {} | Current: {} | Marked: {} ({})\nMachine: {} | Set: {}",
+            "Root: {}\nPath: {}\nBrowse: {}\nFiles: {} | Hashed: {} | Current: {} | Marked: {} ({})\nMachine: {} | Set: {}",
             root_display_name(root),
             root.path,
+            data.persisted_browse_dir.unwrap_or("."),
             summary.file_count,
             summary.content_count,
             human_size(root.current_size_bytes as u64),
@@ -1001,7 +1045,7 @@ fn render_detail_panel(frame: &mut ratatui::Frame<'_>, area: Rect, data: DetailD
                 .map(|value| short_id(&value.set_id))
                 .unwrap_or("-")
         ),
-        _ => "Root: -\nPath: -\nMachine: - | Files: - | Hashed: - | Current size: -".to_string(),
+        _ => "Root: -\nPath: -\nBrowse: -\nMachine: - | Files: - | Hashed: - | Current size: -".to_string(),
         }
     };
     let file_lines = if let Some(file) = data.file {
@@ -1604,6 +1648,67 @@ fn selected_root_name(
         .or_else(|| root.map(root_display_name))
 }
 
+fn current_persisted_root_dir<'a>(state: &'a AppState, root_id: &str) -> &'a str {
+    state
+        .root_browse_dirs
+        .get(root_id)
+        .map(String::as_str)
+        .unwrap_or(".")
+}
+
+fn open_persisted_file_entry(
+    state: &mut AppState,
+    root_id: Option<&str>,
+    selected_file: Option<&FileViewRow>,
+) {
+    let Some(root_id) = root_id else {
+        state.status = "No persisted root selected".to_string();
+        return;
+    };
+    let Some(file) = selected_file else {
+        state.status = "No indexed entry selected".to_string();
+        return;
+    };
+    if file.kind != FileKind::Directory {
+        state.status = format!("selected indexed file {}", file.relative_path);
+        return;
+    }
+    state
+        .root_browse_dirs
+        .insert(root_id.to_string(), file.relative_path.clone());
+    state.file_offset = 0;
+    state.status = format!("browsing {}", file.relative_path);
+}
+
+fn open_persisted_parent(state: &mut AppState, root_id: Option<&str>) {
+    let Some(root_id) = root_id else {
+        state.status = "No persisted root selected".to_string();
+        return;
+    };
+    let current = current_persisted_root_dir(state, root_id).to_string();
+    if current == "." {
+        state.status = "Already at root".to_string();
+        return;
+    }
+    let parent = current
+        .rsplit_once('/')
+        .map(|(parent, _)| if parent.is_empty() { "." } else { parent })
+        .unwrap_or(".");
+    if parent == "." {
+        state.root_browse_dirs.remove(root_id);
+    } else {
+        state
+            .root_browse_dirs
+            .insert(root_id.to_string(), parent.to_string());
+    }
+    state.file_offset = 0;
+    state.status = if parent == "." {
+        "browsing root".to_string()
+    } else {
+        format!("browsing {parent}")
+    };
+}
+
 fn open_temporary_file_entry(state: &mut AppState, selected_file: Option<&FileViewRow>) {
     let Some(file) = selected_file else {
         state.status = "No remote entry selected".to_string();
@@ -1822,6 +1927,13 @@ fn toggle_selected_file_mark(
         state.status = "No file selected".to_string();
         return Ok(());
     };
+    if file.kind == FileKind::Directory {
+        state.status = format!(
+            "{} is a directory; press Enter to open it",
+            file.relative_path
+        );
+        return Ok(());
+    }
     let marked = db::toggle_selection_entry(conn, &root.id, &file.relative_path)?;
     state.status = if marked {
         format!("marked {}", file.relative_path)
@@ -2580,6 +2692,54 @@ mod tests {
             active_command_hint(&state, false),
             "choose destination root  Enter create plan  Esc cancel source"
         );
+    }
+
+    #[test]
+    fn persisted_root_enter_and_backspace_navigate_directories() {
+        let mut state = AppState::default();
+        let dir = FileViewRow {
+            relative_path: "photos/2026".to_string(),
+            size_bytes: 10,
+            modified_at: None,
+            content_id: None,
+            status: "dir:1".to_string(),
+            kind: FileKind::Directory,
+        };
+
+        open_persisted_file_entry(&mut state, Some("root_1"), Some(&dir));
+        assert_eq!(current_persisted_root_dir(&state, "root_1"), "photos/2026");
+        assert_eq!(state.file_offset, 0);
+
+        open_persisted_parent(&mut state, Some("root_1"));
+        assert_eq!(current_persisted_root_dir(&state, "root_1"), "photos");
+
+        open_persisted_parent(&mut state, Some("root_1"));
+        assert_eq!(current_persisted_root_dir(&state, "root_1"), ".");
+    }
+
+    #[test]
+    fn directories_are_not_marked_as_files() {
+        let conn = Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+        let root_id = db::ensure_root(&conn, &machine_id, "/tmp/root").unwrap();
+        let root = db::root_by_id(&conn, &root_id).unwrap().unwrap();
+        let dir = FileViewRow {
+            relative_path: "photos".to_string(),
+            size_bytes: 10,
+            modified_at: None,
+            content_id: None,
+            status: "dir:1".to_string(),
+            kind: FileKind::Directory,
+        };
+        let mut state = AppState::default();
+
+        toggle_selected_file_mark(&conn, Some(&root), Some(&dir), &mut state).unwrap();
+
+        assert!(db::selected_paths_for_root(&conn, &root_id)
+            .unwrap()
+            .is_empty());
+        assert!(state.status.contains("press Enter to open"));
     }
 
     #[test]
