@@ -912,6 +912,70 @@ fn transfer_error_activity_includes_path_and_reason() {
 }
 
 #[test]
+fn visible_transfer_failed_events_enter_activity_log_once() {
+    let mut state = AppState::default();
+    let event = db::JobEventRow {
+        job_id: "job_transfer_1".to_string(),
+        job_kind: "transfer_copy".to_string(),
+        status: "running".to_string(),
+        phase: Some("copying".to_string()),
+        current_path: Some("incoming/foo.png".to_string()),
+        files_seen: 1,
+        files_done: 0,
+        files_skipped: 0,
+        errors: 1,
+        cancel_requested: false,
+        sequence: 3,
+        event_kind: "transfer_failed".to_string(),
+        payload_json: serde_json::json!({
+            "type": "transfer_file",
+            "relative_path": "incoming/foo.png",
+            "error": "destination exists and differs"
+        })
+        .to_string(),
+        params_json: None,
+    };
+
+    app::append_visible_transfer_error_activities(std::slice::from_ref(&event), &mut state);
+    app::append_visible_transfer_error_activities(&[event], &mut state);
+
+    assert_eq!(state.activities.len(), 1);
+    assert_eq!(state.activities[0].level, ActivityLevel::Error);
+    assert_eq!(
+        state.activities[0].message,
+        "transfer error incoming/foo.png: destination exists and differs"
+    );
+}
+
+#[test]
+fn visible_transfer_error_count_gets_fallback_activity_without_reason() {
+    let mut state = AppState::default();
+    let event = db::JobEventRow {
+        job_id: "job_transfer_1".to_string(),
+        job_kind: "transfer_copy".to_string(),
+        status: "running".to_string(),
+        phase: Some("copying".to_string()),
+        current_path: Some("incoming/foo.png".to_string()),
+        files_seen: 1,
+        files_done: 0,
+        files_skipped: 0,
+        errors: 1,
+        cancel_requested: false,
+        sequence: 4,
+        event_kind: "job_progress".to_string(),
+        payload_json: serde_json::json!({"type": "job_progress", "errors": 1}).to_string(),
+        params_json: None,
+    };
+
+    app::append_visible_transfer_error_activities(&[event], &mut state);
+
+    assert_eq!(state.activities.len(), 1);
+    assert!(state.activities[0]
+        .message
+        .contains("but no failure reason is visible yet"));
+}
+
+#[test]
 fn formats_plan_review_hint_and_count() {
     let review = db::TransferPlanEntryRow {
         relative_path: "incoming/foo.png".to_string(),

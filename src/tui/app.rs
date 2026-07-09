@@ -187,6 +187,7 @@ pub(super) async fn run_loop(
             Some(root_id) => db::recent_jobs_and_events_for_root(conn, root_id, 300)?,
             None => db::recent_jobs_and_events(conn, 100)?,
         };
+        append_visible_transfer_error_activities(&events, &mut state);
         let summary = match selected {
             Some(root) => Some(db::root_summary(conn, &root.id)?),
             None => None,
@@ -500,25 +501,95 @@ fn append_transfer_error_activities(
     if job_id == "-" {
         return Ok(());
     }
-    let errors = db::events_for_job(conn, job_id)?
+    let events = db::events_for_job(conn, job_id)?
         .into_iter()
         .filter(|event| event.event_kind == "transfer_failed")
-        .filter_map(|event| transfer_error_activity(&event.payload_json))
         .collect::<Vec<_>>();
-    let visible = errors.len().min(5);
-    for message in errors.iter().take(visible) {
-        state.set_status(ActivityLevel::Error, message.clone());
+    let visible = events.len().min(5);
+    for event in events.iter().take(visible) {
+        append_transfer_error_activity_once(
+            state,
+            transfer_error_activity_key(&event.job_id, event.sequence),
+            &event.payload_json,
+        );
     }
-    if errors.len() > visible {
+    if events.len() > visible {
         state.set_status(
             ActivityLevel::Error,
             format!(
                 "{} more transfer error(s); inspect job {job_id}",
-                errors.len() - visible
+                events.len() - visible
             ),
         );
     }
     Ok(())
+}
+
+pub(super) fn append_visible_transfer_error_activities(
+    events: &[db::JobEventRow],
+    state: &mut AppState,
+) {
+    for event in events
+        .iter()
+        .filter(|event| event.event_kind == "transfer_failed")
+    {
+        append_transfer_error_activity_once(
+            state,
+            transfer_error_activity_key(&event.job_id, event.sequence),
+            &event.payload_json,
+        );
+    }
+    for event in events
+        .iter()
+        .filter(|event| event.job_kind == "transfer_copy" && event.errors > 0)
+    {
+        append_transfer_error_count_fallback(state, event);
+    }
+}
+
+fn append_transfer_error_activity_once(state: &mut AppState, key: String, payload_json: &str) {
+    if !state.transfer_error_activity_keys.insert(key) {
+        return;
+    }
+    if let Some(message) = transfer_error_activity(payload_json) {
+        state.set_status(ActivityLevel::Error, message);
+    }
+}
+
+fn transfer_error_activity_key(job_id: &str, sequence: i64) -> String {
+    format!("{job_id}:{sequence}")
+}
+
+fn append_transfer_error_count_fallback(state: &mut AppState, event: &db::JobEventRow) {
+    let key_prefix = format!("{}:", event.job_id);
+    if state
+        .transfer_error_activity_keys
+        .iter()
+        .any(|key| key.starts_with(&key_prefix))
+    {
+        return;
+    }
+    let previous = state
+        .transfer_error_count_by_job
+        .get(&event.job_id)
+        .copied()
+        .unwrap_or(0);
+    if event.errors <= previous {
+        return;
+    }
+    state
+        .transfer_error_count_by_job
+        .insert(event.job_id.clone(), event.errors);
+    let current_path = event.current_path.as_deref().unwrap_or("-");
+    state.set_status(
+        ActivityLevel::Error,
+        format!(
+            "transfer {} has {} error(s) but no failure reason is visible yet; latest path {}",
+            short_id(&event.job_id),
+            event.errors,
+            truncate(current_path, 48)
+        ),
+    );
 }
 
 pub(super) fn transfer_error_activity(payload_json: &str) -> Option<String> {
