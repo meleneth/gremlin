@@ -1218,3 +1218,81 @@ fn app_screen_renders_empty_state_widgets() {
     assert!(text.contains("No indexed files"));
     assert!(text.contains("No transfer plan yet"));
 }
+
+#[test]
+fn app_screen_renders_open_root_modal() {
+    let state = AppState {
+        pending_open_root: Some(OpenRootDraft {
+            input: "nas01:/srv/archive".to_string(),
+        }),
+        ..AppState::default()
+    };
+    let selected_paths = BTreeSet::new();
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 120, 42));
+
+    AppScreen {
+        state: &state,
+        roots: &[],
+        files: &[],
+        selected_paths: &selected_paths,
+        selected_root: None,
+        selected_temporary: None,
+        summary: None,
+        selection: None,
+        detail_content: None,
+        events: &[],
+        root_count: 0,
+        transfer_progress: None,
+        import_progress: None,
+        detail_file_offset: 0,
+    }
+    .render(buffer.area, &mut buffer);
+
+    let text = buffer
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("Open Root"));
+    assert!(text.contains("Location: nas01:/srv/archive"));
+    assert!(text.contains("Enter open"));
+}
+
+#[test]
+fn app_screen_renders_import_decision_modal() {
+    let state = AppState {
+        pending_import: Some(PendingTemporaryImport {
+            remote_path: "/srv/archive/photos".to_string(),
+        }),
+        ..AppState::default()
+    };
+    let selected_paths = BTreeSet::new();
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 120, 42));
+
+    AppScreen {
+        state: &state,
+        roots: &[],
+        files: &[],
+        selected_paths: &selected_paths,
+        selected_root: None,
+        selected_temporary: None,
+        summary: None,
+        selection: None,
+        detail_content: None,
+        events: &[],
+        root_count: 0,
+        transfer_progress: None,
+        import_progress: None,
+        detail_file_offset: 0,
+    }
+    .render(buffer.area, &mut buffer);
+
+    let text = buffer
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("Import Remote Root"));
+    assert!(text.contains("Path: /srv/archive/photos"));
+    assert!(text.contains("f fast recursive stat"));
+}

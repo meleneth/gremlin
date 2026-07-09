@@ -104,5 +104,124 @@ impl Widget for AppScreen<'_> {
             state: self.state,
         }
         .render(vertical[3], buf);
+        if let Some(modal) = decision_modal(self.state) {
+            render_decision_modal(modal, area, buf);
+        }
+    }
+}
+
+struct DecisionModal {
+    title: &'static str,
+    lines: Vec<Line<'static>>,
+    width: u16,
+    height: u16,
+}
+
+fn decision_modal(state: &AppState) -> Option<DecisionModal> {
+    if let Some(draft) = state.pending_open_root.as_ref() {
+        return Some(DecisionModal {
+            title: "Open Root",
+            lines: vec![
+                Line::from("Enter a local path, file:// path, or SSH target."),
+                Line::from(format!("Location: {}", draft.input)),
+                Line::from("Enter open  Esc cancel"),
+            ],
+            width: 72,
+            height: 7,
+        });
+    }
+    if let Some(pending) = state.pending_import.as_ref() {
+        return Some(DecisionModal {
+            title: "Import Remote Root",
+            lines: vec![
+                Line::from(format!("Path: {}", pending.remote_path)),
+                Line::from("n root only  f fast recursive stat  h remote SHA-256 hash"),
+                Line::from("Esc cancel"),
+            ],
+            width: 76,
+            height: 7,
+        });
+    }
+    if let Some(pending) = state.pending_scoped_job.as_ref() {
+        return Some(DecisionModal {
+            title: "Job Scope",
+            lines: vec![
+                Line::from(format!("{} marked path-aware job", pending.kind)),
+                Line::from("a run against all files in root"),
+                Line::from("m run against marked paths only"),
+                Line::from("Esc cancel"),
+            ],
+            width: 64,
+            height: 8,
+        });
+    }
+    if state.pending_delete_root_id.is_some() {
+        return Some(DecisionModal {
+            title: "Remove Root",
+            lines: vec![
+                Line::from("Remove this root from the database?"),
+                Line::from("Files on disk are not deleted."),
+                Line::from("y confirm  n/Esc cancel"),
+            ],
+            width: 58,
+            height: 7,
+        });
+    }
+    if let Some(draft) = state.retarget_draft.as_ref() {
+        return Some(DecisionModal {
+            title: "Retarget Copy",
+            lines: vec![
+                Line::from(format!("Source: {}", draft.relative_path)),
+                Line::from(format!("Destination: {}", draft.value)),
+                Line::from("Enter apply  Backspace edit  Esc cancel"),
+            ],
+            width: 82,
+            height: 7,
+        });
+    }
+    if state.transfer_source_root_id.is_some() {
+        return Some(DecisionModal {
+            title: "Choose Destination",
+            lines: vec![
+                Line::from("Move to the destination root."),
+                Line::from("Enter create transfer plan"),
+                Line::from("Esc cancel source selection"),
+            ],
+            width: 58,
+            height: 7,
+        });
+    }
+    None
+}
+
+fn render_decision_modal(modal: DecisionModal, area: Rect, buf: &mut Buffer) {
+    let modal_area = centered_rect(modal.width, modal.height, area);
+    Clear.render(modal_area, buf);
+    Paragraph::new(modal.lines)
+        .style(theme::attention())
+        .wrap(Wrap { trim: true })
+        .block(
+            Block::default()
+                .title(modal.title)
+                .borders(Borders::ALL)
+                .style(theme::attention())
+                .border_style(
+                    Style::default()
+                        .fg(theme::BORDER_ACTIVE)
+                        .bg(theme::ATTENTION),
+                )
+                .title_style(theme::active_title()),
+        )
+        .render(modal_area, buf);
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
     }
 }
