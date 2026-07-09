@@ -222,13 +222,19 @@ fn command_hints_explain_temporary_file_browse_actions() {
 #[test]
 fn command_hints_explain_destination_selection() {
     let state = AppState {
-        transfer_source_root_id: Some("root_1".to_string()),
+        transfer_plan_draft: Some(TransferPlanDraft {
+            source_root_id: "root_1".to_string(),
+            source_name: "source".to_string(),
+            source_path: "/tmp/source".to_string(),
+            marked_count: 1,
+            marked_bytes: 10,
+        }),
         ..AppState::default()
     };
 
     assert_eq!(
         active_command_hint(&state, false),
-        "choose destination root  Enter create plan  Esc cancel source"
+        "choose destination root  Enter create transfer plan  Esc cancel source"
     );
 }
 
@@ -510,9 +516,18 @@ fn transfer_plan_selection_moves_focus_to_roots() {
         ..AppState::default()
     };
 
-    start_transfer_plan_selection(Some(&root), &mut state);
+    let selection = db::SelectionSummary {
+        set_id: "set_1".to_string(),
+        marked_count: 2,
+        marked_bytes: 20,
+    };
 
-    assert_eq!(state.transfer_source_root_id.as_deref(), Some("root_1"));
+    start_transfer_plan_selection(Some(&root), Some(&selection), &mut state);
+
+    let draft = state.transfer_plan_draft.as_ref().unwrap();
+    assert_eq!(draft.source_root_id, "root_1");
+    assert_eq!(draft.marked_count, 2);
+    assert_eq!(draft.marked_bytes, 20);
     assert_eq!(state.focus, FocusPane::Roots);
     assert!(state.status.contains("choose destination root"));
 }
@@ -594,7 +609,13 @@ fn transfer_plan_destination_uses_visible_persisted_root_with_temporary_browse()
             },
             dest_index,
         ),
-        transfer_source_root_id: Some(source_id.clone()),
+        transfer_plan_draft: Some(TransferPlanDraft {
+            source_root_id: source_id.clone(),
+            source_name: display_name_from_path(&source_dir.path().to_string_lossy()),
+            source_path: source_dir.path().to_string_lossy().to_string(),
+            marked_count: 1,
+            marked_bytes: 5,
+        }),
         temporary_browse: Some(TemporaryBrowse {
             label: "nas01:".to_string(),
             machine_id: "machine_remote".to_string(),
@@ -616,7 +637,7 @@ fn transfer_plan_destination_uses_visible_persisted_root_with_temporary_browse()
     );
     assert_eq!(plan.entries.len(), 1);
     assert_eq!(plan.entries[0].action, "copy");
-    assert_eq!(state.transfer_source_root_id, None);
+    assert!(state.transfer_plan_draft.is_none());
     assert_eq!(dest_id, roots[dest_index].id);
 }
 
@@ -1295,4 +1316,48 @@ fn app_screen_renders_import_decision_modal() {
     assert!(text.contains("Import Remote Root"));
     assert!(text.contains("Path: /srv/archive/photos"));
     assert!(text.contains("f fast recursive stat"));
+}
+
+#[test]
+fn app_screen_renders_transfer_destination_modal_with_source_context() {
+    let state = AppState {
+        transfer_plan_draft: Some(TransferPlanDraft {
+            source_root_id: "root_1".to_string(),
+            source_name: "source".to_string(),
+            source_path: "/tmp/source".to_string(),
+            marked_count: 3,
+            marked_bytes: 4096,
+        }),
+        ..AppState::default()
+    };
+    let selected_paths = BTreeSet::new();
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 120, 42));
+
+    AppScreen {
+        state: &state,
+        roots: &[],
+        files: &[],
+        selected_paths: &selected_paths,
+        selected_root: None,
+        selected_temporary: None,
+        summary: None,
+        selection: None,
+        detail_content: None,
+        events: &[],
+        root_count: 0,
+        transfer_progress: None,
+        import_progress: None,
+        detail_file_offset: 0,
+    }
+    .render(buffer.area, &mut buffer);
+
+    let text = buffer
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("Choose Destination"));
+    assert!(text.contains("Source: source"));
+    assert!(text.contains("Marked: 3 (4.00 KiB)"));
+    assert!(text.contains("Move to destination root"));
 }

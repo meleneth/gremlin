@@ -53,7 +53,7 @@ fn command_hint_needs_attention(state: &AppState) -> bool {
         || state.pending_import.is_some()
         || state.pending_open_root.is_some()
         || state.pending_scoped_job.is_some()
-        || state.transfer_source_root_id.is_some()
+        || state.transfer_plan_draft.is_some()
 }
 
 pub(super) fn active_command_hint(state: &AppState, has_temporary_browse: bool) -> &'static str {
@@ -78,8 +78,8 @@ pub(super) fn active_command_hint(state: &AppState, has_temporary_browse: bool) 
     if state.transfer_run_plan_id.is_some() {
         return "transfer running  c request cancel  Tab inspect panes";
     }
-    if state.transfer_source_root_id.is_some() {
-        return "choose destination root  Enter create plan  Esc cancel source";
+    if state.transfer_plan_draft.is_some() {
+        return "choose destination root  Enter create transfer plan  Esc cancel source";
     }
     if state.collection_result.is_some() && state.focus == FocusPane::Plan {
         return "collection compare result  PgUp/PgDn jump  p load transfer plan";

@@ -184,7 +184,16 @@ pub(super) async fn run_loop(
                         selected_relative_path.as_deref(),
                         mark_all,
                     )?;
-                    state.transfer_source_root_id = Some(root_id);
+                    if let Some(root) = db::root_by_id(conn, &root_id)? {
+                        let selection = db::selection_summary_for_root(conn, &root_id)?;
+                        state.transfer_plan_draft = Some(TransferPlanDraft {
+                            source_root_id: root_id,
+                            source_name: root_display_name(&root),
+                            source_path: root.path,
+                            marked_count: selection.marked_count,
+                            marked_bytes: selection.marked_bytes,
+                        });
+                    }
                     state.focus = FocusPane::Roots;
                     state.background_finished(ActivityLevel::Success, status);
                 }
@@ -450,6 +459,7 @@ pub(super) async fn run_loop(
                         } else {
                             start_transfer_plan_selection(
                                 selected_persisted_root(&roots, &state),
+                                selection_summary.as_ref(),
                                 &mut state,
                             );
                         }

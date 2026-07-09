@@ -44,7 +44,7 @@ struct AppState {
     plan_offset: usize,
     event_offset: usize,
     status: String,
-    transfer_source_root_id: Option<String>,
+    transfer_plan_draft: Option<TransferPlanDraft>,
     transfer_run_plan_id: Option<String>,
     retarget_draft: Option<RetargetDraft>,
     pending_delete_root_id: Option<String>,
@@ -486,6 +486,15 @@ struct RetargetDraft {
     plan_id: String,
     relative_path: String,
     value: String,
+}
+
+#[derive(Debug, Clone)]
+struct TransferPlanDraft {
+    source_root_id: String,
+    source_name: String,
+    source_path: String,
+    marked_count: i64,
+    marked_bytes: i64,
 }
 
 #[derive(Debug, Clone)]

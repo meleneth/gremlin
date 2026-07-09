@@ -29,7 +29,13 @@ pub(super) fn handle_delete_root_confirmation(
                     state.selected_root = state.selected_root.saturating_sub(1);
                     state.file_offset = 0;
                     state.event_offset = 0;
-                    state.transfer_source_root_id = None;
+                    if state
+                        .transfer_plan_draft
+                        .as_ref()
+                        .is_some_and(|draft| draft.source_root_id == root_id)
+                    {
+                        state.transfer_plan_draft = None;
+                    }
                     state.last_plan = None;
                     state.status = format!(
                         "removed root {} ({} observations, {} plans); files untouched",

@@ -31,15 +31,24 @@ impl Widget for RootsPane<'_> {
                 } else {
                     "  "
                 };
-                let transfer_marker =
-                    if self.state.transfer_source_root_id.as_deref() == Some(&root.id) {
-                        "S"
-                    } else {
-                        " "
-                    };
+                let transfer_marker = if self
+                    .state
+                    .transfer_plan_draft
+                    .as_ref()
+                    .is_some_and(|draft| draft.source_root_id == root.id)
+                {
+                    "S"
+                } else {
+                    " "
+                };
                 let style = if idx == self.state.selected_root {
                     theme::selected()
-                } else if self.state.transfer_source_root_id.as_deref() == Some(&root.id) {
+                } else if self
+                    .state
+                    .transfer_plan_draft
+                    .as_ref()
+                    .is_some_and(|draft| draft.source_root_id == root.id)
+                {
                     theme::marked()
                 } else {
                     theme::panel()

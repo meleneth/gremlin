@@ -1,10 +1,31 @@
 use super::*;
-pub(super) fn start_transfer_plan_selection(root: Option<&db::RootRow>, state: &mut AppState) {
+pub(super) fn start_transfer_plan_selection(
+    root: Option<&db::RootRow>,
+    selection: Option<&db::SelectionSummary>,
+    state: &mut AppState,
+) {
     let Some(root) = root else {
         state.set_status(ActivityLevel::Warning, "No source root selected");
         return;
     };
-    state.transfer_source_root_id = Some(root.id.clone());
+    let marked_count = selection.map(|value| value.marked_count).unwrap_or(0);
+    if marked_count == 0 {
+        state.set_status(
+            ActivityLevel::Warning,
+            format!(
+                "{} has no marked files; mark files or directories in Files first",
+                root_display_name(root)
+            ),
+        );
+        return;
+    }
+    state.transfer_plan_draft = Some(TransferPlanDraft {
+        source_root_id: root.id.clone(),
+        source_name: root_display_name(root),
+        source_path: root.path.clone(),
+        marked_count,
+        marked_bytes: selection.map(|value| value.marked_bytes).unwrap_or(0),
+    });
     state.focus = FocusPane::Roots;
     state.set_status(
         ActivityLevel::Info,
@@ -115,7 +136,7 @@ pub(super) fn mark_imported_transfer_source(
 }
 
 pub(super) fn cancel_transfer_plan_selection(state: &mut AppState) {
-    if state.transfer_source_root_id.take().is_some() {
+    if state.transfer_plan_draft.take().is_some() {
         state.set_status(ActivityLevel::Warning, "transfer planning canceled");
     }
 }
@@ -125,11 +146,11 @@ pub(super) fn create_transfer_plan_from_selection(
     roots: &[db::RootRow],
     state: &mut AppState,
 ) -> anyhow::Result<()> {
-    let Some(source_root_id) = state.transfer_source_root_id.clone() else {
+    let Some(draft) = state.transfer_plan_draft.clone() else {
         return Ok(());
     };
-    let Some(source) = roots.iter().find(|root| root.id == source_root_id) else {
-        state.transfer_source_root_id = None;
+    let Some(source) = roots.iter().find(|root| root.id == draft.source_root_id) else {
+        state.transfer_plan_draft = None;
         state.set_status(
             ActivityLevel::Error,
             "transfer source root is no longer visible",
@@ -137,9 +158,19 @@ pub(super) fn create_transfer_plan_from_selection(
         return Ok(());
     };
     let Some(dest) = selected_persisted_root(roots, state) else {
-        state.set_status(ActivityLevel::Warning, "No destination root selected");
+        state.set_status(
+            ActivityLevel::Warning,
+            "choose a persisted destination root, then press Enter",
+        );
         return Ok(());
     };
+    if dest.id == source.id {
+        state.set_status(
+            ActivityLevel::Warning,
+            "source and destination are the same root; choose another destination",
+        );
+        return Ok(());
+    }
     match transfer::plan_selected_files(conn, source, dest) {
         Ok(result) => {
             let summary = result.summary.clone();
@@ -154,7 +185,7 @@ pub(super) fn create_transfer_plan_from_selection(
                 entries,
             });
             state.collection_result = None;
-            state.transfer_source_root_id = None;
+            state.transfer_plan_draft = None;
             state.plan_offset = 0;
             state.focus = FocusPane::Plan;
             state.set_status(

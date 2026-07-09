@@ -179,16 +179,22 @@ fn decision_modal(state: &AppState) -> Option<DecisionModal> {
             height: 7,
         });
     }
-    if state.transfer_source_root_id.is_some() {
+    if let Some(draft) = state.transfer_plan_draft.as_ref() {
         return Some(DecisionModal {
             title: "Choose Destination",
             lines: vec![
-                Line::from("Move to the destination root."),
-                Line::from("Enter create transfer plan"),
+                Line::from(format!("Source: {}", draft.source_name)),
+                Line::from(format!("Path: {}", draft.source_path)),
+                Line::from(format!(
+                    "Marked: {} ({})",
+                    draft.marked_count,
+                    human_size(draft.marked_bytes as u64)
+                )),
+                Line::from("Move to destination root, then press Enter."),
                 Line::from("Esc cancel source selection"),
             ],
-            width: 58,
-            height: 7,
+            width: 78,
+            height: 9,
         });
     }
     None
