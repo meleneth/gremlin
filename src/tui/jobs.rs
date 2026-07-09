@@ -67,7 +67,7 @@ pub(super) fn spawn_transfer_runner(
                 }
             }
         })();
-        let (status, copied, skipped, errors, canceled) = match result {
+        let (job_id, status, copied, skipped, errors, canceled) = match result {
             Ok(result) if result.canceled => {
                 let status = format!(
                     "canceled transfer {}: copied {} ({}) skipped {} errors {}",
@@ -78,6 +78,7 @@ pub(super) fn spawn_transfer_runner(
                     result.errors
                 );
                 (
+                    result.job_id,
                     status,
                     result.copied,
                     result.skipped,
@@ -95,6 +96,7 @@ pub(super) fn spawn_transfer_runner(
                     result.errors
                 );
                 (
+                    result.job_id,
                     status,
                     result.copied,
                     result.skipped,
@@ -103,6 +105,7 @@ pub(super) fn spawn_transfer_runner(
                 )
             }
             Err(err) => (
+                "-".to_string(),
                 format!("failed transfer {}: {err}", short_id(&plan_id)),
                 0,
                 0,
@@ -111,6 +114,7 @@ pub(super) fn spawn_transfer_runner(
             ),
         };
         let _ = job_tx.send(TuiMessage::TransferFinished {
+            job_id,
             plan_id,
             copied,
             skipped,

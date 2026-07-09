@@ -898,6 +898,20 @@ fn activity_rows_show_transfer_direction() {
 }
 
 #[test]
+fn transfer_error_activity_includes_path_and_reason() {
+    let payload = serde_json::json!({
+        "type": "transfer_file",
+        "relative_path": "incoming/foo.png",
+        "error": "destination exists and differs"
+    });
+
+    assert_eq!(
+        app::transfer_error_activity(&payload.to_string()).unwrap(),
+        "transfer error incoming/foo.png: destination exists and differs"
+    );
+}
+
+#[test]
 fn formats_plan_review_hint_and_count() {
     let review = db::TransferPlanEntryRow {
         relative_path: "incoming/foo.png".to_string(),

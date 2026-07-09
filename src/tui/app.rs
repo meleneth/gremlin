@@ -92,6 +92,7 @@ pub(super) async fn run_loop(
                     state.background_finished_job(&job_id, level, status);
                 }
                 TuiMessage::TransferFinished {
+                    job_id,
                     plan_id,
                     copied: _copied,
                     skipped: _skipped,
@@ -111,6 +112,9 @@ pub(super) async fn run_loop(
                         ActivityLevel::Success
                     };
                     state.background_finished(level, status);
+                    if errors > 0 {
+                        append_transfer_error_activities(conn, &job_id, &mut state)?;
+                    }
                     start_next_queued_transfer(conn, db_path, job_tx.clone(), &mut state)?;
                 }
                 TuiMessage::ImportFinished(status) => {
@@ -486,6 +490,52 @@ fn selected_file_content(
         return Ok(None);
     };
     Ok(db::content_object_by_id(conn, content_id)?)
+}
+
+fn append_transfer_error_activities(
+    conn: &Connection,
+    job_id: &str,
+    state: &mut AppState,
+) -> anyhow::Result<()> {
+    if job_id == "-" {
+        return Ok(());
+    }
+    let errors = db::events_for_job(conn, job_id)?
+        .into_iter()
+        .filter(|event| event.event_kind == "transfer_failed")
+        .filter_map(|event| transfer_error_activity(&event.payload_json))
+        .collect::<Vec<_>>();
+    let visible = errors.len().min(5);
+    for message in errors.iter().take(visible) {
+        state.set_status(ActivityLevel::Error, message.clone());
+    }
+    if errors.len() > visible {
+        state.set_status(
+            ActivityLevel::Error,
+            format!(
+                "{} more transfer error(s); inspect job {job_id}",
+                errors.len() - visible
+            ),
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn transfer_error_activity(payload_json: &str) -> Option<String> {
+    let payload: serde_json::Value = serde_json::from_str(payload_json).ok()?;
+    let relative_path = payload
+        .get("relative_path")
+        .and_then(|value| value.as_str())
+        .unwrap_or("-");
+    let error = payload
+        .get("error")
+        .and_then(|value| value.as_str())
+        .unwrap_or("transfer failed");
+    Some(format!(
+        "transfer error {}: {}",
+        truncate(relative_path, 48),
+        truncate(error, 140)
+    ))
 }
 
 fn request_immediate_quit(conn: &Connection, state: &mut AppState) -> anyhow::Result<()> {

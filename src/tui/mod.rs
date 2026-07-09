@@ -383,6 +383,7 @@ enum TuiMessage {
         status: String,
     },
     TransferFinished {
+        job_id: String,
         plan_id: String,
         copied: u64,
         skipped: u64,
