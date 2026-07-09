@@ -77,6 +77,7 @@ pub(super) async fn run_loop(
                 events: &loading_events,
                 root_count: visible_root_count(&state, 0),
                 transfer_progress: None,
+                import_progress: state.active_import_progress.as_ref(),
                 detail_file_offset: 0,
             },
             frame.area(),
@@ -130,6 +131,7 @@ pub(super) async fn run_loop(
                 }
                 TuiMessage::ImportFinished(status) => {
                     state.active_import_root_id = None;
+                    state.active_import_progress = None;
                     let level = if status.contains("failed") {
                         ActivityLevel::Error
                     } else {
@@ -139,9 +141,10 @@ pub(super) async fn run_loop(
                 }
                 TuiMessage::ImportProgress(progress) => {
                     state.active_import_root_id = Some(progress.root_id.clone());
+                    state.active_import_progress = Some(progress.clone());
                     state.status = format!(
-                        "importing {}: {} files indexed",
-                        progress.root_path, progress.files_imported
+                        "importing {}: {} files indexed, {} queued",
+                        progress.root_path, progress.files_imported, progress.files_queued
                     );
                 }
                 TuiMessage::OpenRootFinished(result) => match result {
@@ -272,6 +275,7 @@ pub(super) async fn run_loop(
                     events: &job_rows,
                     root_count,
                     transfer_progress,
+                    import_progress: state.active_import_progress.as_ref(),
                     detail_file_offset: state.detail_file_offset,
                 },
                 frame.area(),

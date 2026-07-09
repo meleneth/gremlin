@@ -54,6 +54,7 @@ struct AppState {
     active_background_jobs: usize,
     active_job_ids: BTreeSet<String>,
     active_import_root_id: Option<String>,
+    active_import_progress: Option<ImportProgress>,
     transfer_error_activity_keys: BTreeSet<String>,
     transfer_error_count_by_job: BTreeMap<String, i64>,
     resumable_transfer_plans: Vec<db::TransferPlanRow>,
@@ -198,6 +199,11 @@ pub struct ImportProgress {
     pub root_id: String,
     pub root_path: String,
     pub files_imported: u64,
+    pub files_queued: u64,
+    pub directories_processed: u64,
+    pub directories_queued: u64,
+    pub current_path: Option<String>,
+    pub phase: String,
 }
 
 #[derive(Clone)]
@@ -458,6 +464,7 @@ struct DetailData<'a> {
     plan: Option<&'a PlanSnapshot>,
     collection: Option<&'a CollectionSnapshot>,
     transfer_progress: Option<TransferProgressSnapshot>,
+    import_progress: Option<&'a ImportProgress>,
 }
 
 #[derive(Debug, Clone)]

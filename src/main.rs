@@ -17,6 +17,7 @@ use cli::{
     Cli, Commands, ConfigCommands, JobCommands, TargetCommands, TransferCommands, WorkerCommands,
 };
 use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Command;
@@ -1207,8 +1208,16 @@ fn import_ssh_fast_stat(
     progress: &tui::ImportProgressCallback,
 ) -> anyhow::Result<u64> {
     let entries = fast_scan_ssh_tree(parsed, remote_path)?;
-    let mut reporter = ImportProgressReporter::new(progress, root_id, root_path);
-    for (idx, entry) in entries.iter().enumerate() {
+    let mut reporter = ImportProgressReporter::new(
+        progress,
+        root_id,
+        root_path,
+        "fast stat indexing",
+        entries
+            .iter()
+            .map(|entry| remote_parent(&entry.relative_path)),
+    );
+    for entry in &entries {
         db::insert_path_observation(
             conn,
             db::PathObservationInput {
@@ -1222,9 +1231,9 @@ fn import_ssh_fast_stat(
                 content_id: None,
             },
         )?;
-        reporter.record(idx as u64 + 1);
+        reporter.record_path(&entry.relative_path, &remote_parent(&entry.relative_path));
     }
-    reporter.finish(entries.len() as u64);
+    reporter.finish();
     Ok(entries.len() as u64)
 }
 
@@ -1259,8 +1268,14 @@ fn import_ssh_native_hash(
         None,
     )?;
     db::attach_checksum_collection_target(conn, &collection_id, machine_id, root_id)?;
-    let mut reporter = ImportProgressReporter::new(progress, root_id, root_path);
-    for (idx, entry) in entries.iter().enumerate() {
+    let mut reporter = ImportProgressReporter::new(
+        progress,
+        root_id,
+        root_path,
+        "remote hash indexing",
+        entries.iter().map(|entry| entry.parent_path.clone()),
+    );
+    for entry in &entries {
         db::insert_checksum_entry(
             conn,
             db::ChecksumEntryInput {
@@ -1291,9 +1306,9 @@ fn import_ssh_native_hash(
                 content_id: Some(&content_id),
             },
         )?;
-        reporter.record(idx as u64 + 1);
+        reporter.record_path(&entry.relative_path, &entry.parent_path);
     }
-    reporter.finish(entries.len() as u64);
+    reporter.finish();
     Ok(entries.len() as u64)
 }
 
@@ -1301,43 +1316,80 @@ struct ImportProgressReporter<'a> {
     callback: &'a tui::ImportProgressCallback,
     root_id: &'a str,
     root_path: &'a str,
+    phase: &'static str,
     last_emit: Instant,
     dirty: bool,
+    files_imported: u64,
+    total_files: u64,
+    processed_dirs: BTreeSet<String>,
+    queued_dir_file_counts: BTreeMap<String, u64>,
+    current_path: Option<String>,
 }
 
 impl<'a> ImportProgressReporter<'a> {
-    fn new(
+    fn new<I>(
         callback: &'a tui::ImportProgressCallback,
         root_id: &'a str,
         root_path: &'a str,
-    ) -> Self {
+        phase: &'static str,
+        queued_parents: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let mut queued_dir_file_counts = BTreeMap::new();
+        let mut total_files = 0;
+        for parent in queued_parents {
+            *queued_dir_file_counts.entry(parent).or_insert(0) += 1;
+            total_files += 1;
+        }
         Self {
             callback,
             root_id,
             root_path,
+            phase,
             last_emit: Instant::now() - Duration::from_millis(250),
             dirty: false,
+            files_imported: 0,
+            total_files,
+            processed_dirs: BTreeSet::new(),
+            queued_dir_file_counts,
+            current_path: None,
         }
     }
 
-    fn record(&mut self, files_imported: u64) {
+    fn record_path(&mut self, current_path: &str, parent_path: &str) {
+        self.files_imported += 1;
+        self.current_path = Some(current_path.to_string());
+        self.processed_dirs.insert(parent_path.to_string());
+        if let Some(count) = self.queued_dir_file_counts.get_mut(parent_path) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.queued_dir_file_counts.remove(parent_path);
+            }
+        }
         self.dirty = true;
         if self.last_emit.elapsed() >= Duration::from_millis(250) {
-            self.emit(files_imported);
+            self.emit();
         }
     }
 
-    fn finish(&mut self, files_imported: u64) {
+    fn finish(&mut self) {
         if self.dirty {
-            self.emit(files_imported);
+            self.emit();
         }
     }
 
-    fn emit(&mut self, files_imported: u64) {
+    fn emit(&mut self) {
         (self.callback)(tui::ImportProgress {
             root_id: self.root_id.to_string(),
             root_path: self.root_path.to_string(),
-            files_imported,
+            files_imported: self.files_imported,
+            files_queued: self.total_files.saturating_sub(self.files_imported),
+            directories_processed: self.processed_dirs.len() as u64,
+            directories_queued: self.queued_dir_file_counts.len() as u64,
+            current_path: self.current_path.clone(),
+            phase: self.phase.to_string(),
         });
         self.last_emit = Instant::now();
         self.dirty = false;

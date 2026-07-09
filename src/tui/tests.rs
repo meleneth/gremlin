@@ -1124,6 +1124,7 @@ fn detail_pane_renders_selected_file_hashes() {
             plan: None,
             collection: None,
             transfer_progress: None,
+            import_progress: None,
         },
     }
     .render(buffer.area, &mut buffer);
@@ -1135,6 +1136,50 @@ fn detail_pane_renders_selected_file_hashes() {
         .collect::<String>();
     assert!(text.contains("BLAKE3: blake3-hash-value"));
     assert!(text.contains("SHA-256: sha256-hash-value"));
+}
+
+#[test]
+fn detail_pane_renders_import_progress() {
+    let selected_paths = BTreeSet::new();
+    let progress = ImportProgress {
+        root_id: "root_1".to_string(),
+        root_path: "nas01:/srv/archive".to_string(),
+        files_imported: 42,
+        files_queued: 7,
+        directories_processed: 5,
+        directories_queued: 2,
+        current_path: Some("photos/foo.png".to_string()),
+        phase: "fast stat indexing".to_string(),
+    };
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 120, 28));
+
+    DetailPane {
+        data: DetailData {
+            root: None,
+            temporary_browse: None,
+            persisted_browse_dir: None,
+            summary: None,
+            selection: None,
+            file: None,
+            content: None,
+            selected_paths: &selected_paths,
+            plan: None,
+            collection: None,
+            transfer_progress: None,
+            import_progress: Some(&progress),
+        },
+    }
+    .render(buffer.area, &mut buffer);
+
+    let text = buffer
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("Import: fast stat indexing"));
+    assert!(text.contains("Import files: 42 processed | 7 queued"));
+    assert!(text.contains("Import dirs: 5 processed | 2 queued"));
+    assert!(text.contains("Import current: photos/foo.png"));
 }
 
 #[test]
@@ -1156,6 +1201,7 @@ fn app_screen_renders_empty_state_widgets() {
         events: &[],
         root_count: 0,
         transfer_progress: None,
+        import_progress: None,
         detail_file_offset: 0,
     }
     .render(buffer.area, &mut buffer);

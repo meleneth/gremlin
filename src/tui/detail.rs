@@ -97,11 +97,36 @@ impl Widget for DetailPane<'_> {
             }
             None => lines.push(Line::from("Transfer: -")),
         }
+        if let Some(progress) = data.import_progress {
+            lines.extend(import_progress_lines(progress));
+        }
         Paragraph::new(lines)
             .style(theme::panel_dark())
             .block(panel_block("Details", false))
             .render(area, buf);
     }
+}
+
+fn import_progress_lines(progress: &ImportProgress) -> Vec<Line<'static>> {
+    vec![
+        Line::from(format!(
+            "Import: {} | {}",
+            progress.phase,
+            truncate(&progress.root_path, 48)
+        )),
+        Line::from(format!(
+            "Import files: {} processed | {} queued",
+            progress.files_imported, progress.files_queued
+        )),
+        Line::from(format!(
+            "Import dirs: {} processed | {} queued",
+            progress.directories_processed, progress.directories_queued
+        )),
+        Line::from(format!(
+            "Import current: {}",
+            progress.current_path.as_deref().unwrap_or("-")
+        )),
+    ]
 }
 
 fn detail_text_lines(text: String) -> Vec<Line<'static>> {

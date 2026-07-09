@@ -13,6 +13,7 @@ pub(super) struct AppScreen<'a> {
     pub(super) events: &'a [db::JobEventRow],
     pub(super) root_count: usize,
     pub(super) transfer_progress: Option<TransferProgressSnapshot>,
+    pub(super) import_progress: Option<&'a ImportProgress>,
     pub(super) detail_file_offset: usize,
 }
 
@@ -76,6 +77,7 @@ impl Widget for AppScreen<'_> {
                 plan: self.state.last_plan.as_ref(),
                 collection: self.state.collection_result.as_ref(),
                 transfer_progress: self.transfer_progress,
+                import_progress: self.import_progress,
             },
         }
         .render(lower[0], buf);
