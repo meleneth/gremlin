@@ -124,8 +124,12 @@ pub(super) fn handle_temporary_import_choice(
         "importing {remote_path} ({})",
         import_mode_label(mode)
     ));
+    let progress_tx = job_tx.clone();
+    let progress: ImportProgressCallback = Arc::new(move |progress| {
+        let _ = progress_tx.send(TuiMessage::ImportProgress(progress));
+    });
     task::spawn_blocking(move || {
-        let status = match provider(mode, &remote_path) {
+        let status = match provider(mode, &remote_path, progress) {
             Ok(result) => format!(
                 "imported {} as root {} ({}, {} files)",
                 result.root_path,

@@ -21,6 +21,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use targets::{ParsedTarget, TargetKind};
 
 #[tokio::main]
@@ -1021,8 +1022,8 @@ fn ssh_import_provider(
     machine_id: String,
     db_path: PathBuf,
 ) -> tui::ImportProvider {
-    Arc::new(move |mode, remote_path| {
-        import_ssh_root(&db_path, &parsed, &machine_id, remote_path, mode)
+    Arc::new(move |mode, remote_path, progress| {
+        import_ssh_root(&db_path, &parsed, &machine_id, remote_path, mode, progress)
     })
 }
 
@@ -1041,6 +1042,7 @@ fn import_ssh_root(
     machine_id: &str,
     remote_path: &str,
     mode: tui::ImportMode,
+    progress: tui::ImportProgressCallback,
 ) -> anyhow::Result<tui::ImportResult> {
     let conn = db::open_existing(db_path)?;
     let host = parsed
@@ -1052,9 +1054,15 @@ fn import_ssh_root(
     let root_id = db::ensure_root(&conn, machine_id, &root_path)?;
     let files_imported = match mode {
         tui::ImportMode::No => 0,
-        tui::ImportMode::Fast => {
-            import_ssh_fast_stat(&conn, parsed, machine_id, &root_id, &execution_path)?
-        }
+        tui::ImportMode::Fast => import_ssh_fast_stat(
+            &conn,
+            parsed,
+            machine_id,
+            &root_id,
+            &root_path,
+            &execution_path,
+            &progress,
+        )?,
         tui::ImportMode::Hash => import_ssh_native_hash(
             &conn,
             parsed,
@@ -1062,6 +1070,7 @@ fn import_ssh_root(
             &root_id,
             &execution_path,
             &root_path,
+            &progress,
         )?,
     };
     Ok(tui::ImportResult {
@@ -1118,10 +1127,13 @@ fn import_ssh_fast_stat(
     parsed: &ParsedTarget,
     machine_id: &str,
     root_id: &str,
+    root_path: &str,
     remote_path: &str,
+    progress: &tui::ImportProgressCallback,
 ) -> anyhow::Result<u64> {
     let entries = fast_scan_ssh_tree(parsed, remote_path)?;
-    for entry in &entries {
+    let mut reporter = ImportProgressReporter::new(progress, root_id, root_path);
+    for (idx, entry) in entries.iter().enumerate() {
         db::insert_path_observation(
             conn,
             db::PathObservationInput {
@@ -1135,7 +1147,9 @@ fn import_ssh_fast_stat(
                 content_id: None,
             },
         )?;
+        reporter.record(idx as u64 + 1);
     }
+    reporter.finish(entries.len() as u64);
     Ok(entries.len() as u64)
 }
 
@@ -1156,6 +1170,7 @@ fn import_ssh_native_hash(
     root_id: &str,
     remote_path: &str,
     root_path: &str,
+    progress: &tui::ImportProgressCallback,
 ) -> anyhow::Result<u64> {
     let host = parsed
         .machine_hint
@@ -1169,7 +1184,8 @@ fn import_ssh_native_hash(
         None,
     )?;
     db::attach_checksum_collection_target(conn, &collection_id, machine_id, root_id)?;
-    for entry in &entries {
+    let mut reporter = ImportProgressReporter::new(progress, root_id, root_path);
+    for (idx, entry) in entries.iter().enumerate() {
         db::insert_checksum_entry(
             conn,
             db::ChecksumEntryInput {
@@ -1200,8 +1216,57 @@ fn import_ssh_native_hash(
                 content_id: Some(&content_id),
             },
         )?;
+        reporter.record(idx as u64 + 1);
     }
+    reporter.finish(entries.len() as u64);
     Ok(entries.len() as u64)
+}
+
+struct ImportProgressReporter<'a> {
+    callback: &'a tui::ImportProgressCallback,
+    root_id: &'a str,
+    root_path: &'a str,
+    last_emit: Instant,
+    dirty: bool,
+}
+
+impl<'a> ImportProgressReporter<'a> {
+    fn new(
+        callback: &'a tui::ImportProgressCallback,
+        root_id: &'a str,
+        root_path: &'a str,
+    ) -> Self {
+        Self {
+            callback,
+            root_id,
+            root_path,
+            last_emit: Instant::now() - Duration::from_millis(250),
+            dirty: false,
+        }
+    }
+
+    fn record(&mut self, files_imported: u64) {
+        self.dirty = true;
+        if self.last_emit.elapsed() >= Duration::from_millis(250) {
+            self.emit(files_imported);
+        }
+    }
+
+    fn finish(&mut self, files_imported: u64) {
+        if self.dirty {
+            self.emit(files_imported);
+        }
+    }
+
+    fn emit(&mut self, files_imported: u64) {
+        (self.callback)(tui::ImportProgress {
+            root_id: self.root_id.to_string(),
+            root_path: self.root_path.to_string(),
+            files_imported,
+        });
+        self.last_emit = Instant::now();
+        self.dirty = false;
+    }
 }
 
 fn native_hash_ssh_tree(host: &str, remote_path: &str) -> anyhow::Result<Vec<RemoteHashEntry>> {

@@ -51,6 +51,7 @@ struct AppState {
     pending_scoped_job: Option<PendingScopedJob>,
     active_background_jobs: usize,
     active_job_ids: BTreeSet<String>,
+    active_import_root_id: Option<String>,
     transfer_error_activity_keys: BTreeSet<String>,
     transfer_error_count_by_job: BTreeMap<String, i64>,
     resumable_transfer_plans: Vec<db::TransferPlanRow>,
@@ -165,8 +166,13 @@ struct ActivityMessage {
 
 pub type BrowseProvider =
     Arc<dyn Fn(&str) -> anyhow::Result<Vec<InitialBrowseEntry>> + Send + Sync + 'static>;
-pub type ImportProvider =
-    Arc<dyn Fn(ImportMode, &str) -> anyhow::Result<ImportResult> + Send + Sync + 'static>;
+pub type ImportProgressCallback = Arc<dyn Fn(ImportProgress) + Send + Sync + 'static>;
+pub type ImportProvider = Arc<
+    dyn Fn(ImportMode, &str, ImportProgressCallback) -> anyhow::Result<ImportResult>
+        + Send
+        + Sync
+        + 'static,
+>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportMode {
@@ -178,6 +184,13 @@ pub enum ImportMode {
 #[derive(Debug, Clone)]
 pub struct ImportResult {
     pub mode: ImportMode,
+    pub root_id: String,
+    pub root_path: String,
+    pub files_imported: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportProgress {
     pub root_id: String,
     pub root_path: String,
     pub files_imported: u64,
@@ -394,6 +407,7 @@ enum TuiMessage {
         status: String,
     },
     ImportFinished(String),
+    ImportProgress(ImportProgress),
     TemporaryTransferSourceImported {
         root_id: String,
         selected_relative_path: Option<String>,

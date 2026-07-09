@@ -80,7 +80,7 @@ fn temporary_import_prompt_targets_selected_file() {
                 modified_at: None,
             }],
             browse_provider: None,
-            import_provider: Some(Arc::new(|_, _| unreachable!())),
+            import_provider: Some(Arc::new(|_, _, _| unreachable!())),
         }),
         ..AppState::default()
     };
@@ -107,7 +107,7 @@ fn temporary_import_prompt_defaults_to_current_directory() {
             current_path: "~/photos".to_string(),
             entries: Vec::new(),
             browse_provider: None,
-            import_provider: Some(Arc::new(|_, _| unreachable!())),
+            import_provider: Some(Arc::new(|_, _, _| unreachable!())),
         }),
         ..AppState::default()
     };
@@ -119,6 +119,37 @@ fn temporary_import_prompt_defaults_to_current_directory() {
         "~/photos"
     );
     assert!(state.status.contains("remote directory ~/photos"));
+}
+
+#[test]
+fn active_import_root_selection_accounts_for_temporary_browse_row() {
+    let roots = vec![db::RootRow {
+        id: "root_imported".to_string(),
+        machine_id: "machine_1".to_string(),
+        path: "/tmp/imported".to_string(),
+        label: None,
+        current_size_bytes: 0,
+        latest_job_kind: None,
+        latest_job_status: None,
+        latest_job_phase: None,
+    }];
+    let mut state = AppState {
+        active_import_root_id: Some("root_imported".to_string()),
+        temporary_browse: Some(TemporaryBrowse {
+            label: "nas01:".to_string(),
+            machine_id: "machine_remote".to_string(),
+            root_path: "~".to_string(),
+            current_path: "~/photos".to_string(),
+            entries: Vec::new(),
+            browse_provider: None,
+            import_provider: None,
+        }),
+        ..AppState::default()
+    };
+
+    app::select_active_import_root(&mut state, &roots);
+
+    assert_eq!(state.selected_root, 1);
 }
 
 #[test]

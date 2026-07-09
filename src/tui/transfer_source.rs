@@ -33,8 +33,12 @@ pub(super) fn start_temporary_transfer_source_import(
         "importing transfer source {} (fast)",
         target.remote_path
     ));
+    let progress_tx = job_tx.clone();
+    let progress: ImportProgressCallback = Arc::new(move |progress| {
+        let _ = progress_tx.send(TuiMessage::ImportProgress(progress));
+    });
     task::spawn_blocking(move || {
-        let message = match provider(ImportMode::Fast, &target.remote_path) {
+        let message = match provider(ImportMode::Fast, &target.remote_path, progress) {
             Ok(result) => {
                 if result.files_imported == 0 {
                     TuiMessage::Status(format!(

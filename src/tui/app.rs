@@ -118,12 +118,20 @@ pub(super) async fn run_loop(
                     start_next_queued_transfer(conn, db_path, job_tx.clone(), &mut state)?;
                 }
                 TuiMessage::ImportFinished(status) => {
+                    state.active_import_root_id = None;
                     let level = if status.contains("failed") {
                         ActivityLevel::Error
                     } else {
                         ActivityLevel::Success
                     };
                     state.background_finished(level, status);
+                }
+                TuiMessage::ImportProgress(progress) => {
+                    state.active_import_root_id = Some(progress.root_id.clone());
+                    state.status = format!(
+                        "importing {}: {} files indexed",
+                        progress.root_path, progress.files_imported
+                    );
                 }
                 TuiMessage::TemporaryTransferSourceImported {
                     root_id,
@@ -144,6 +152,7 @@ pub(super) async fn run_loop(
             }
         }
         let roots = db::roots(conn)?;
+        select_active_import_root(&mut state, &roots);
         state.resumable_transfer_plans = resumable_transfer_plans(conn)?;
         let root_count = visible_root_count(&state, roots.len());
         normalize_selection(&mut state, root_count);
@@ -491,6 +500,15 @@ fn selected_file_content(
         return Ok(None);
     };
     Ok(db::content_object_by_id(conn, content_id)?)
+}
+
+pub(super) fn select_active_import_root(state: &mut AppState, roots: &[db::RootRow]) {
+    let Some(root_id) = state.active_import_root_id.as_deref() else {
+        return;
+    };
+    if let Some(idx) = roots.iter().position(|root| root.id == root_id) {
+        state.selected_root = visible_index_for_persisted(state, idx);
+    }
 }
 
 fn append_transfer_error_activities(
