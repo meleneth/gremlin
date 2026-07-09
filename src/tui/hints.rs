@@ -28,7 +28,7 @@ pub(super) fn command_hint_lines(
         Line::from(vec![
             Span::styled("Global  ", theme::header()),
             Span::styled(
-                "q quit  Tab focus  arrows move  c cancel job",
+                "q quit  Ctrl-O open root  Tab focus  arrows move  c cancel job",
                 theme::muted(),
             ),
         ]),
@@ -51,6 +51,7 @@ fn command_hint_needs_attention(state: &AppState) -> bool {
         || state.retarget_draft.is_some()
         || state.pending_delete_root_id.is_some()
         || state.pending_import.is_some()
+        || state.pending_open_root.is_some()
         || state.pending_scoped_job.is_some()
         || state.transfer_source_root_id.is_some()
 }
@@ -67,6 +68,9 @@ pub(super) fn active_command_hint(state: &AppState, has_temporary_browse: bool) 
     }
     if state.pending_import.is_some() {
         return "n root only  f fast stat import  h SHA-256 hash import  Esc cancel";
+    }
+    if state.pending_open_root.is_some() {
+        return "type local path, file:// path, or host:/path  Enter open  Esc cancel";
     }
     if state.pending_scoped_job.is_some() {
         return "a all files in root  m marked paths only  Esc cancel";

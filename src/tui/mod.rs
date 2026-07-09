@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -48,6 +49,7 @@ struct AppState {
     retarget_draft: Option<RetargetDraft>,
     pending_delete_root_id: Option<String>,
     pending_import: Option<PendingTemporaryImport>,
+    pending_open_root: Option<OpenRootDraft>,
     pending_scoped_job: Option<PendingScopedJob>,
     active_background_jobs: usize,
     active_job_ids: BTreeSet<String>,
@@ -173,6 +175,8 @@ pub type ImportProvider = Arc<
         + Sync
         + 'static,
 >;
+pub type OpenRootProvider =
+    Arc<dyn Fn(&str) -> anyhow::Result<OpenRootResult> + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImportMode {
@@ -194,6 +198,23 @@ pub struct ImportProgress {
     pub root_id: String,
     pub root_path: String,
     pub files_imported: u64,
+}
+
+#[derive(Clone)]
+pub struct OpenRootResult {
+    pub initial_browse: Option<InitialBrowse>,
+    pub selected_root_id: Option<String>,
+    pub status: String,
+}
+
+impl fmt::Debug for OpenRootResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenRootResult")
+            .field("has_initial_browse", &self.initial_browse.is_some())
+            .field("selected_root_id", &self.selected_root_id)
+            .field("status", &self.status)
+            .finish()
+    }
 }
 
 #[derive(Clone)]
@@ -408,6 +429,7 @@ enum TuiMessage {
     },
     ImportFinished(String),
     ImportProgress(ImportProgress),
+    OpenRootFinished(Result<OpenRootResult, String>),
     TemporaryTransferSourceImported {
         root_id: String,
         selected_relative_path: Option<String>,
@@ -462,6 +484,11 @@ struct RetargetDraft {
 #[derive(Debug, Clone)]
 struct PendingTemporaryImport {
     remote_path: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct OpenRootDraft {
+    input: String,
 }
 
 #[derive(Debug, Clone)]

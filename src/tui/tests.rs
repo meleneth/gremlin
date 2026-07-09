@@ -168,6 +168,19 @@ fn command_hints_prioritize_modal_prompts() {
 }
 
 #[test]
+fn command_hints_explain_open_root_prompt() {
+    let state = AppState {
+        pending_open_root: Some(OpenRootDraft::default()),
+        ..AppState::default()
+    };
+
+    assert_eq!(
+        active_command_hint(&state, false),
+        "type local path, file:// path, or host:/path  Enter open  Esc cancel"
+    );
+}
+
+#[test]
 fn ctrl_c_and_ctrl_d_are_interrupt_keys() {
     assert!(is_interrupt_key(KeyEvent::new(
         KeyCode::Char('c'),

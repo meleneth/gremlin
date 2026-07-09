@@ -3,8 +3,9 @@ pub async fn run_with_options(
     conn: &Connection,
     db_path: &Path,
     machine_label: Option<String>,
+    open_root_provider: OpenRootProvider,
 ) -> anyhow::Result<()> {
-    run_with_initial_browse(conn, db_path, machine_label, None).await
+    run_with_initial_browse(conn, db_path, machine_label, None, open_root_provider).await
 }
 
 pub async fn run_with_initial_browse(
@@ -12,6 +13,7 @@ pub async fn run_with_initial_browse(
     db_path: &Path,
     machine_label: Option<String>,
     initial_browse: Option<InitialBrowse>,
+    open_root_provider: OpenRootProvider,
 ) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -19,7 +21,15 @@ pub async fn run_with_initial_browse(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(conn, db_path, &mut terminal, machine_label, initial_browse).await;
+    let result = run_loop(
+        conn,
+        db_path,
+        &mut terminal,
+        machine_label,
+        initial_browse,
+        open_root_provider,
+    )
+    .await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -42,6 +52,7 @@ pub(super) async fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     _machine_label: Option<String>,
     initial_browse: Option<InitialBrowse>,
+    open_root_provider: OpenRootProvider,
 ) -> anyhow::Result<TuiExit> {
     let (job_tx, mut job_rx) = mpsc::unbounded_channel::<TuiMessage>();
     let mut state = AppState {
@@ -133,6 +144,31 @@ pub(super) async fn run_loop(
                         progress.root_path, progress.files_imported
                     );
                 }
+                TuiMessage::OpenRootFinished(result) => match result {
+                    Ok(result) => {
+                        state.active_background_jobs =
+                            state.active_background_jobs.saturating_sub(1);
+                        if let Some(browse) = result.initial_browse {
+                            state.temporary_browse = Some(TemporaryBrowse::from(browse));
+                            state.selected_root = 0;
+                            state.focus = FocusPane::Files;
+                            state.file_offset = 0;
+                        }
+                        if let Some(root_id) = result.selected_root_id {
+                            state.active_import_root_id = Some(root_id);
+                            state.temporary_browse = None;
+                            state.focus = FocusPane::Files;
+                            state.file_offset = 0;
+                        }
+                        state.set_status(ActivityLevel::Success, result.status);
+                    }
+                    Err(err) => {
+                        state.background_finished(
+                            ActivityLevel::Error,
+                            format!("open root failed: {err}"),
+                        );
+                    }
+                },
                 TuiMessage::TemporaryTransferSourceImported {
                     root_id,
                     selected_relative_path,
@@ -153,6 +189,9 @@ pub(super) async fn run_loop(
         }
         let roots = db::roots(conn)?;
         select_active_import_root(&mut state, &roots);
+        if state.active_background_jobs == 0 {
+            state.active_import_root_id = None;
+        }
         state.resumable_transfer_plans = resumable_transfer_plans(conn)?;
         let root_count = visible_root_count(&state, roots.len());
         normalize_selection(&mut state, root_count);
@@ -262,6 +301,15 @@ pub(super) async fn run_loop(
                     handle_temporary_import_choice(&mut state, key.code, job_tx.clone());
                     continue;
                 }
+                if state.pending_open_root.is_some() {
+                    handle_open_root_input(
+                        &mut state,
+                        key.code,
+                        open_root_provider.clone(),
+                        job_tx.clone(),
+                    );
+                    continue;
+                }
                 if state.pending_scoped_job.is_some() {
                     handle_scoped_job_choice(
                         conn,
@@ -289,6 +337,9 @@ pub(super) async fn run_loop(
                         break;
                     }
                     KeyCode::Tab => state.focus = state.focus.next(),
+                    KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        start_open_root_prompt(&mut state);
+                    }
                     KeyCode::Char('/') if state.focus == FocusPane::Files => {
                         state.file_filter_editing = true;
                         state.status = if state.file_filter.is_empty() {
@@ -490,6 +541,54 @@ pub(super) async fn run_loop(
         }
     }
     Ok(TuiExit::Normal)
+}
+
+fn start_open_root_prompt(state: &mut AppState) {
+    state.pending_open_root = Some(OpenRootDraft::default());
+    state.status = "open root: enter local path, file:// path, or host:/path".to_string();
+}
+
+fn handle_open_root_input(
+    state: &mut AppState,
+    key: KeyCode,
+    provider: OpenRootProvider,
+    job_tx: mpsc::UnboundedSender<TuiMessage>,
+) {
+    let Some(draft) = state.pending_open_root.as_mut() else {
+        return;
+    };
+    match key {
+        KeyCode::Enter => {
+            let target = draft.input.trim().to_string();
+            state.pending_open_root = None;
+            if target.is_empty() {
+                state.status = "open root canceled: no location entered".to_string();
+                return;
+            }
+            state.background_started(format!("opening root {target}"));
+            task::spawn_blocking(move || {
+                let result = provider(&target).map_err(|err| err.to_string());
+                let _ = job_tx.send(TuiMessage::OpenRootFinished(result));
+            });
+        }
+        KeyCode::Esc => {
+            state.pending_open_root = None;
+            state.status = "open root canceled".to_string();
+        }
+        KeyCode::Backspace => {
+            draft.input.pop();
+            state.status = if draft.input.is_empty() {
+                "open root: enter local path, file:// path, or host:/path".to_string()
+            } else {
+                format!("open root: {}", draft.input)
+            };
+        }
+        KeyCode::Char(ch) if !ch.is_control() => {
+            draft.input.push(ch);
+            state.status = format!("open root: {}", draft.input);
+        }
+        _ => {}
+    }
 }
 
 fn selected_file_content(

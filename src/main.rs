@@ -45,7 +45,8 @@ async fn main() -> anyhow::Result<()> {
                 let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
                 let conn = db::open_or_create(&db)?;
                 db::init_schema(&conn)?;
-                tui::run_with_options(&conn, &db, machine_label).await?;
+                let open_root_provider = open_root_provider(db.clone(), machine_label.clone());
+                tui::run_with_options(&conn, &db, machine_label, open_root_provider).await?;
                 return Ok(());
             };
             let default_target = run_default_target(
@@ -58,11 +59,14 @@ async fn main() -> anyhow::Result<()> {
             )?;
             if !cli.no_tui {
                 let conn = db::open_existing(&default_target.db_path)?;
+                let open_root_provider =
+                    open_root_provider(default_target.db_path.clone(), machine_label.clone());
                 tui::run_with_initial_browse(
                     &conn,
                     &default_target.db_path,
                     machine_label,
                     default_target.initial_browse,
+                    open_root_provider,
                 )
                 .await?;
             }
@@ -522,11 +526,75 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Tui) => {
             let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
             let conn = db::open_existing(&db)?;
-            tui::run_with_options(&conn, &db, machine_label).await?;
+            let open_root_provider = open_root_provider(db.clone(), machine_label.clone());
+            tui::run_with_options(&conn, &db, machine_label, open_root_provider).await?;
         }
     }
 
     Ok(())
+}
+
+fn open_root_provider(db_path: PathBuf, machine_label: Option<String>) -> tui::OpenRootProvider {
+    Arc::new(move |target| open_root_location(&db_path, machine_label.as_deref(), target))
+}
+
+fn open_root_location(
+    db_path: &std::path::Path,
+    machine_label: Option<&str>,
+    target: &str,
+) -> anyhow::Result<tui::OpenRootResult> {
+    let conn = db::open_or_create(db_path)?;
+    db::init_schema(&conn)?;
+    let parsed = targets::parse_target(target, None)?;
+    let (machine_id, root_path) = resolve_target_identity(&conn, &parsed, machine_label)?;
+    match parsed.kind {
+        TargetKind::LocalPath | TargetKind::FileUrl => {
+            let local_path = parsed
+                .local_path()
+                .ok_or_else(|| anyhow::anyhow!("target is not local file-like"))?;
+            let summary = fswork::scan_to_db(
+                &conn,
+                &local_path,
+                db_path,
+                machine_label,
+                fswork::OutputOptions {
+                    quiet: true,
+                    ..fswork::OutputOptions::default()
+                },
+            )?;
+            let root_id = db::ensure_root(&conn, &machine_id, &root_path)?;
+            Ok(tui::OpenRootResult {
+                initial_browse: None,
+                selected_root_id: Some(root_id),
+                status: format!(
+                    "opened {}: fast scanned {} files",
+                    root_path, summary.files_seen
+                ),
+            })
+        }
+        TargetKind::Ssh => {
+            let browse_provider = ssh_browse_provider(parsed.clone());
+            let import_provider =
+                ssh_import_provider(parsed.clone(), machine_id.clone(), db_path.to_path_buf());
+            let entries = fast_scan_ssh_directory(&parsed, &root_path)?;
+            Ok(tui::OpenRootResult {
+                initial_browse: Some(tui::InitialBrowse {
+                    label: parsed.original.clone(),
+                    machine_id,
+                    root_path: root_path.clone(),
+                    current_path: root_path.clone(),
+                    entries: entries.iter().map(tui_entry_from_fast).collect(),
+                    browse_provider: Some(browse_provider),
+                    import_provider: Some(import_provider),
+                }),
+                selected_root_id: None,
+                status: format!("opened temporary SSH browse root {}", parsed.original),
+            })
+        }
+        TargetKind::Url => {
+            anyhow::bail!("URL browsing is not implemented yet");
+        }
+    }
 }
 
 fn resolve_registered_root(
