@@ -235,6 +235,10 @@ pub(super) async fn run_loop(
             Some(root_id) => db::recent_jobs_and_events_for_root(conn, root_id, 300)?,
             None => db::recent_jobs_and_events(conn, 100)?,
         };
+        let job_rows = job_rows(&events);
+        if state.event_offset >= job_rows.len() {
+            state.event_offset = job_rows.len().saturating_sub(1);
+        }
         append_visible_transfer_error_activities(&events, &mut state);
         let summary = match selected {
             Some(root) => Some(db::root_summary(conn, &root.id)?),
@@ -265,7 +269,7 @@ pub(super) async fn run_loop(
                     summary: summary.as_ref(),
                     selection: selection_summary.as_ref(),
                     detail_content: detail_content.as_ref(),
-                    events: &events,
+                    events: &job_rows,
                     root_count,
                     transfer_progress,
                     detail_file_offset: state.detail_file_offset,
@@ -366,7 +370,7 @@ pub(super) async fn run_loop(
                             root_count,
                             files.len(),
                             plan_count,
-                            events.len(),
+                            job_rows.len(),
                         );
                     }
                     KeyCode::Up => move_up(&mut state),
@@ -384,7 +388,7 @@ pub(super) async fn run_loop(
                             root_count,
                             files.len(),
                             plan_count,
-                            events.len(),
+                            job_rows.len(),
                             visible_file_page_len(terminal.size()?.height),
                         );
                     }
@@ -425,7 +429,11 @@ pub(super) async fn run_loop(
                         )?;
                     }
                     KeyCode::Char('c') => {
-                        request_selected_cancel(conn, events.get(state.event_offset), &mut state)?;
+                        request_selected_cancel(
+                            conn,
+                            job_rows.get(state.event_offset),
+                            &mut state,
+                        )?;
                     }
                     KeyCode::Char('t') => {
                         if selected_temporary_browse(&state).is_some() {

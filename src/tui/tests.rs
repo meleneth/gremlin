@@ -914,6 +914,43 @@ fn finds_latest_transfer_progress_event() {
 }
 
 #[test]
+fn job_rows_keep_one_latest_row_per_job() {
+    let latest = db::JobEventRow {
+        job_id: "job_1".to_string(),
+        job_kind: "transfer_copy".to_string(),
+        status: "running".to_string(),
+        phase: Some("copying".to_string()),
+        current_path: Some("b.bin".to_string()),
+        files_seen: 2,
+        files_done: 1,
+        files_skipped: 0,
+        errors: 0,
+        cancel_requested: false,
+        sequence: 2,
+        event_kind: "job_progress".to_string(),
+        payload_json: "{}".to_string(),
+        params_json: None,
+    };
+    let older = db::JobEventRow {
+        sequence: 1,
+        current_path: Some("a.bin".to_string()),
+        ..latest.clone()
+    };
+    let other_job = db::JobEventRow {
+        job_id: "job_2".to_string(),
+        sequence: 1,
+        ..latest.clone()
+    };
+
+    let rows = job_rows(&[latest, older, other_job]);
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].job_id, "job_1");
+    assert_eq!(rows[0].current_path.as_deref(), Some("b.bin"));
+    assert_eq!(rows[1].job_id, "job_2");
+}
+
+#[test]
 fn activity_rows_show_transfer_direction() {
     let row = db::JobEventRow {
         job_id: "job_transfer_1".to_string(),

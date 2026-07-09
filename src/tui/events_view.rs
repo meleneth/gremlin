@@ -6,8 +6,9 @@ pub(super) struct EventsPane<'a> {
 
 impl Widget for EventsPane<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let visible = self.events.iter().enumerate().skip(self.state.event_offset);
-        let items = if self.events.is_empty() {
+        let jobs = job_rows(self.events);
+        let visible = jobs.iter().enumerate().skip(self.state.event_offset);
+        let items = if jobs.is_empty() {
             vec![ListItem::new("No activity for this root yet")]
         } else {
             let mut rows = vec![ListItem::new(event_header()).style(theme::header())];
@@ -31,6 +32,15 @@ impl Widget for EventsPane<'_> {
             .block(focus_block("Jobs", FocusPane::Events, self.state.focus))
             .render(area, buf);
     }
+}
+
+pub(super) fn job_rows(events: &[db::JobEventRow]) -> Vec<db::JobEventRow> {
+    let mut seen = BTreeSet::new();
+    events
+        .iter()
+        .filter(|row| seen.insert(row.job_id.clone()))
+        .cloned()
+        .collect()
 }
 
 pub(super) fn event_header() -> String {

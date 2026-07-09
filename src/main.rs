@@ -547,6 +547,13 @@ fn open_root_location(
     db::init_schema(&conn)?;
     let parsed = targets::parse_target(target, None)?;
     let (machine_id, root_path) = resolve_target_identity(&conn, &parsed, machine_label)?;
+    if let Some(root) = db::find_root_by_machine_path(&conn, &machine_id, &root_path)? {
+        return Ok(tui::OpenRootResult {
+            initial_browse: None,
+            selected_root_id: Some(root.id),
+            status: format!("opened existing root {}", root_path),
+        });
+    }
     match parsed.kind {
         TargetKind::LocalPath | TargetKind::FileUrl => {
             let local_path = parsed
@@ -1640,6 +1647,26 @@ mod tests {
         assert!(!is_yes(""));
         assert!(!is_yes("n"));
         assert!(!is_yes("sure"));
+    }
+
+    #[test]
+    fn open_root_location_selects_existing_local_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("gremlin.db");
+        let root_dir = dir.path().join("root");
+        std::fs::create_dir(&root_dir).unwrap();
+        let conn = db::open_or_create(&db_path).unwrap();
+        db::init_schema(&conn).unwrap();
+        let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+        let root_path = util::lossy(&util::absolute_path(&root_dir).unwrap());
+        let root_id = db::ensure_root(&conn, &machine_id, &root_path).unwrap();
+        drop(conn);
+
+        let result = open_root_location(&db_path, None, &root_dir.to_string_lossy()).unwrap();
+
+        assert_eq!(result.selected_root_id.as_deref(), Some(root_id.as_str()));
+        assert!(result.initial_browse.is_none());
+        assert!(result.status.contains("opened existing root"));
     }
 
     #[test]
