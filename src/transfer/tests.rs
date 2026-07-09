@@ -315,6 +315,14 @@ fn runs_copy_entries_and_updates_destination_projection() {
 }
 
 #[test]
+fn parses_gnu_find_printf_timestamp_for_mtime_preservation() {
+    let time = file_time_from_rfc3339("2026-07-08+12:34:56.1234567890").unwrap();
+
+    assert_eq!(time.unix_seconds(), 1_783_514_096);
+    assert_eq!(time.nanoseconds(), 123_456_789);
+}
+
+#[test]
 fn copy_entries_preserve_source_relative_subdirectories() {
     let source_dir = tempfile::tempdir().unwrap();
     let dest_dir = tempfile::tempdir().unwrap();

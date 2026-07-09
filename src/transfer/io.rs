@@ -100,11 +100,40 @@ pub(super) fn set_remote_file_mtime(
 
 pub(super) fn file_time_from_rfc3339(value: &str) -> anyhow::Result<FileTime> {
     let dt = DateTime::parse_from_rfc3339(value)
-        .with_context(|| format!("invalid RFC3339 timestamp: {value}"))?;
+        .or_else(|_| parse_find_printf_timestamp(value))
+        .with_context(|| format!("invalid RFC3339 or find %T+ timestamp: {value}"))?;
     Ok(FileTime::from_unix_time(
         dt.timestamp(),
         dt.timestamp_subsec_nanos(),
     ))
+}
+
+fn parse_find_printf_timestamp(
+    value: &str,
+) -> Result<DateTime<chrono::FixedOffset>, chrono::ParseError> {
+    let normalized = normalize_find_printf_timestamp(value);
+    DateTime::parse_from_rfc3339(&normalized)
+}
+
+fn normalize_find_printf_timestamp(value: &str) -> String {
+    let Some((date, time)) = value.split_once('+') else {
+        return value.to_string();
+    };
+    if time.ends_with('Z') || time.contains('+') || time.rsplit_once('-').is_some() {
+        return value.to_string();
+    }
+    let (time, fraction) = time
+        .split_once('.')
+        .map(|(time, fraction)| {
+            let nanos = fraction.chars().take(9).collect::<String>();
+            let nanos = format!("{nanos:0<9}");
+            (time, Some(nanos))
+        })
+        .unwrap_or((time, None));
+    match fraction {
+        Some(fraction) => format!("{date}T{time}.{fraction}Z"),
+        None => format!("{date}T{time}Z"),
+    }
 }
 
 pub(super) fn hash_stream_to_writer(
