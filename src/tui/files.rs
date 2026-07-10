@@ -108,7 +108,7 @@ pub(super) fn file_header(view: FileView) -> String {
 }
 
 pub(super) fn file_row(marker: &str, selected: bool, file: &FileViewRow, view: FileView) -> String {
-    let hash = file.content_id.as_deref().map(short_id).unwrap_or("stat");
+    let hash = file_hash_label(file);
     let modified = file.modified_at.as_deref().unwrap_or("-");
     let evidence = file_evidence_label(file, selected);
     let occurrences = file_occurrence_label(file);
@@ -190,6 +190,14 @@ fn file_evidence_label(file: &FileViewRow, selected: bool) -> String {
         FileIndexState::Indexed if file.content_id.is_some() => "◆".to_string(),
         FileIndexState::Indexed => "◌".to_string(),
     }
+}
+
+fn file_hash_label(file: &FileViewRow) -> &str {
+    file.sha256
+        .as_deref()
+        .or(file.content_id.as_deref())
+        .map(short_id)
+        .unwrap_or("stat")
 }
 
 fn file_occurrence_label(file: &FileViewRow) -> String {

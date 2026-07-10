@@ -282,6 +282,7 @@ struct FileViewRow {
     size_bytes: i64,
     modified_at: Option<String>,
     content_id: Option<String>,
+    sha256: Option<String>,
     status: String,
     kind: FileKind,
     occurrence_count: Option<i64>,
@@ -309,6 +310,7 @@ impl From<&db::FileRow> for FileViewRow {
             size_bytes: value.size_bytes,
             modified_at: value.modified_at.clone(),
             content_id: value.content_id.clone(),
+            sha256: value.sha256.clone(),
             status: value.status.clone(),
             kind: FileKind::File,
             occurrence_count: None,
@@ -329,6 +331,7 @@ impl FileViewRow {
             size_bytes: entry.size_bytes,
             modified_at: entry.modified_at.clone(),
             content_id: entry.content_id.clone(),
+            sha256: entry.sha256.clone(),
             status: entry.status.clone().unwrap_or_else(|| {
                 if kind == FileKind::Directory {
                     format!("dir:{}", entry.file_count)
@@ -353,6 +356,7 @@ impl FileViewRow {
             FileKind::File
         };
         let content_id = indexed.and_then(|entry| entry.content_id.clone());
+        let sha256 = indexed.and_then(|entry| entry.sha256.clone());
         let occurrence_count = indexed.and_then(|entry| entry.occurrence_count);
         let has_hash = content_id.is_some();
         let index_state = match indexed {
@@ -369,6 +373,7 @@ impl FileViewRow {
             size_bytes: entry.size_bytes as i64,
             modified_at: entry.modified_at.clone(),
             content_id,
+            sha256,
             status: if index_state == FileIndexState::RemoteChanged {
                 "changed".to_string()
             } else if kind == FileKind::Directory {
@@ -403,6 +408,7 @@ impl FileViewRow {
             size_bytes: entry.size_bytes,
             modified_at: entry.modified_at.clone(),
             content_id: entry.content_id.clone(),
+            sha256: entry.sha256.clone(),
             status: "missing".to_string(),
             kind,
             occurrence_count: entry.occurrence_count,

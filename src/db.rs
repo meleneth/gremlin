@@ -34,6 +34,7 @@ pub struct FileRow {
     pub size_bytes: i64,
     pub modified_at: Option<String>,
     pub content_id: Option<String>,
+    pub sha256: Option<String>,
     pub status: String,
 }
 
@@ -47,6 +48,7 @@ pub struct CachedDirectoryEntry {
     pub size_bytes: i64,
     pub modified_at: Option<String>,
     pub content_id: Option<String>,
+    pub sha256: Option<String>,
     pub status: Option<String>,
 }
 
@@ -1719,10 +1721,11 @@ fn files_under_directory(
     let like = format!("{}/%", escape_like_pattern(&prefix));
     let mut stmt = conn.prepare(
         r#"
-        SELECT relative_path, size_bytes, modified_at, content_id, status
-        FROM path_observations
-        WHERE root_id = ?1 AND relative_path LIKE ?2 ESCAPE '\'
-        ORDER BY relative_path ASC
+        SELECT p.relative_path, p.size_bytes, p.modified_at, p.content_id, c.sha256, p.status
+        FROM path_observations p
+        LEFT JOIN content_objects c ON c.id = p.content_id
+        WHERE p.root_id = ?1 AND p.relative_path LIKE ?2 ESCAPE '\'
+        ORDER BY p.relative_path ASC
         "#,
     )?;
     let rows = stmt.query_map(params![root_id, like], |row| {
@@ -1731,7 +1734,8 @@ fn files_under_directory(
             size_bytes: row.get(1)?,
             modified_at: row.get(2)?,
             content_id: row.get(3)?,
-            status: row.get(4)?,
+            sha256: row.get(4)?,
+            status: row.get(5)?,
         })
     })?;
     rows.collect()
@@ -2303,9 +2307,10 @@ pub fn recent_events(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Even
 pub fn recent_files(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<FileRow>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT relative_path, size_bytes, modified_at, content_id, status
-        FROM path_observations
-        ORDER BY last_seen_at DESC
+        SELECT p.relative_path, p.size_bytes, p.modified_at, p.content_id, c.sha256, p.status
+        FROM path_observations p
+        LEFT JOIN content_objects c ON c.id = p.content_id
+        ORDER BY p.last_seen_at DESC
         LIMIT ?1
         "#,
     )?;
@@ -2315,7 +2320,8 @@ pub fn recent_files(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<FileR
             size_bytes: row.get(1)?,
             modified_at: row.get(2)?,
             content_id: row.get(3)?,
-            status: row.get(4)?,
+            sha256: row.get(4)?,
+            status: row.get(5)?,
         })
     })?;
     rows.collect()
@@ -2328,10 +2334,11 @@ pub fn recent_files_for_root(
 ) -> rusqlite::Result<Vec<FileRow>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT relative_path, size_bytes, modified_at, content_id, status
-        FROM path_observations
-        WHERE root_id = ?1
-        ORDER BY last_seen_at DESC
+        SELECT p.relative_path, p.size_bytes, p.modified_at, p.content_id, c.sha256, p.status
+        FROM path_observations p
+        LEFT JOIN content_objects c ON c.id = p.content_id
+        WHERE p.root_id = ?1
+        ORDER BY p.last_seen_at DESC
         LIMIT ?2
         "#,
     )?;
@@ -2341,7 +2348,8 @@ pub fn recent_files_for_root(
             size_bytes: row.get(1)?,
             modified_at: row.get(2)?,
             content_id: row.get(3)?,
-            status: row.get(4)?,
+            sha256: row.get(4)?,
+            status: row.get(5)?,
         })
     })?;
     rows.collect()
@@ -2350,10 +2358,11 @@ pub fn recent_files_for_root(
 pub fn present_files_for_root(conn: &Connection, root_id: &str) -> rusqlite::Result<Vec<FileRow>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT relative_path, size_bytes, modified_at, content_id, status
-        FROM path_observations
-        WHERE root_id = ?1 AND status = 'present'
-        ORDER BY relative_path ASC
+        SELECT p.relative_path, p.size_bytes, p.modified_at, p.content_id, c.sha256, p.status
+        FROM path_observations p
+        LEFT JOIN content_objects c ON c.id = p.content_id
+        WHERE p.root_id = ?1 AND p.status = 'present'
+        ORDER BY p.relative_path ASC
         "#,
     )?;
     let rows = stmt.query_map(params![root_id], |row| {
@@ -2362,7 +2371,8 @@ pub fn present_files_for_root(conn: &Connection, root_id: &str) -> rusqlite::Res
             size_bytes: row.get(1)?,
             modified_at: row.get(2)?,
             content_id: row.get(3)?,
-            status: row.get(4)?,
+            sha256: row.get(4)?,
+            status: row.get(5)?,
         })
     })?;
     rows.collect()
@@ -2408,6 +2418,7 @@ fn cached_child_directories(
                 size_bytes: row.get(2)?,
                 modified_at: None,
                 content_id: None,
+                sha256: None,
                 status: None,
             })
         })?;
@@ -2451,6 +2462,7 @@ fn cached_child_directories(
             size_bytes: row.get(2)?,
             modified_at: None,
             content_id: None,
+            sha256: None,
             status: None,
         })
     })?;
@@ -2470,6 +2482,7 @@ fn cached_child_files(
                 p.size_bytes,
                 p.modified_at,
                 p.content_id,
+                c.sha256,
                 p.status,
                 CASE
                     WHEN p.content_id IS NOT NULL THEN (
@@ -2486,6 +2499,7 @@ fn cached_child_files(
                     )
                 END AS occurrence_count
             FROM path_observations p
+            LEFT JOIN content_objects c ON c.id = p.content_id
             WHERE p.root_id = ?1 AND instr(p.relative_path, '/') = 0
             ORDER BY p.relative_path ASC
             "#,
@@ -2504,6 +2518,7 @@ fn cached_child_files(
             p.size_bytes,
             p.modified_at,
             p.content_id,
+            c.sha256,
             p.status,
             CASE
                 WHEN p.content_id IS NOT NULL THEN (
@@ -2520,6 +2535,7 @@ fn cached_child_files(
                 )
             END AS occurrence_count
         FROM path_observations p
+        LEFT JOIN content_objects c ON c.id = p.content_id
         WHERE p.root_id = ?1
           AND p.relative_path LIKE ?2 ESCAPE '\'
           AND instr(substr(p.relative_path, ?3), '/') = 0
@@ -2544,11 +2560,12 @@ fn cached_file_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Cache
         name,
         relative_path,
         file_count: 1,
-        occurrence_count: row.get(5)?,
+        occurrence_count: row.get(6)?,
         size_bytes: row.get(1)?,
         modified_at: row.get(2)?,
         content_id: row.get(3)?,
-        status: Some(row.get(4)?),
+        sha256: row.get(4)?,
+        status: Some(row.get(5)?),
     })
 }
 
