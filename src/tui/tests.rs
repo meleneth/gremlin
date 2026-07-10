@@ -1,5 +1,13 @@
 use super::*;
 
+fn current_dir_lock() -> std::sync::MutexGuard<'static, ()> {
+    static CURRENT_DIR_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    CURRENT_DIR_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap()
+}
+
 #[test]
 fn truncates_long_values() {
     assert_eq!(truncate("abcdef", 4), "abc~");
@@ -19,6 +27,24 @@ fn root_display_name_uses_basename_when_label_is_path() {
         latest_job_phase: None,
     };
     assert_eq!(root_display_name(&root), "photos");
+}
+
+#[test]
+fn root_row_allows_longer_root_names() {
+    let root = db::RootRow {
+        id: "root_1".to_string(),
+        machine_id: "machine_1".to_string(),
+        path: "/tmp/archive/very-long-photo-library".to_string(),
+        label: None,
+        current_size_bytes: 0,
+        latest_job_kind: None,
+        latest_job_status: None,
+        latest_job_phase: None,
+    };
+
+    let row = root_row("> ", " ", &root);
+
+    assert!(row.contains("very-long-photo-library"));
 }
 
 #[test]
@@ -1058,11 +1084,7 @@ fn root_selection_can_target_resume_transfer_plan_rows() {
 
 #[test]
 fn root_export_writes_snapshot_from_tui_action() {
-    static CURRENT_DIR_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    let _guard = CURRENT_DIR_LOCK
-        .get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .unwrap();
+    let _guard = current_dir_lock();
     let original_dir = std::env::current_dir().unwrap();
     let temp = tempfile::tempdir().unwrap();
     std::env::set_current_dir(temp.path()).unwrap();
@@ -1104,11 +1126,7 @@ fn root_export_writes_snapshot_from_tui_action() {
 
 #[test]
 fn root_export_writes_sfv_from_tui_action() {
-    static CURRENT_DIR_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    let _guard = CURRENT_DIR_LOCK
-        .get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .unwrap();
+    let _guard = current_dir_lock();
     let original_dir = std::env::current_dir().unwrap();
     let temp = tempfile::tempdir().unwrap();
     std::env::set_current_dir(temp.path()).unwrap();

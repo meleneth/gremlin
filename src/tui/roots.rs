@@ -1,4 +1,7 @@
 use super::*;
+
+const ROOT_NAME_WIDTH: usize = 24;
+
 pub(super) struct RootsPane<'a> {
     pub(super) roots: &'a [db::RootRow],
     pub(super) state: &'a AppState,
@@ -115,28 +118,34 @@ pub(super) fn resume_plan_row(marker: &str, plan: &db::TransferPlanRow) -> Strin
 
 pub(super) fn root_header() -> String {
     format!(
-        "{:<2} {:<1} {:<8} {:>5} {:<11}",
-        "", "T", "ROOT", "SIZE", "STATE"
+        "{:<2} {:<1} {:<width$} {:>5} {:<11}",
+        "",
+        "T",
+        "ROOT",
+        "SIZE",
+        "STATE",
+        width = ROOT_NAME_WIDTH
     )
 }
 
 pub(super) fn root_row(marker: &str, transfer_marker: &str, root: &db::RootRow) -> String {
     format!(
-        "{:<2} {:<1} {:<8} {:>5} {:<11}",
+        "{:<2} {:<1} {:<width$} {:>5} {:<11}",
         marker,
         transfer_marker,
-        truncate(&root_display_name(root), 8),
+        truncate(&root_display_name(root), ROOT_NAME_WIDTH),
         human_size(root.current_size_bytes as u64),
-        truncate(&root_job_label(root), 11)
+        truncate(&root_job_label(root), 11),
+        width = ROOT_NAME_WIDTH
     )
 }
 
 pub(super) fn temporary_root_row(selected: bool, browse: &TemporaryBrowse) -> String {
     format!(
-        "{:<2} {:<1} {:<8} {:>5} {:<11}",
+        "{:<2} {:<1} {:<width$} {:>5} {:<11}",
         if selected { "> " } else { "  " },
         "T",
-        truncate(&browse.label, 8),
+        truncate(&browse.label, ROOT_NAME_WIDTH),
         human_size(
             browse
                 .entries
@@ -145,7 +154,8 @@ pub(super) fn temporary_root_row(selected: bool, browse: &TemporaryBrowse) -> St
                 .map(|entry| entry.size_bytes)
                 .sum()
         ),
-        "browse"
+        "browse",
+        width = ROOT_NAME_WIDTH
     )
 }
 
