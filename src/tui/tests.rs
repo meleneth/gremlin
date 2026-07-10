@@ -196,6 +196,68 @@ fn command_hints_include_refresh_for_db_file_view() {
     };
 
     assert!(active_command_hint(&state, false).contains("u refresh db"));
+    assert!(active_command_hint(&state, false).contains("i import JSON"));
+}
+
+#[test]
+fn selected_snapshot_import_uses_highlighted_json_file() {
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let temp = tempfile::tempdir().unwrap();
+        let root = db::RootRow {
+            id: "root_1".to_string(),
+            machine_id: "machine_1".to_string(),
+            path: temp.path().to_string_lossy().to_string(),
+            label: None,
+            current_size_bytes: 0,
+            latest_job_kind: None,
+            latest_job_status: None,
+            latest_job_phase: None,
+        };
+        let file = FileViewRow {
+            relative_path: "exports/root.json".to_string(),
+            size_bytes: 128,
+            modified_at: None,
+            content_id: None,
+            status: "present".to_string(),
+            kind: FileKind::File,
+            occurrence_count: None,
+            index_state: FileIndexState::Indexed,
+        };
+        let expected_path = temp.path().join("exports/root.json");
+        let provider_expected_path = expected_path.clone();
+        let provider: OpenRootProvider = Arc::new(move |target| {
+            assert_eq!(target, provider_expected_path.to_string_lossy());
+            Ok(OpenRootResult {
+                initial_browse: None,
+                selected_root_id: Some("root_imported".to_string()),
+                status: "imported root snapshot /tmp/root (1 files)".to_string(),
+            })
+        });
+        let (job_tx, mut job_rx) = mpsc::unbounded_channel();
+        let mut state = AppState {
+            focus: FocusPane::Files,
+            ..AppState::default()
+        };
+
+        assert!(start_selected_snapshot_import(
+            &mut state,
+            Some(&root),
+            Some(&file),
+            provider,
+            job_tx,
+        ));
+
+        let message = job_rx.recv().await.unwrap();
+        match message {
+            TuiMessage::OpenRootFinished(Ok(result)) => {
+                assert_eq!(result.selected_root_id.as_deref(), Some("root_imported"));
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+        assert!(state
+            .status
+            .contains(&expected_path.to_string_lossy().to_string()));
+    });
 }
 
 #[test]

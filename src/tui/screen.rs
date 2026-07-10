@@ -121,11 +121,12 @@ fn decision_modal(state: &AppState) -> Option<DecisionModal> {
             title: "Open Root",
             lines: vec![
                 Line::from("Enter a local path, file:// path, or SSH target."),
+                Line::from("Open a snapshot directory, then press i on the JSON file."),
                 Line::from(format!("Location: {}", draft.input)),
                 Line::from("Enter open  Esc cancel"),
             ],
             width: 72,
-            height: 7,
+            height: 8,
         });
     }
     if let Some(pending) = state.pending_import.as_ref() {

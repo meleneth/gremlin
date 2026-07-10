@@ -75,8 +75,17 @@ pub fn read_snapshot(path: &Path) -> anyhow::Result<RootSnapshot> {
 }
 
 pub fn export_root(conn: &Connection, root: &db::RootRow) -> anyhow::Result<ExportResult> {
-    let snapshot = build_snapshot(conn, root)?;
     let path = PathBuf::from(format!("{}.json", safe_file_stem(&short_root_name(root))));
+    export_root_to_path(conn, root, path)
+}
+
+pub fn export_root_to_path(
+    conn: &Connection,
+    root: &db::RootRow,
+    path: impl AsRef<Path>,
+) -> anyhow::Result<ExportResult> {
+    let snapshot = build_snapshot(conn, root)?;
+    let path = path.as_ref().to_path_buf();
     let text = serde_json::to_string_pretty(&snapshot)?;
     std::fs::write(&path, format!("{text}\n"))
         .with_context(|| format!("writing root snapshot {}", path.display()))?;

@@ -601,7 +601,22 @@ pub(super) async fn run_loop(
                     }
                     KeyCode::Char('i') => {
                         let file = files.get(state.file_offset);
-                        start_temporary_import_prompt(&mut state, file);
+                        if selected_temporary_browse(&state).is_some() {
+                            start_temporary_import_prompt(&mut state, file);
+                        } else {
+                            let selected_root_for_import = selected.cloned();
+                            if !start_selected_snapshot_import(
+                                &mut state,
+                                selected_root_for_import.as_ref(),
+                                file,
+                                open_root_provider.clone(),
+                                job_tx.clone(),
+                            ) {
+                                state.status =
+                                    "Select a snapshot JSON file to import, or a temporary root"
+                                        .to_string();
+                            }
+                        }
                     }
                     KeyCode::Char('r') => {
                         if state.focus == FocusPane::Roots {

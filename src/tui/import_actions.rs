@@ -1,4 +1,5 @@
 use super::*;
+use std::path::PathBuf;
 pub(super) fn start_delete_root_confirmation(
     selected_root: Option<&db::RootRow>,
     state: &mut AppState,
@@ -91,6 +92,44 @@ pub(super) fn start_temporary_import_prompt(
     state.status = format!(
         "Import remote {target_kind} {remote_path}? n=root only, f=fast recursive stat, h=remote hash, Esc cancels"
     );
+}
+
+pub(super) fn start_selected_snapshot_import(
+    state: &mut AppState,
+    selected_root: Option<&db::RootRow>,
+    selected_file: Option<&FileViewRow>,
+    open_root_provider: OpenRootProvider,
+    job_tx: mpsc::UnboundedSender<TuiMessage>,
+) -> bool {
+    let Some(root) = selected_root else {
+        return false;
+    };
+    let Some(file) = selected_file.filter(|_| state.focus == FocusPane::Files) else {
+        return false;
+    };
+    if file.kind != FileKind::File
+        || !file
+            .relative_path
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("json"))
+    {
+        return false;
+    }
+    let snapshot_path = PathBuf::from(&root.path).join(&file.relative_path);
+    state.background_started(format!(
+        "importing root snapshot {}",
+        snapshot_path.display()
+    ));
+    task::spawn_blocking(move || {
+        let result = open_root_provider(&snapshot_path.to_string_lossy()).map_err(|err| {
+            format!(
+                "snapshot import failed for {}: {err}",
+                snapshot_path.display()
+            )
+        });
+        let _ = job_tx.send(TuiMessage::OpenRootFinished(result));
+    });
+    true
 }
 
 pub(super) fn handle_temporary_import_choice(

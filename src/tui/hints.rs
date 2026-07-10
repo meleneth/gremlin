@@ -105,7 +105,7 @@ pub(super) fn active_command_hint(state: &AppState, has_temporary_browse: bool) 
             "/ filter  u refresh  PgUp/PgDn jump  Enter open dir  Backspace parent  i import  t copy"
         }
         FocusPane::Files => {
-            "/ filter  u refresh db  PgUp/PgDn jump  Enter open dir  Backspace parent  Space mark  f fields"
+            "/ filter  u refresh db  PgUp/PgDn jump  Enter open dir  Backspace parent  Space mark  i import JSON  f fields"
         }
         FocusPane::Plan => {
             "plan modal  arrows/PgUp/PgDn move  r run copies  a accept  d drop  e retarget  Esc close"

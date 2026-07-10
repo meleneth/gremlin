@@ -627,6 +627,18 @@ fn open_root_location(
 ) -> anyhow::Result<tui::OpenRootResult> {
     let conn = db::open_or_create(db_path)?;
     db::init_schema(&conn)?;
+    let target_path = std::path::Path::new(target);
+    if root_snapshot::looks_like_snapshot_file(target_path) {
+        let result = root_snapshot::import_snapshot_file(&conn, target_path)?;
+        return Ok(tui::OpenRootResult {
+            initial_browse: None,
+            selected_root_id: Some(result.root_id),
+            status: format!(
+                "imported root snapshot {} ({} files)",
+                result.root_path, result.file_count
+            ),
+        });
+    }
     let parsed = targets::parse_target(target, None)?;
     let (machine_id, root_path) = resolve_target_identity(&conn, &parsed, machine_label)?;
     if let Some(root) = db::find_root_by_machine_path(&conn, &machine_id, &root_path)? {
@@ -1916,6 +1928,52 @@ mod tests {
         assert_eq!(result.selected_root_id.as_deref(), Some(root_id.as_str()));
         assert!(result.initial_browse.is_none());
         assert!(result.status.contains("opened existing root"));
+    }
+
+    #[test]
+    fn open_root_location_imports_root_snapshot_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_db = dir.path().join("source.db");
+        let import_db = dir.path().join("import.db");
+        let root_dir = dir.path().join("root");
+        std::fs::create_dir(&root_dir).unwrap();
+        let conn = db::open_or_create(&source_db).unwrap();
+        db::init_schema(&conn).unwrap();
+        let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+        let root_path = util::lossy(&util::absolute_path(&root_dir).unwrap());
+        let root_id = db::ensure_root(&conn, &machine_id, &root_path).unwrap();
+        db::insert_path_observation(
+            &conn,
+            db::PathObservationInput {
+                machine_id: &machine_id,
+                root_id: &root_id,
+                relative_path: "hello.txt",
+                basename: "hello.txt",
+                parent_path: ".",
+                size_bytes: 5,
+                modified_at: None,
+                content_id: None,
+            },
+        )
+        .unwrap();
+        let root = db::root_by_id(&conn, &root_id).unwrap().unwrap();
+        let snapshot_path = dir.path().join("root.json");
+        root_snapshot::export_root_to_path(&conn, &root, &snapshot_path).unwrap();
+        drop(conn);
+
+        let result =
+            open_root_location(&import_db, None, &snapshot_path.to_string_lossy()).unwrap();
+        let imported = db::open_existing(&import_db).unwrap();
+
+        assert!(result.initial_browse.is_none());
+        assert!(result.status.contains("imported root snapshot"));
+        assert_eq!(
+            db::root_by_id(&imported, result.selected_root_id.as_deref().unwrap())
+                .unwrap()
+                .unwrap()
+                .path,
+            root_path
+        );
     }
 
     #[test]
