@@ -1568,10 +1568,55 @@ fn info_bar_renders_active_transfer_progress() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(text.contains("Info"));
-    assert!(text.contains("Transfer file: incoming/photos/foo.png"));
+    assert!(text.contains("Transfer: file incoming/photos/foo.png"));
     assert!(text.contains("Job"));
     assert!(text.contains("File"));
     assert!(text.contains("@ 2.0 MiB/s"));
+}
+
+#[test]
+fn info_bar_renders_active_import_operation() {
+    let state = AppState {
+        active_background_jobs: 1,
+        ..AppState::default()
+    };
+    let progress = ImportProgress {
+        root_id: "root_1".to_string(),
+        root_path: "nas01:/srv/archive".to_string(),
+        files_imported: 12,
+        files_queued: 4,
+        directories_processed: 3,
+        directories_queued: 2,
+        current_path: Some("photos/foo.png".to_string()),
+        phase: "remote helper hash indexing".to_string(),
+    };
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 150, 6));
+
+    InfoBar {
+        data: InfoBarData {
+            root_name: Some("root".to_string()),
+            file: None,
+            selection: None,
+            event: None,
+            root_count: 1,
+            transfer_progress: None,
+            import_progress: Some(&progress),
+        },
+        state: &state,
+    }
+    .render(buffer.area, &mut buffer);
+
+    let text = buffer
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+
+    assert!(text.contains("Active: background tasks 1"));
+    assert!(text.contains("Import: remote helper hash indexing"));
+    assert!(text.contains("root nas01:/srv/archive"));
+    assert!(text.contains("files 12/4"));
+    assert!(text.contains("current photos/foo.png"));
 }
 
 #[test]

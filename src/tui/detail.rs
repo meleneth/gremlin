@@ -254,7 +254,7 @@ impl Widget for InfoBar<'_> {
         let mut lines = vec![Line::from(context)];
         if let Some(progress) = self.data.transfer_progress.as_ref() {
             lines.push(Line::from(format!(
-                "Transfer file: {}",
+                "Transfer: file {}",
                 truncate(&progress.current_path, 120)
             )));
             lines.extend(transfer_progress_styled_lines(
@@ -265,7 +265,7 @@ impl Widget for InfoBar<'_> {
         let execution = active_execution_line(self.state);
         if let Some(execution) = execution.as_ref() {
             lines.push(Line::from(vec![
-                Span::styled("run ", theme::ok()),
+                Span::styled("Active: ", theme::ok()),
                 Span::styled(execution.clone(), theme::ok()),
             ]));
         }
@@ -301,7 +301,7 @@ impl Widget for InfoBar<'_> {
 fn active_execution_line(state: &AppState) -> Option<String> {
     let mut parts = Vec::new();
     if state.active_background_jobs > 0 {
-        parts.push(format!("bg {}", state.active_background_jobs));
+        parts.push(format!("background tasks {}", state.active_background_jobs));
     }
     if !state.active_job_ids.is_empty() {
         let ids = state
@@ -326,8 +326,9 @@ fn active_execution_line(state: &AppState) -> Option<String> {
 
 fn brief_import_execution_line(progress: &ImportProgress) -> String {
     format!(
-        "Import {} | files {} queued {} | dirs {} queued {} | {}",
-        truncate(&progress.phase, 18),
+        "Import: {} | root {} | files {}/{} | dirs {}/{} | current {}",
+        truncate(&progress.phase, 28),
+        truncate(&progress.root_path, 36),
         progress.files_imported,
         progress.files_queued,
         progress.directories_processed,
