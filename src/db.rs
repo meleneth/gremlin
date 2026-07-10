@@ -53,6 +53,18 @@ pub struct CachedDirectoryEntry {
 }
 
 #[derive(Debug, Clone)]
+pub struct SelectedFileEntry {
+    pub relative_path: String,
+    pub parent_path: String,
+    pub size_bytes: i64,
+    pub modified_at: Option<String>,
+    pub content_id: Option<String>,
+    pub sha256: Option<String>,
+    pub status: String,
+    pub occurrence_count: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
 pub struct FileAppearanceRow {
     pub root_id: String,
     pub root_path: String,
@@ -1762,6 +1774,59 @@ pub fn selected_paths_for_root(
         "#,
     )?;
     let rows = stmt.query_map(params![set_id], |row| row.get::<_, String>(0))?;
+    rows.collect()
+}
+
+pub fn selected_file_entries_for_root(
+    conn: &Connection,
+    root_id: &str,
+) -> rusqlite::Result<Vec<SelectedFileEntry>> {
+    let set_id = ensure_default_selection_set(conn, root_id)?;
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT
+            e.relative_path,
+            COALESCE(p.parent_path, '.'),
+            COALESCE(p.size_bytes, 0),
+            p.modified_at,
+            p.content_id,
+            c.sha256,
+            COALESCE(p.status, 'selected'),
+            CASE
+                WHEN p.content_id IS NOT NULL THEN (
+                    SELECT COUNT(*)
+                    FROM path_observations x
+                    WHERE x.content_id = p.content_id
+                )
+                WHEN p.relative_path IS NOT NULL THEN (
+                    SELECT COUNT(*)
+                    FROM path_observations x
+                    WHERE x.basename = p.basename
+                      AND x.size_bytes = p.size_bytes
+                      AND (x.modified_at = p.modified_at OR (x.modified_at IS NULL AND p.modified_at IS NULL))
+                )
+                ELSE NULL
+            END AS occurrence_count
+        FROM selection_entries e
+        LEFT JOIN path_observations p
+            ON p.root_id = e.root_id AND p.relative_path = e.relative_path
+        LEFT JOIN content_objects c ON c.id = p.content_id
+        WHERE e.selection_set_id = ?1
+        ORDER BY COALESCE(p.parent_path, '.') ASC, e.relative_path ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(params![set_id], |row| {
+        Ok(SelectedFileEntry {
+            relative_path: row.get(0)?,
+            parent_path: row.get(1)?,
+            size_bytes: row.get(2)?,
+            modified_at: row.get(3)?,
+            content_id: row.get(4)?,
+            sha256: row.get(5)?,
+            status: row.get(6)?,
+            occurrence_count: row.get(7)?,
+        })
+    })?;
     rows.collect()
 }
 
@@ -3554,6 +3619,50 @@ mod tests {
         let summary = selection_summary_for_root(&conn, &root_id).unwrap();
         assert_eq!(summary.marked_count, 0);
         assert_eq!(summary.marked_bytes, 0);
+    }
+
+    #[test]
+    fn selected_file_entries_group_by_parent_path() {
+        let conn = Connection::open_in_memory().unwrap();
+        configure(&conn).unwrap();
+        init_schema(&conn).unwrap();
+        let machine_id = ensure_local_machine_with_label(&conn, None).unwrap();
+        let root_id = ensure_root(&conn, &machine_id, "/tmp/root").unwrap();
+        for (path, parent, size) in [
+            ("dir/a.txt", "dir", 2_u64),
+            ("dir/nested/b.txt", "dir/nested", 3),
+            ("root.txt", ".", 1),
+        ] {
+            insert_path_observation(
+                &conn,
+                PathObservationInput {
+                    machine_id: &machine_id,
+                    root_id: &root_id,
+                    relative_path: path,
+                    basename: path.rsplit('/').next().unwrap(),
+                    parent_path: parent,
+                    size_bytes: size,
+                    modified_at: None,
+                    content_id: None,
+                },
+            )
+            .unwrap();
+            assert!(toggle_selection_entry(&conn, &root_id, path).unwrap());
+        }
+
+        let entries = selected_file_entries_for_root(&conn, &root_id).unwrap();
+
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| (entry.parent_path.as_str(), entry.relative_path.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (".", "root.txt"),
+                ("dir", "dir/a.txt"),
+                ("dir/nested", "dir/nested/b.txt")
+            ]
+        );
     }
 
     #[test]

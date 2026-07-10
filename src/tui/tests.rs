@@ -609,6 +609,49 @@ fn file_filter_input_edits_and_clears_filter() {
 }
 
 #[test]
+fn file_filter_keeps_matching_selection_group_headers() {
+    let files = vec![
+        FileViewRow::section("dir".to_string()),
+        FileViewRow {
+            relative_path: "dir/cat.png".to_string(),
+            size_bytes: 1,
+            modified_at: None,
+            content_id: None,
+            sha256: None,
+            status: "present".to_string(),
+            kind: FileKind::File,
+            occurrence_count: None,
+            index_state: FileIndexState::Indexed,
+        },
+        FileViewRow::section("other".to_string()),
+        FileViewRow {
+            relative_path: "other/dog.png".to_string(),
+            size_bytes: 1,
+            modified_at: None,
+            content_id: None,
+            sha256: None,
+            status: "present".to_string(),
+            kind: FileKind::File,
+            occurrence_count: None,
+            index_state: FileIndexState::Indexed,
+        },
+    ];
+
+    let matches = filtered_file_rows(&files, "dog");
+
+    assert_eq!(
+        matches
+            .iter()
+            .map(|file| (file.kind, file.relative_path.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (FileKind::Section, "other"),
+            (FileKind::File, "other/dog.png")
+        ]
+    );
+}
+
+#[test]
 fn file_row_shows_index_appearance_count() {
     let file = FileViewRow {
         relative_path: "photos/cat.png".to_string(),

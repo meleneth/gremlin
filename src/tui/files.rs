@@ -70,21 +70,27 @@ pub(super) fn file_legend() -> &'static str {
 }
 
 pub(super) fn files_title(state: &AppState) -> String {
+    let base = match state.file_pane_mode {
+        FilePaneMode::Tree => "Files",
+        FilePaneMode::Selection => "Files selection",
+    };
     if state.file_filter.is_empty() {
-        "Files".to_string()
+        base.to_string()
     } else if state.file_filter_editing {
-        format!("Files /{}", state.file_filter)
+        format!("{base} /{}", state.file_filter)
     } else {
-        format!("Files filter:{}", state.file_filter)
+        format!("{base} filter:{}", state.file_filter)
     }
 }
 
 pub(super) fn file_row_selected(file: &FileViewRow, selected_paths: &BTreeSet<String>) -> bool {
-    if file.kind == FileKind::Directory {
-        let prefix = format!("{}/", file.relative_path);
-        selected_paths.iter().any(|path| path.starts_with(&prefix))
-    } else {
-        selected_paths.contains(&file.relative_path)
+    match file.kind {
+        FileKind::Directory => {
+            let prefix = format!("{}/", file.relative_path);
+            selected_paths.iter().any(|path| path.starts_with(&prefix))
+        }
+        FileKind::File => selected_paths.contains(&file.relative_path),
+        FileKind::Section => false,
     }
 }
 
@@ -110,6 +116,9 @@ pub(super) fn file_header(view: FileView) -> String {
 }
 
 pub(super) fn file_row(marker: &str, selected: bool, file: &FileViewRow, view: FileView) -> String {
+    if file.kind == FileKind::Section {
+        return format!("{marker}{}", section_label(&file.relative_path));
+    }
     let hash = file_hash_label(file);
     let modified = file.modified_at.as_deref().unwrap_or("-");
     let evidence = file_evidence_label(file, selected);
@@ -165,6 +174,9 @@ pub(super) fn file_row_style(file: &FileViewRow, selected: bool, focused: bool) 
     if focused {
         return theme::selected();
     }
+    if file.kind == FileKind::Section {
+        return theme::header();
+    }
     if selected {
         return theme::marked();
     }
@@ -181,8 +193,10 @@ fn file_evidence_label(file: &FileViewRow, selected: bool) -> String {
     if selected {
         return "*".to_string();
     }
-    if file.kind == FileKind::Directory {
-        return "▸".to_string();
+    match file.kind {
+        FileKind::Directory => return "▸".to_string(),
+        FileKind::Section => return " ".to_string(),
+        FileKind::File => {}
     }
     match file.index_state {
         FileIndexState::RemoteUnindexed => "◇".to_string(),
@@ -203,12 +217,20 @@ fn file_hash_label(file: &FileViewRow) -> &str {
 }
 
 fn file_occurrence_label(file: &FileViewRow) -> String {
-    if file.kind == FileKind::Directory {
-        "-".to_string()
-    } else {
-        file.occurrence_count
+    match file.kind {
+        FileKind::Directory | FileKind::Section => "-".to_string(),
+        FileKind::File => file
+            .occurrence_count
             .map(|count| count.to_string())
-            .unwrap_or_else(|| "-".to_string())
+            .unwrap_or_else(|| "-".to_string()),
+    }
+}
+
+fn section_label(parent: &str) -> String {
+    if parent == "." {
+        "/".to_string()
+    } else {
+        format!("/{parent}")
     }
 }
 

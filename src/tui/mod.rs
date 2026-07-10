@@ -33,6 +33,7 @@ const DETAIL_DEBOUNCE: Duration = Duration::from_millis(250);
 struct AppState {
     focus: FocusPane,
     file_view: FileView,
+    file_pane_mode: FilePaneMode,
     selected_root: usize,
     root_filter: String,
     root_filter_editing: bool,
@@ -265,6 +266,7 @@ struct TemporaryBrowse {
 enum FileKind {
     File,
     Directory,
+    Section,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,6 +322,34 @@ impl From<&db::FileRow> for FileViewRow {
 }
 
 impl FileViewRow {
+    fn section(relative_path: String) -> Self {
+        Self {
+            relative_path,
+            size_bytes: 0,
+            modified_at: None,
+            content_id: None,
+            sha256: None,
+            status: String::new(),
+            kind: FileKind::Section,
+            occurrence_count: None,
+            index_state: FileIndexState::Indexed,
+        }
+    }
+
+    fn from_selected_file_entry(entry: &db::SelectedFileEntry) -> Self {
+        Self {
+            relative_path: entry.relative_path.clone(),
+            size_bytes: entry.size_bytes,
+            modified_at: entry.modified_at.clone(),
+            content_id: entry.content_id.clone(),
+            sha256: entry.sha256.clone(),
+            status: entry.status.clone(),
+            kind: FileKind::File,
+            occurrence_count: entry.occurrence_count,
+            index_state: FileIndexState::Indexed,
+        }
+    }
+
     fn from_cached_directory_entry(entry: &db::CachedDirectoryEntry) -> Self {
         let kind = if entry.kind == "dir" {
             FileKind::Directory
@@ -636,6 +666,29 @@ enum FileView {
     Meta,
     Hash,
     All,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum FilePaneMode {
+    #[default]
+    Tree,
+    Selection,
+}
+
+impl FilePaneMode {
+    fn toggle(self) -> Self {
+        match self {
+            Self::Tree => Self::Selection,
+            Self::Selection => Self::Tree,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Tree => "tree",
+            Self::Selection => "selection",
+        }
+    }
 }
 
 impl FileView {

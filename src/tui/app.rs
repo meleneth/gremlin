@@ -272,6 +272,9 @@ pub(super) async fn run_loop(
         let (all_files, detail_key) = {
             let selected_temporary = selected_temporary_browse(&state);
             let files = match (selected, selected_temporary) {
+                (Some(root), _) if state.file_pane_mode == FilePaneMode::Selection => {
+                    grouped_selected_file_rows(conn, &root.id)?
+                }
                 (Some(root), _) => db::cached_directory_entries(
                     conn,
                     &root.id,
@@ -289,6 +292,7 @@ pub(super) async fn run_loop(
                     selected,
                     selected_temporary,
                     persisted_browse_dir.as_deref(),
+                    state.file_pane_mode,
                 ),
             )
         };
@@ -499,6 +503,12 @@ pub(super) async fn run_loop(
                     KeyCode::Char('f') => {
                         state.file_view = state.file_view.next();
                         state.status = format!("file fields: {}", state.file_view.label());
+                    }
+                    KeyCode::Char('o') => {
+                        state.file_pane_mode = state.file_pane_mode.toggle();
+                        state.file_offset = 0;
+                        state.detail_file_offset = 0;
+                        state.status = format!("file mode: {}", state.file_pane_mode.label());
                     }
                     KeyCode::Char('u') => {
                         refresh_current_file_listing(&mut state, job_tx.clone());
@@ -972,6 +982,23 @@ fn selected_file_content(
         return Ok(None);
     };
     Ok(db::content_object_by_id(conn, content_id)?)
+}
+
+fn grouped_selected_file_rows(
+    conn: &Connection,
+    root_id: &str,
+) -> anyhow::Result<Vec<FileViewRow>> {
+    let entries = db::selected_file_entries_for_root(conn, root_id)?;
+    let mut rows = Vec::new();
+    let mut current_parent: Option<String> = None;
+    for entry in entries {
+        if current_parent.as_deref() != Some(entry.parent_path.as_str()) {
+            current_parent = Some(entry.parent_path.clone());
+            rows.push(FileViewRow::section(entry.parent_path.clone()));
+        }
+        rows.push(FileViewRow::from_selected_file_entry(&entry));
+    }
+    Ok(rows)
 }
 
 pub(super) fn temporary_browse_rows(

@@ -104,11 +104,32 @@ pub(super) fn filtered_file_rows(files: &[FileViewRow], filter: &str) -> Vec<Fil
     if needle.is_empty() {
         return files.to_vec();
     }
+    if files.iter().any(|file| file.kind == FileKind::Section) {
+        return filtered_grouped_file_rows(files, &needle);
+    }
     files
         .iter()
         .filter(|file| file_matches_filter(file, &needle))
         .cloned()
         .collect()
+}
+
+fn filtered_grouped_file_rows(files: &[FileViewRow], needle: &str) -> Vec<FileViewRow> {
+    let mut out = Vec::new();
+    let mut pending_section: Option<FileViewRow> = None;
+    for file in files {
+        if file.kind == FileKind::Section {
+            pending_section = Some(file.clone());
+            continue;
+        }
+        if file_matches_filter(file, needle) {
+            if let Some(section) = pending_section.take() {
+                out.push(section);
+            }
+            out.push(file.clone());
+        }
+    }
+    out
 }
 
 fn file_matches_filter(file: &FileViewRow, needle: &str) -> bool {
@@ -138,15 +159,17 @@ pub(super) fn detail_selection_key(
     root: Option<&db::RootRow>,
     browse: Option<&TemporaryBrowse>,
     persisted_dir: Option<&str>,
+    file_pane_mode: FilePaneMode,
 ) -> String {
     if let Some(browse) = browse {
         format!("temporary:{}:{}", browse.machine_id, browse.current_path)
     } else if let Some(root) = root {
         format!(
-            "root:{}:{}:{}",
+            "root:{}:{}:{}:{}",
             root.id,
             persisted_dir.unwrap_or("."),
-            root.latest_job_status.as_deref().unwrap_or("-")
+            root.latest_job_status.as_deref().unwrap_or("-"),
+            file_pane_mode.label()
         )
     } else {
         "none".to_string()

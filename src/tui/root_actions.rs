@@ -244,26 +244,33 @@ pub(super) fn toggle_selected_file_mark(
         state.status = "No file selected".to_string();
         return Ok(());
     };
-    if file.kind == FileKind::Directory {
-        let change = db::toggle_selection_directory(conn, &root.id, &file.relative_path)?;
-        state.status = if change.files_changed == 0 {
-            format!("{} has no indexed files to mark", file.relative_path)
-        } else if change.selected {
-            format!(
-                "marked {} files under {} ({})",
-                change.files_changed,
-                file.relative_path,
-                human_size(change.bytes_changed)
-            )
-        } else {
-            format!(
-                "unmarked {} files under {} ({})",
-                change.files_changed,
-                file.relative_path,
-                human_size(change.bytes_changed)
-            )
-        };
-        return Ok(());
+    match file.kind {
+        FileKind::Directory => {
+            let change = db::toggle_selection_directory(conn, &root.id, &file.relative_path)?;
+            state.status = if change.files_changed == 0 {
+                format!("{} has no indexed files to mark", file.relative_path)
+            } else if change.selected {
+                format!(
+                    "marked {} files under {} ({})",
+                    change.files_changed,
+                    file.relative_path,
+                    human_size(change.bytes_changed)
+                )
+            } else {
+                format!(
+                    "unmarked {} files under {} ({})",
+                    change.files_changed,
+                    file.relative_path,
+                    human_size(change.bytes_changed)
+                )
+            };
+            return Ok(());
+        }
+        FileKind::Section => {
+            state.status = format!("selection group {}", file.relative_path);
+            return Ok(());
+        }
+        FileKind::File => {}
     }
     let marked = db::toggle_selection_entry(conn, &root.id, &file.relative_path)?;
     state.status = if marked {
