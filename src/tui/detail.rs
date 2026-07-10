@@ -142,12 +142,32 @@ fn file_hash_lines(content: Option<&db::ContentObjectRow>) -> String {
     let Some(content) = content else {
         return "Hashes: -\n".to_string();
     };
+    let evidence = hash_evidence_summary(content);
     format!(
-        "BLAKE3: {}\nSHA-256: {}\nCRC32: {}\n",
+        "Evidence: {}\nBLAKE3: {}\nSHA-256: {}\nCRC32: {}\n",
+        evidence,
         content.blake3.as_deref().unwrap_or("-"),
         content.sha256.as_deref().unwrap_or("-"),
         content.crc32.as_deref().unwrap_or("-")
     )
+}
+
+fn hash_evidence_summary(content: &db::ContentObjectRow) -> String {
+    let mut labels = Vec::new();
+    if content.sha256.is_some() {
+        labels.push("SHA-256");
+    }
+    if content.crc32.is_some() {
+        labels.push("CRC32");
+    }
+    if content.blake3.is_some() {
+        labels.push("BLAKE3");
+    }
+    if labels.is_empty() {
+        "stat-only".to_string()
+    } else {
+        labels.join(" + ")
+    }
 }
 
 fn file_appearance_lines(appearances: &[db::FileAppearanceRow]) -> String {

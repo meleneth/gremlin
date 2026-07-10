@@ -132,7 +132,7 @@ fn command_hints_prioritize_modal_prompts() {
 
     assert_eq!(
         active_command_hint(&state, true),
-        "n root only  f fast stat import  h SHA-256 hash import  Esc cancel"
+        "n root only  f fast stat import  h SHA-256+CRC hash import  Esc cancel"
     );
 }
 
@@ -2246,6 +2246,7 @@ fn detail_pane_renders_selected_file_hashes() {
         .collect::<String>();
     assert!(text.contains("BLAKE3: blake3-hash-value"));
     assert!(text.contains("SHA-256: sha256-hash-value"));
+    assert!(text.contains("Evidence: SHA-256 + CRC32 + BLAKE3"));
     assert!(text.contains("Appearances: 1"));
     assert!(text.contains("Archive:photos/foo.png"));
 }

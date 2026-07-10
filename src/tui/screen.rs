@@ -134,7 +134,7 @@ fn decision_modal(state: &AppState) -> Option<DecisionModal> {
             title: "Import Remote Root",
             lines: vec![
                 Line::from(format!("Path: {}", pending.remote_path)),
-                Line::from("n root only  f fast recursive stat  h remote SHA-256 hash"),
+                Line::from("n root only  f fast recursive stat  h remote SHA-256+CRC hash"),
                 Line::from("Esc cancel"),
             ],
             width: 76,

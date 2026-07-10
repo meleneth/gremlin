@@ -90,7 +90,7 @@ pub(super) fn start_temporary_import_prompt(
         remote_path: remote_path.clone(),
     });
     state.status = format!(
-        "Import remote {target_kind} {remote_path}? n=root only, f=fast recursive stat, h=remote hash, Esc cancels"
+        "Import remote {target_kind} {remote_path}? n=root only, f=fast stat, h=SHA-256+CRC hash, Esc cancels"
     );
 }
 

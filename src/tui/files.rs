@@ -90,7 +90,7 @@ pub(super) fn file_header(view: FileView) -> String {
     match view {
         FileView::Basic => format!(
             "{:<2} {:>3} {:<1} {:<40} {:>9} {:<8} {:<10}",
-            "", "#", "E", "PATH", "SIZE", "STATE", "HASH"
+            "", "#", "E", "PATH", "SIZE", "STATE", "SHA/ID"
         ),
         FileView::Meta => format!(
             "{:<2} {:>3} {:<1} {:<34} {:>9} {:<18}",
@@ -98,11 +98,11 @@ pub(super) fn file_header(view: FileView) -> String {
         ),
         FileView::Hash => format!(
             "{:<2} {:>3} {:<1} {:<40} {:<18}",
-            "", "#", "E", "PATH", "CONTENT"
+            "", "#", "E", "PATH", "SHA-256 / ID"
         ),
         FileView::All => format!(
             "{:<2} {:>3} {:<1} {:<28} {:>8} {:<6} {:<10} {:<10}",
-            "", "#", "E", "PATH", "SIZE", "STATE", "HASH", "MODIFIED"
+            "", "#", "E", "PATH", "SIZE", "STATE", "SHA/ID", "MODIFIED"
         ),
     }
 }

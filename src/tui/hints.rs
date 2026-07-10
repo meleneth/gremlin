@@ -79,7 +79,7 @@ pub(super) fn active_command_hint(state: &AppState, has_temporary_browse: bool) 
         return "y drop queued transfer  n/Esc cancel";
     }
     if state.pending_import.is_some() {
-        return "n root only  f fast stat import  h SHA-256 hash import  Esc cancel";
+        return "n root only  f fast stat import  h SHA-256+CRC hash import  Esc cancel";
     }
     if state.pending_open_root.is_some() {
         return "type local path, file:// path, or host:/path  Enter open  Esc cancel";
