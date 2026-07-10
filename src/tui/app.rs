@@ -143,10 +143,24 @@ pub(super) async fn run_loop(
                 TuiMessage::ImportProgress(progress) => {
                     state.active_import_root_id = Some(progress.root_id.clone());
                     state.active_import_progress = Some(progress.clone());
-                    state.status = format!(
-                        "importing {}: {} files indexed, {} queued",
-                        progress.root_path, progress.files_imported, progress.files_queued
-                    );
+                    if let Some((level, message)) = import_progress_activity(&progress) {
+                        append_activity_once(
+                            &mut state,
+                            format!(
+                                "import:{}:{}:{}",
+                                progress.root_id,
+                                progress.current_path.as_deref().unwrap_or("-"),
+                                progress.phase
+                            ),
+                            level,
+                            message,
+                        );
+                    } else {
+                        state.status = format!(
+                            "importing {}: {} files indexed, {} queued",
+                            progress.root_path, progress.files_imported, progress.files_queued
+                        );
+                    }
                 }
                 TuiMessage::OpenRootFinished(result) => match result {
                     Ok(result) => {
@@ -289,6 +303,7 @@ pub(super) async fn run_loop(
             state.event_offset = job_rows.len().saturating_sub(1);
         }
         append_visible_transfer_error_activities(&events, &mut state);
+        append_visible_failure_activities(&events, &mut state);
         let summary = match selected {
             Some(root) => Some(db::root_summary(conn, &root.id)?),
             None => None,
@@ -1199,13 +1214,35 @@ pub(super) fn append_visible_transfer_error_activities(
     }
 }
 
+pub(super) fn append_visible_failure_activities(events: &[db::JobEventRow], state: &mut AppState) {
+    for event in events.iter().filter(|event| {
+        matches!(
+            event.event_kind.as_str(),
+            "hash_failed" | "job_failed" | "verify_finding"
+        )
+    }) {
+        if let Some((level, message)) = job_event_activity(event) {
+            append_activity_once(
+                state,
+                format!("failure:{}:{}", event.job_id, event.sequence),
+                level,
+                message,
+            );
+        }
+    }
+}
+
 fn append_transfer_error_activity_once(state: &mut AppState, key: String, payload_json: &str) {
+    if let Some(message) = transfer_error_activity(payload_json) {
+        append_activity_once(state, key, ActivityLevel::Error, message);
+    }
+}
+
+fn append_activity_once(state: &mut AppState, key: String, level: ActivityLevel, message: String) {
     if !state.transfer_error_activity_keys.insert(key) {
         return;
     }
-    if let Some(message) = transfer_error_activity(payload_json) {
-        state.set_status(ActivityLevel::Error, message);
-    }
+    state.set_status(level, message);
 }
 
 fn transfer_error_activity_key(job_id: &str, sequence: i64) -> String {
@@ -1258,6 +1295,100 @@ pub(super) fn transfer_error_activity(payload_json: &str) -> Option<String> {
         "transfer error {}: {}",
         truncate(relative_path, 48),
         truncate(error, 140)
+    ))
+}
+
+pub(super) fn job_event_activity(row: &db::JobEventRow) -> Option<(ActivityLevel, String)> {
+    match row.event_kind.as_str() {
+        "hash_failed" => hash_failed_activity(&row.job_kind, &row.payload_json)
+            .map(|message| (ActivityLevel::Error, message)),
+        "job_failed" => job_failed_activity(&row.job_kind, &row.payload_json)
+            .map(|message| (ActivityLevel::Error, message)),
+        "verify_finding" => {
+            verify_error_activity(&row.payload_json).map(|message| (ActivityLevel::Error, message))
+        }
+        _ => None,
+    }
+}
+
+fn hash_failed_activity(job_kind: &str, payload_json: &str) -> Option<String> {
+    let payload: serde_json::Value = serde_json::from_str(payload_json).ok()?;
+    let relative_path = payload
+        .get("relative_path")
+        .and_then(|value| value.as_str())
+        .or_else(|| payload.get("path").and_then(|value| value.as_str()))
+        .unwrap_or("-");
+    let error = payload
+        .get("error")
+        .and_then(|value| value.as_str())
+        .unwrap_or("hash failed");
+    Some(format!(
+        "{} error {}: {}",
+        job_kind,
+        truncate(relative_path, 48),
+        truncate(error, 140)
+    ))
+}
+
+fn job_failed_activity(job_kind: &str, payload_json: &str) -> Option<String> {
+    let payload: serde_json::Value = serde_json::from_str(payload_json).ok()?;
+    let path = payload
+        .get("path")
+        .and_then(|value| value.as_str())
+        .unwrap_or("-");
+    let message = payload
+        .get("message")
+        .and_then(|value| value.as_str())
+        .unwrap_or("job failed");
+    Some(format!(
+        "{} failed {}: {}",
+        job_kind,
+        truncate(path, 48),
+        truncate(message, 140)
+    ))
+}
+
+fn verify_error_activity(payload_json: &str) -> Option<String> {
+    let payload: serde_json::Value = serde_json::from_str(payload_json).ok()?;
+    if payload.get("result").and_then(|value| value.as_str()) != Some("error") {
+        return None;
+    }
+    let relative_path = payload
+        .get("relative_path")
+        .and_then(|value| value.as_str())
+        .unwrap_or("-");
+    let error = payload
+        .get("error")
+        .and_then(|value| value.as_str())
+        .unwrap_or("verify failed");
+    Some(format!(
+        "verify error {}: {}",
+        truncate(relative_path, 48),
+        truncate(error, 140)
+    ))
+}
+
+pub(super) fn import_progress_activity(
+    progress: &ImportProgress,
+) -> Option<(ActivityLevel, String)> {
+    let phase = progress.phase.trim();
+    let lower = phase.to_ascii_lowercase();
+    let level = if lower.contains("failed") || lower.contains("error") {
+        ActivityLevel::Error
+    } else if lower.contains("skipped") || lower.contains("unavailable") {
+        ActivityLevel::Warning
+    } else {
+        return None;
+    };
+    let current = progress.current_path.as_deref().unwrap_or("-");
+    Some((
+        level,
+        format!(
+            "import {} at {}: {}",
+            truncate(&progress.root_path, 48),
+            truncate(current, 48),
+            truncate(phase, 140)
+        ),
     ))
 }
 

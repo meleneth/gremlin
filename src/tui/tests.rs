@@ -1837,6 +1837,131 @@ fn visible_transfer_error_count_gets_fallback_activity_without_reason() {
 }
 
 #[test]
+fn hash_failed_events_enter_activity_log_once() {
+    let mut state = AppState::default();
+    let event = db::JobEventRow {
+        job_id: "job_hash_1".to_string(),
+        job_kind: "hash".to_string(),
+        root_id: None,
+        status: "completed_with_errors".to_string(),
+        phase: Some("processing".to_string()),
+        current_path: Some("photos/bad.png".to_string()),
+        files_seen: 1,
+        files_done: 0,
+        files_skipped: 0,
+        errors: 1,
+        cancel_requested: false,
+        sequence: 7,
+        event_kind: "hash_failed".to_string(),
+        payload_json: serde_json::json!({
+            "type": "hash_failed",
+            "relative_path": "photos/bad.png",
+            "path": "/archive/photos/bad.png",
+            "error": "permission denied"
+        })
+        .to_string(),
+        params_json: None,
+    };
+
+    app::append_visible_failure_activities(std::slice::from_ref(&event), &mut state);
+    app::append_visible_failure_activities(&[event], &mut state);
+
+    assert_eq!(state.activities.len(), 1);
+    assert_eq!(state.activities[0].level, ActivityLevel::Error);
+    assert_eq!(
+        state.activities[0].message,
+        "hash error photos/bad.png: permission denied"
+    );
+}
+
+#[test]
+fn job_failed_events_enter_activity_log_with_path_and_message() {
+    let row = db::JobEventRow {
+        job_id: "job_scan_1".to_string(),
+        job_kind: "scan".to_string(),
+        root_id: None,
+        status: "failed".to_string(),
+        phase: Some("walking".to_string()),
+        current_path: Some("/archive".to_string()),
+        files_seen: 0,
+        files_done: 0,
+        files_skipped: 0,
+        errors: 1,
+        cancel_requested: false,
+        sequence: 2,
+        event_kind: "job_failed".to_string(),
+        payload_json: serde_json::json!({
+            "type": "job",
+            "path": "/archive",
+            "message": "walk failed: permission denied",
+            "errors": 1
+        })
+        .to_string(),
+        params_json: None,
+    };
+
+    let (_, message) = app::job_event_activity(&row).unwrap();
+
+    assert_eq!(
+        message,
+        "scan failed /archive: walk failed: permission denied"
+    );
+}
+
+#[test]
+fn verify_error_findings_enter_activity_log() {
+    let row = db::JobEventRow {
+        job_id: "job_verify_1".to_string(),
+        job_kind: "verify".to_string(),
+        root_id: None,
+        status: "completed_with_errors".to_string(),
+        phase: Some("verifying".to_string()),
+        current_path: Some("bad.bin".to_string()),
+        files_seen: 1,
+        files_done: 0,
+        files_skipped: 0,
+        errors: 1,
+        cancel_requested: false,
+        sequence: 3,
+        event_kind: "verify_finding".to_string(),
+        payload_json: serde_json::json!({
+            "type": "verify_finding",
+            "result": "error",
+            "relative_path": "bad.bin",
+            "error": "read failed"
+        })
+        .to_string(),
+        params_json: None,
+    };
+
+    let (_, message) = app::job_event_activity(&row).unwrap();
+
+    assert_eq!(message, "verify error bad.bin: read failed");
+}
+
+#[test]
+fn import_helper_progress_can_be_logged_as_activity() {
+    let progress = ImportProgress {
+        root_id: "root_1".to_string(),
+        root_path: "host:/archive".to_string(),
+        files_imported: 2,
+        files_queued: 4,
+        directories_processed: 1,
+        directories_queued: 1,
+        current_path: Some("bad.bin".to_string()),
+        phase: "remote helper skipped bad.bin: permission_denied: Permission denied".to_string(),
+    };
+
+    let (level, message) = app::import_progress_activity(&progress).unwrap();
+
+    assert_eq!(level, ActivityLevel::Warning);
+    assert_eq!(
+        message,
+        "import host:/archive at bad.bin: remote helper skipped bad.bin: permission_denied: Permission denied"
+    );
+}
+
+#[test]
 fn formats_plan_review_hint_and_count() {
     let review = db::TransferPlanEntryRow {
         relative_path: "incoming/foo.png".to_string(),
