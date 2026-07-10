@@ -283,7 +283,8 @@ pub(super) async fn run_loop(
             Some(root_id) => db::recent_jobs_and_events_for_root(conn, root_id, 300)?,
             None => db::recent_jobs_and_events(conn, 100)?,
         };
-        let job_rows = job_rows(&events);
+        let all_job_rows = job_rows(&events);
+        let job_rows = filtered_job_rows(&all_job_rows, &state.event_filter);
         if state.event_offset >= job_rows.len() {
             state.event_offset = job_rows.len().saturating_sub(1);
         }
@@ -347,6 +348,10 @@ pub(super) async fn run_loop(
                 }
                 if state.file_filter_editing {
                     handle_file_filter_input(&mut state, key.code);
+                    continue;
+                }
+                if state.event_filter_editing {
+                    handle_event_filter_input(&mut state, key.code);
                     continue;
                 }
                 if state.retarget_draft.is_some() {
@@ -439,6 +444,14 @@ pub(super) async fn run_loop(
                             format!("file filter: {}", state.file_filter)
                         };
                     }
+                    KeyCode::Char('/') if state.focus == FocusPane::Events => {
+                        state.event_filter_editing = true;
+                        state.status = if state.event_filter.is_empty() {
+                            "job filter: type text, Enter keep, Esc clear".to_string()
+                        } else {
+                            format!("job filter: {}", state.event_filter)
+                        };
+                    }
                     KeyCode::Esc
                         if state.focus == FocusPane::Roots && !state.root_filter.is_empty() =>
                     {
@@ -452,6 +465,13 @@ pub(super) async fn run_loop(
                         state.file_filter.clear();
                         state.file_offset = 0;
                         state.status = "file filter cleared".to_string();
+                    }
+                    KeyCode::Esc
+                        if state.focus == FocusPane::Events && !state.event_filter.is_empty() =>
+                    {
+                        state.event_filter.clear();
+                        state.event_offset = 0;
+                        state.status = "job filter cleared".to_string();
                     }
                     KeyCode::Char('f') => {
                         state.file_view = state.file_view.next();

@@ -49,6 +49,7 @@ pub(super) fn command_hint_lines(
 fn command_hint_needs_attention(state: &AppState) -> bool {
     state.root_filter_editing
         || state.file_filter_editing
+        || state.event_filter_editing
         || state.retarget_draft.is_some()
         || state.pending_delete_root_id.is_some()
         || state.pending_import.is_some()
@@ -63,6 +64,9 @@ pub(super) fn active_command_hint(state: &AppState, has_temporary_browse: bool) 
     }
     if state.file_filter_editing {
         return "type filter text  Backspace edit  Enter keep  Esc clear";
+    }
+    if state.event_filter_editing {
+        return "type job filter text  Backspace edit  Enter keep  Esc clear";
     }
     if state.retarget_draft.is_some() {
         return "type destination path  Enter apply  Esc cancel";
@@ -102,6 +106,6 @@ pub(super) fn active_command_hint(state: &AppState, has_temporary_browse: bool) 
         FocusPane::Plan => {
             "plan modal  arrows/PgUp/PgDn move  r run copies  a accept  d drop  e retarget  Esc close"
         }
-        FocusPane::Events => "c request cancel for selected job  Tab return to roots",
+        FocusPane::Events => "/ filter jobs  c request cancel for selected job  Tab return to roots",
     }
 }

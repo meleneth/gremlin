@@ -45,6 +45,8 @@ struct AppState {
     detail_selection_changed_at: Option<Instant>,
     plan_offset: usize,
     event_offset: usize,
+    event_filter: String,
+    event_filter_editing: bool,
     status: String,
     transfer_plan_draft: Option<TransferPlanDraft>,
     transfer_run_plan_id: Option<String>,

@@ -367,6 +367,101 @@ fn root_filter_title_and_hint_show_editing_state() {
 }
 
 #[test]
+fn job_filter_matches_projected_job_metadata() {
+    let rows = vec![
+        db::JobEventRow {
+            job_id: "job_scan_1".to_string(),
+            job_kind: "scan".to_string(),
+            status: "completed".to_string(),
+            phase: Some("finalizing".to_string()),
+            current_path: Some("photos/a.png".to_string()),
+            files_seen: 1,
+            files_done: 1,
+            files_skipped: 0,
+            errors: 0,
+            cancel_requested: false,
+            sequence: 1,
+            event_kind: "job_completed".to_string(),
+            payload_json: serde_json::json!({"message": "scan complete"}).to_string(),
+            params_json: None,
+        },
+        db::JobEventRow {
+            job_id: "job_transfer_1".to_string(),
+            job_kind: "transfer_copy".to_string(),
+            status: "running".to_string(),
+            phase: Some("copying".to_string()),
+            current_path: Some("video/b.mkv".to_string()),
+            files_seen: 3,
+            files_done: 1,
+            files_skipped: 0,
+            errors: 0,
+            cancel_requested: false,
+            sequence: 2,
+            event_kind: "job_progress".to_string(),
+            payload_json: serde_json::json!({"type": "job_progress"}).to_string(),
+            params_json: Some(
+                serde_json::json!({
+                    "source_path": "/src/video",
+                    "dest_path": "/dst/video"
+                })
+                .to_string(),
+            ),
+        },
+    ];
+
+    let kind_matches = filtered_job_rows(&rows, "TRANSFER");
+    assert_eq!(kind_matches.len(), 1);
+    assert_eq!(kind_matches[0].job_id, "job_transfer_1");
+
+    let target_matches = filtered_job_rows(&rows, "photos");
+    assert_eq!(target_matches.len(), 1);
+    assert_eq!(target_matches[0].job_id, "job_scan_1");
+
+    assert_eq!(filtered_job_rows(&rows, "missing").len(), 0);
+}
+
+#[test]
+fn job_filter_input_edits_and_clears_filter() {
+    let mut state = AppState {
+        event_filter_editing: true,
+        event_offset: 4,
+        ..AppState::default()
+    };
+
+    assert!(handle_event_filter_input(&mut state, KeyCode::Char('c')));
+    assert_eq!(state.event_filter, "c");
+    assert_eq!(state.event_offset, 0);
+    assert!(handle_event_filter_input(&mut state, KeyCode::Char('o')));
+    assert_eq!(state.event_filter, "co");
+    assert!(handle_event_filter_input(&mut state, KeyCode::Backspace));
+    assert_eq!(state.event_filter, "c");
+    assert!(handle_event_filter_input(&mut state, KeyCode::Esc));
+    assert_eq!(state.event_filter, "");
+    assert!(!state.event_filter_editing);
+}
+
+#[test]
+fn job_filter_title_and_hint_show_editing_state() {
+    let state = AppState {
+        event_filter: "copy".to_string(),
+        event_filter_editing: true,
+        ..AppState::default()
+    };
+
+    assert_eq!(jobs_title(&state), "Jobs /copy");
+    assert_eq!(
+        active_command_hint(&state, false),
+        "type job filter text  Backspace edit  Enter keep  Esc clear"
+    );
+
+    let kept = AppState {
+        event_filter: "copy".to_string(),
+        ..AppState::default()
+    };
+    assert_eq!(jobs_title(&kept), "Jobs filter:copy");
+}
+
+#[test]
 fn file_filter_matches_paths_and_status() {
     let files = vec![
         FileViewRow {

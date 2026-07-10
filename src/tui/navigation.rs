@@ -460,3 +460,45 @@ pub(super) fn handle_file_filter_input(state: &mut AppState, key: KeyCode) -> bo
         _ => false,
     }
 }
+
+pub(super) fn handle_event_filter_input(state: &mut AppState, key: KeyCode) -> bool {
+    match key {
+        KeyCode::Enter => {
+            state.event_filter_editing = false;
+            if state.event_filter.trim().is_empty() {
+                state.event_filter.clear();
+                state.status = "job filter cleared".to_string();
+            } else {
+                state.status = format!("job filter: {}", state.event_filter);
+            }
+            true
+        }
+        KeyCode::Esc => {
+            state.event_filter_editing = false;
+            state.event_filter.clear();
+            state.event_offset = 0;
+            state.status = "job filter cleared".to_string();
+            true
+        }
+        KeyCode::Backspace => {
+            state.event_filter.pop();
+            state.event_offset = 0;
+            state.status = if state.event_filter.is_empty() {
+                "job filter cleared".to_string()
+            } else {
+                format!("job filter: {}", state.event_filter)
+            };
+            true
+        }
+        KeyCode::Char(ch) => {
+            if !ch.is_control() {
+                state.event_filter.push(ch);
+                state.event_offset = 0;
+                state.status = format!("job filter: {}", state.event_filter);
+                return true;
+            }
+            false
+        }
+        _ => false,
+    }
+}

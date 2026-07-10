@@ -6,10 +6,14 @@ pub(super) struct EventsPane<'a> {
 
 impl Widget for EventsPane<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let jobs = job_rows(self.events);
-        let visible = jobs.iter().enumerate().skip(self.state.event_offset);
-        let items = if jobs.is_empty() {
-            vec![ListItem::new("No activity for this root yet")]
+        let visible = self.events.iter().enumerate().skip(self.state.event_offset);
+        let items = if self.events.is_empty() {
+            let message = if self.state.event_filter.is_empty() {
+                "No activity for this root yet"
+            } else {
+                "No jobs match the active filter"
+            };
+            vec![ListItem::new(message)]
         } else {
             let mut rows = vec![ListItem::new(event_header()).style(theme::header())];
             rows.extend(visible.map(|(idx, row)| {
@@ -29,7 +33,11 @@ impl Widget for EventsPane<'_> {
         };
         List::new(items)
             .style(theme::panel())
-            .block(focus_block("Jobs", FocusPane::Events, self.state.focus))
+            .block(focus_block(
+                jobs_title(self.state),
+                FocusPane::Events,
+                self.state.focus,
+            ))
             .render(area, buf);
     }
 }
@@ -41,6 +49,37 @@ pub(super) fn job_rows(events: &[db::JobEventRow]) -> Vec<db::JobEventRow> {
         .filter(|row| seen.insert(row.job_id.clone()))
         .cloned()
         .collect()
+}
+
+pub(super) fn filtered_job_rows(rows: &[db::JobEventRow], filter: &str) -> Vec<db::JobEventRow> {
+    let needle = filter.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return rows.to_vec();
+    }
+    rows.iter()
+        .filter(|row| event_matches_filter(row, &needle))
+        .cloned()
+        .collect()
+}
+
+fn event_matches_filter(row: &db::JobEventRow, needle: &str) -> bool {
+    row.job_id.to_ascii_lowercase().contains(needle)
+        || row.job_kind.to_ascii_lowercase().contains(needle)
+        || event_status(row).to_ascii_lowercase().contains(needle)
+        || event_label(row).to_ascii_lowercase().contains(needle)
+        || event_target(row).to_ascii_lowercase().contains(needle)
+        || progress_count(row).to_ascii_lowercase().contains(needle)
+        || row.payload_json.to_ascii_lowercase().contains(needle)
+}
+
+pub(super) fn jobs_title(state: &AppState) -> String {
+    if state.event_filter.is_empty() {
+        "Jobs".to_string()
+    } else if state.event_filter_editing {
+        format!("Jobs /{}", state.event_filter)
+    } else {
+        format!("Jobs filter:{}", state.event_filter)
+    }
 }
 
 pub(super) fn event_header() -> String {
