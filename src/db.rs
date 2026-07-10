@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path};
 
 use rusqlite::{params, Connection, OptionalExtension};
+use sea_query::{Alias, Expr, ExprTrait, Query, SqliteQueryBuilder, TableRef};
 use serde_json::Value;
 
 use crate::error::GremlinError;
@@ -42,10 +43,22 @@ pub struct CachedDirectoryEntry {
     pub name: String,
     pub relative_path: String,
     pub file_count: i64,
+    pub occurrence_count: Option<i64>,
     pub size_bytes: i64,
     pub modified_at: Option<String>,
     pub content_id: Option<String>,
     pub status: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileAppearanceRow {
+    pub root_id: String,
+    pub root_path: String,
+    pub root_label: Option<String>,
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub modified_at: Option<String>,
+    pub content_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2249,6 +2262,7 @@ fn cached_child_directories(
                 name: name.clone(),
                 relative_path: name,
                 file_count: row.get(1)?,
+                occurrence_count: None,
                 size_bytes: row.get(2)?,
                 modified_at: None,
                 content_id: None,
@@ -2291,6 +2305,7 @@ fn cached_child_directories(
             name: name.clone(),
             relative_path: format!("{parent}/{name}"),
             file_count: row.get(1)?,
+            occurrence_count: None,
             size_bytes: row.get(2)?,
             modified_at: None,
             content_id: None,
@@ -2308,10 +2323,29 @@ fn cached_child_files(
     if parent == "." {
         let mut stmt = conn.prepare(
             r#"
-            SELECT relative_path, size_bytes, modified_at, content_id, status
-            FROM path_observations
-            WHERE root_id = ?1 AND instr(relative_path, '/') = 0
-            ORDER BY relative_path ASC
+            SELECT
+                p.relative_path,
+                p.size_bytes,
+                p.modified_at,
+                p.content_id,
+                p.status,
+                CASE
+                    WHEN p.content_id IS NOT NULL THEN (
+                        SELECT COUNT(*)
+                        FROM path_observations x
+                        WHERE x.content_id = p.content_id
+                    )
+                    ELSE (
+                        SELECT COUNT(*)
+                        FROM path_observations x
+                        WHERE x.basename = p.basename
+                          AND x.size_bytes = p.size_bytes
+                          AND (x.modified_at = p.modified_at OR (x.modified_at IS NULL AND p.modified_at IS NULL))
+                    )
+                END AS occurrence_count
+            FROM path_observations p
+            WHERE p.root_id = ?1 AND instr(p.relative_path, '/') = 0
+            ORDER BY p.relative_path ASC
             "#,
         )?;
         let rows = stmt.query_map(params![root_id], cached_file_entry_from_row)?;
@@ -2323,12 +2357,31 @@ fn cached_child_files(
     let like = format!("{}%", escape_like_pattern(&prefix));
     let mut stmt = conn.prepare(
         r#"
-        SELECT relative_path, size_bytes, modified_at, content_id, status
-        FROM path_observations
-        WHERE root_id = ?1
-          AND relative_path LIKE ?2 ESCAPE '\'
-          AND instr(substr(relative_path, ?3), '/') = 0
-        ORDER BY relative_path ASC
+        SELECT
+            p.relative_path,
+            p.size_bytes,
+            p.modified_at,
+            p.content_id,
+            p.status,
+            CASE
+                WHEN p.content_id IS NOT NULL THEN (
+                    SELECT COUNT(*)
+                    FROM path_observations x
+                    WHERE x.content_id = p.content_id
+                )
+                ELSE (
+                    SELECT COUNT(*)
+                    FROM path_observations x
+                    WHERE x.basename = p.basename
+                      AND x.size_bytes = p.size_bytes
+                      AND (x.modified_at = p.modified_at OR (x.modified_at IS NULL AND p.modified_at IS NULL))
+                )
+            END AS occurrence_count
+        FROM path_observations p
+        WHERE p.root_id = ?1
+          AND p.relative_path LIKE ?2 ESCAPE '\'
+          AND instr(substr(p.relative_path, ?3), '/') = 0
+        ORDER BY p.relative_path ASC
         "#,
     )?;
     let rows = stmt.query_map(
@@ -2349,6 +2402,7 @@ fn cached_file_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Cache
         name,
         relative_path,
         file_count: 1,
+        occurrence_count: row.get(5)?,
         size_bytes: row.get(1)?,
         modified_at: row.get(2)?,
         content_id: row.get(3)?,
@@ -2469,6 +2523,92 @@ fn collision_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CollisionRow>
         size_bytes: size as u64,
         modified_at: row.get(2)?,
         content_id: row.get(3)?,
+    })
+}
+
+pub fn file_appearances(
+    conn: &Connection,
+    content_id: Option<&str>,
+    basename: &str,
+    size_bytes: u64,
+    modified_at: Option<&str>,
+) -> rusqlite::Result<Vec<FileAppearanceRow>> {
+    if let Some(content_id) = content_id {
+        let p = file_appearances_aliases().path_observations;
+        let sql = file_appearances_base_query()
+            .and_where(Expr::col((p, Alias::new("content_id"))).eq(Expr::cust("?1")))
+            .to_string(SqliteQueryBuilder);
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![content_id], file_appearance_from_row)?;
+        return rows.collect();
+    }
+
+    let p = file_appearances_aliases().path_observations;
+    let modified_matches = Expr::col((p.clone(), Alias::new("modified_at")))
+        .eq(Expr::cust("?3"))
+        .or(Expr::col((p.clone(), Alias::new("modified_at")))
+            .is_null()
+            .and(Expr::cust("?3 IS NULL")));
+    let sql = file_appearances_base_query()
+        .and_where(Expr::col((p.clone(), Alias::new("basename"))).eq(Expr::cust("?1")))
+        .and_where(Expr::col((p, Alias::new("size_bytes"))).eq(Expr::cust("?2")))
+        .and_where(modified_matches)
+        .to_string(SqliteQueryBuilder);
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(
+        params![basename, size_bytes as i64, modified_at],
+        file_appearance_from_row,
+    )?;
+    rows.collect()
+}
+
+struct FileAppearanceAliases {
+    roots: Alias,
+    path_observations: Alias,
+}
+
+fn file_appearances_aliases() -> FileAppearanceAliases {
+    FileAppearanceAliases {
+        roots: Alias::new("r"),
+        path_observations: Alias::new("p"),
+    }
+}
+
+fn file_appearances_base_query() -> sea_query::SelectStatement {
+    let table_roots = Alias::new("roots");
+    let table_path_observations = Alias::new("path_observations");
+    let aliases = file_appearances_aliases();
+    let r = aliases.roots;
+    let p = aliases.path_observations;
+
+    Query::select()
+        .expr(Expr::col((r.clone(), Alias::new("id"))))
+        .expr(Expr::col((r.clone(), Alias::new("path"))))
+        .expr(Expr::col((r.clone(), Alias::new("label"))))
+        .expr(Expr::col((p.clone(), Alias::new("relative_path"))))
+        .expr(Expr::col((p.clone(), Alias::new("size_bytes"))))
+        .expr(Expr::col((p.clone(), Alias::new("modified_at"))))
+        .expr(Expr::col((p.clone(), Alias::new("content_id"))))
+        .from_as(table_path_observations, p.clone())
+        .inner_join(
+            TableRef::from(table_roots).alias(r.clone()),
+            Expr::col((r.clone(), Alias::new("id"))).equals((p.clone(), Alias::new("root_id"))),
+        )
+        .order_by((r, Alias::new("path")), sea_query::Order::Asc)
+        .order_by((p, Alias::new("relative_path")), sea_query::Order::Asc)
+        .to_owned()
+}
+
+fn file_appearance_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<FileAppearanceRow> {
+    let size: i64 = row.get(4)?;
+    Ok(FileAppearanceRow {
+        root_id: row.get(0)?,
+        root_path: row.get(1)?,
+        root_label: row.get(2)?,
+        relative_path: row.get(3)?,
+        size_bytes: size as u64,
+        modified_at: row.get(5)?,
+        content_id: row.get(6)?,
     })
 }
 
@@ -3220,5 +3360,65 @@ mod tests {
             events_for_job(&conn, &job_id).unwrap()[0].event_kind,
             "job_created"
         );
+    }
+
+    #[test]
+    fn file_appearances_find_matches_by_content_or_stat_identity() {
+        let conn = Connection::open_in_memory().unwrap();
+        configure(&conn).unwrap();
+        init_schema(&conn).unwrap();
+        let machine_id = ensure_local_machine_with_label(&conn, None).unwrap();
+        let root_a = ensure_root(&conn, &machine_id, "/tmp/root-a").unwrap();
+        let root_b = ensure_root(&conn, &machine_id, "/tmp/root-b").unwrap();
+        let content_id = ensure_content_object(&conn, 10, "b3", "sha").unwrap();
+        for (root_id, path) in [(&root_a, "photos/foo.png"), (&root_b, "dupes/foo.png")] {
+            insert_path_observation(
+                &conn,
+                PathObservationInput {
+                    machine_id: &machine_id,
+                    root_id,
+                    relative_path: path,
+                    basename: "foo.png",
+                    parent_path: ".",
+                    size_bytes: 10,
+                    modified_at: Some("2026-07-08T12:00:00Z"),
+                    content_id: Some(&content_id),
+                },
+            )
+            .unwrap();
+        }
+
+        let content_matches =
+            file_appearances(&conn, Some(&content_id), "foo.png", 10, None).unwrap();
+        assert_eq!(content_matches.len(), 2);
+        assert!(content_matches
+            .iter()
+            .any(|row| row.root_path == "/tmp/root-a" && row.relative_path == "photos/foo.png"));
+
+        let root_c = ensure_root(&conn, &machine_id, "/tmp/root-c").unwrap();
+        let root_d = ensure_root(&conn, &machine_id, "/tmp/root-d").unwrap();
+        for (root_id, path) in [(&root_c, "one/bar.txt"), (&root_d, "two/bar.txt")] {
+            insert_path_observation(
+                &conn,
+                PathObservationInput {
+                    machine_id: &machine_id,
+                    root_id,
+                    relative_path: path,
+                    basename: "bar.txt",
+                    parent_path: ".",
+                    size_bytes: 25,
+                    modified_at: Some("2026-07-09T01:02:03Z"),
+                    content_id: None,
+                },
+            )
+            .unwrap();
+        }
+
+        let stat_matches =
+            file_appearances(&conn, None, "bar.txt", 25, Some("2026-07-09T01:02:03Z")).unwrap();
+        assert_eq!(stat_matches.len(), 2);
+        assert!(stat_matches
+            .iter()
+            .all(|row| row.relative_path.ends_with("bar.txt")));
     }
 }

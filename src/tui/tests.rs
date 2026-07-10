@@ -270,6 +270,7 @@ fn file_filter_matches_paths_and_status() {
             content_id: None,
             status: "present".to_string(),
             kind: FileKind::File,
+            occurrence_count: None,
         },
         FileViewRow {
             relative_path: "docs/readme.md".to_string(),
@@ -278,6 +279,7 @@ fn file_filter_matches_paths_and_status() {
             content_id: None,
             status: "remote".to_string(),
             kind: FileKind::File,
+            occurrence_count: None,
         },
     ];
 
@@ -308,6 +310,21 @@ fn file_filter_input_edits_and_clears_filter() {
     assert!(handle_file_filter_input(&mut state, KeyCode::Esc));
     assert_eq!(state.file_filter, "");
     assert!(!state.file_filter_editing);
+}
+
+#[test]
+fn file_row_shows_index_appearance_count() {
+    let file = FileViewRow {
+        relative_path: "photos/cat.png".to_string(),
+        size_bytes: 10,
+        modified_at: None,
+        content_id: None,
+        status: "present".to_string(),
+        kind: FileKind::File,
+        occurrence_count: Some(3),
+    };
+
+    assert!(file_row("> ", false, &file, FileView::Basic).contains("   3"));
 }
 
 #[test]
@@ -667,6 +684,7 @@ fn persisted_root_enter_and_backspace_navigate_directories() {
         content_id: None,
         status: "dir:1".to_string(),
         kind: FileKind::Directory,
+        occurrence_count: None,
     };
 
     open_persisted_file_entry(&mut state, Some("root_1"), Some(&dir));
@@ -710,6 +728,7 @@ fn directory_rows_mark_descendant_files() {
         content_id: None,
         status: "dir:2".to_string(),
         kind: FileKind::Directory,
+        occurrence_count: None,
     };
     let mut state = AppState::default();
 
@@ -747,6 +766,7 @@ fn temporary_transfer_source_targets_selected_file() {
         content_id: None,
         status: "remote".to_string(),
         kind: FileKind::File,
+        occurrence_count: None,
     };
 
     let target = temporary_transfer_import_target(FocusPane::Files, &browse, Some(&selected));
@@ -774,6 +794,7 @@ fn temporary_transfer_source_marks_all_for_directory_target() {
         content_id: None,
         status: "dir".to_string(),
         kind: FileKind::Directory,
+        occurrence_count: None,
     };
 
     let target = temporary_transfer_import_target(FocusPane::Files, &browse, Some(&selected));
@@ -1154,6 +1175,7 @@ fn app_screen_renders_plan_as_modal_when_plan_focus_is_active() {
         summary: None,
         selection: None,
         detail_content: None,
+        file_appearances: &[],
         events: &[],
         root_count: 0,
         transfer_progress: None,
@@ -1207,12 +1229,22 @@ fn detail_pane_renders_selected_file_hashes() {
         content_id: Some("content_1234567890".to_string()),
         status: "present".to_string(),
         kind: FileKind::File,
+        occurrence_count: Some(2),
     };
     let content = db::ContentObjectRow {
         size_bytes: 10,
         blake3: Some("blake3-hash-value".to_string()),
         sha256: Some("sha256-hash-value".to_string()),
     };
+    let appearances = vec![db::FileAppearanceRow {
+        root_id: "root_1".to_string(),
+        root_path: "/archive".to_string(),
+        root_label: Some("Archive".to_string()),
+        relative_path: "photos/foo.png".to_string(),
+        size_bytes: 10,
+        modified_at: Some("2026-07-08T12:00:00Z".to_string()),
+        content_id: Some("content_1234567890".to_string()),
+    }];
     let mut buffer = Buffer::empty(Rect::new(0, 0, 100, 20));
 
     DetailPane {
@@ -1224,6 +1256,7 @@ fn detail_pane_renders_selected_file_hashes() {
             selection: None,
             file: Some(&file),
             content: Some(&content),
+            appearances: &appearances,
             selected_paths: &selected_paths,
             plan: None,
             collection: None,
@@ -1240,6 +1273,8 @@ fn detail_pane_renders_selected_file_hashes() {
         .collect::<String>();
     assert!(text.contains("BLAKE3: blake3-hash-value"));
     assert!(text.contains("SHA-256: sha256-hash-value"));
+    assert!(text.contains("Appearances: 1"));
+    assert!(text.contains("Archive:photos/foo.png"));
 }
 
 #[test]
@@ -1266,6 +1301,7 @@ fn detail_pane_renders_import_progress() {
             selection: None,
             file: None,
             content: None,
+            appearances: &[],
             selected_paths: &selected_paths,
             plan: None,
             collection: None,
@@ -1302,6 +1338,7 @@ fn app_screen_renders_empty_state_widgets() {
         summary: None,
         selection: None,
         detail_content: None,
+        file_appearances: &[],
         events: &[],
         root_count: 0,
         transfer_progress: None,
@@ -1344,6 +1381,7 @@ fn app_screen_renders_open_root_modal() {
         summary: None,
         selection: None,
         detail_content: None,
+        file_appearances: &[],
         events: &[],
         root_count: 0,
         transfer_progress: None,
@@ -1383,6 +1421,7 @@ fn app_screen_renders_import_decision_modal() {
         summary: None,
         selection: None,
         detail_content: None,
+        file_appearances: &[],
         events: &[],
         root_count: 0,
         transfer_progress: None,
@@ -1426,6 +1465,7 @@ fn app_screen_renders_transfer_destination_modal_with_source_context() {
         summary: None,
         selection: None,
         detail_content: None,
+        file_appearances: &[],
         events: &[],
         root_count: 0,
         transfer_progress: None,

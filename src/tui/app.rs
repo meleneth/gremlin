@@ -74,6 +74,7 @@ pub(super) async fn run_loop(
                 summary: None,
                 selection: None,
                 detail_content: None,
+                file_appearances: &[],
                 events: &loading_events,
                 root_count: visible_root_count(&state, 0),
                 transfer_progress: None,
@@ -216,6 +217,25 @@ pub(super) async fn run_loop(
                     state.focus = FocusPane::Roots;
                     state.background_finished(ActivityLevel::Success, status);
                 }
+                TuiMessage::FileAppearancesLoaded { key, result } => {
+                    if state.active_file_appearance_key.as_deref() == Some(key.as_str()) {
+                        state.active_file_appearance_key = None;
+                    }
+                    if state.file_appearance_key.as_deref() == Some(key.as_str()) {
+                        match result {
+                            Ok(appearances) => {
+                                state.file_appearances = appearances;
+                            }
+                            Err(err) => {
+                                state.file_appearances.clear();
+                                state.set_status(
+                                    ActivityLevel::Error,
+                                    format!("file appearance lookup failed: {err}"),
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
         let roots = db::roots(conn)?;
@@ -285,7 +305,9 @@ pub(super) async fn run_loop(
         };
         let transfer_progress = latest_transfer_progress(&events);
         state.sync_detail_selection(detail_key, files.len(), Instant::now());
-        let detail_content = selected_file_content(conn, files.get(state.detail_file_offset))?;
+        let detail_file = files.get(state.detail_file_offset);
+        let detail_content = selected_file_content(conn, detail_file)?;
+        sync_file_appearances(db_path, job_tx.clone(), &mut state, detail_file);
         let selected_temporary = selected_temporary_browse(&state);
 
         terminal.draw(|frame| {
@@ -300,6 +322,7 @@ pub(super) async fn run_loop(
                     summary: summary.as_ref(),
                     selection: selection_summary.as_ref(),
                     detail_content: detail_content.as_ref(),
+                    file_appearances: &state.file_appearances,
                     events: &job_rows,
                     root_count,
                     transfer_progress,
@@ -817,6 +840,88 @@ fn selected_file_content(
         return Ok(None);
     };
     Ok(db::content_object_by_id(conn, content_id)?)
+}
+
+#[derive(Debug, Clone)]
+struct FileAppearanceLookup {
+    key: String,
+    content_id: Option<String>,
+    basename: String,
+    size_bytes: u64,
+    modified_at: Option<String>,
+}
+
+fn sync_file_appearances(
+    db_path: &Path,
+    job_tx: mpsc::UnboundedSender<TuiMessage>,
+    state: &mut AppState,
+    file: Option<&FileViewRow>,
+) {
+    let Some(lookup) = file_appearance_lookup(file) else {
+        state.file_appearance_key = None;
+        state.active_file_appearance_key = None;
+        state.file_appearances.clear();
+        return;
+    };
+    if state.file_appearance_key.as_deref() == Some(lookup.key.as_str()) {
+        return;
+    }
+
+    state.file_appearance_key = Some(lookup.key.clone());
+    state.active_file_appearance_key = Some(lookup.key.clone());
+    state.file_appearances.clear();
+    let db_path = db_path.to_path_buf();
+    task::spawn_blocking(move || {
+        let result = load_file_appearances(&db_path, &lookup);
+        let _ = job_tx.send(TuiMessage::FileAppearancesLoaded {
+            key: lookup.key,
+            result,
+        });
+    });
+}
+
+fn load_file_appearances(
+    db_path: &Path,
+    lookup: &FileAppearanceLookup,
+) -> Result<Vec<db::FileAppearanceRow>, String> {
+    let conn = db::open_existing(db_path).map_err(|err| err.to_string())?;
+    db::file_appearances(
+        &conn,
+        lookup.content_id.as_deref(),
+        &lookup.basename,
+        lookup.size_bytes,
+        lookup.modified_at.as_deref(),
+    )
+    .map_err(|err| err.to_string())
+}
+
+fn file_appearance_lookup(file: Option<&FileViewRow>) -> Option<FileAppearanceLookup> {
+    let file = file?;
+    if file.kind != FileKind::File {
+        return None;
+    }
+    let size_bytes = file.size_bytes.max(0) as u64;
+    let basename = file_basename(&file.relative_path).to_string();
+    let key = match file.content_id.as_deref() {
+        Some(content_id) => format!("content:{content_id}"),
+        None => format!(
+            "stat:{}:{}:{}",
+            basename,
+            size_bytes,
+            file.modified_at.as_deref().unwrap_or("-")
+        ),
+    };
+    Some(FileAppearanceLookup {
+        key,
+        content_id: file.content_id.clone(),
+        basename,
+        size_bytes,
+        modified_at: file.modified_at.clone(),
+    })
+}
+
+fn file_basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 pub(super) fn select_active_import_root(state: &mut AppState, roots: &[db::RootRow]) {

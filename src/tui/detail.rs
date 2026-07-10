@@ -45,8 +45,9 @@ impl Widget for DetailPane<'_> {
         };
         let file_lines = if let Some(file) = data.file {
             let hash_lines = file_hash_lines(data.content);
+            let appearance_lines = file_appearance_lines(data.appearances);
             format!(
-                "File: {}\nSize: {} ({} bytes) | Status: {} | Marked: {}\nModified: {} | Content: {}\n{}Metadata: not extracted yet",
+                "File: {}\nSize: {} ({} bytes) | Status: {} | Marked: {}\nModified: {} | Content: {}\n{}{}Metadata: not extracted yet",
                 file.relative_path,
                 human_size(file.size_bytes as u64),
                 file.size_bytes,
@@ -58,10 +59,11 @@ impl Widget for DetailPane<'_> {
                 },
                 file.modified_at.as_deref().unwrap_or("-"),
                 file.content_id.as_deref().map(short_id).unwrap_or("stat-only"),
-                hash_lines
+                hash_lines,
+                appearance_lines
             )
         } else {
-            "File: -\nSize: - | Status: - | Modified: -\nContent: -\nHashes: -\nMetadata: not extracted yet"
+            "File: -\nSize: - | Status: - | Modified: -\nContent: -\nHashes: -\nAppearances: -\nMetadata: not extracted yet"
                 .to_string()
         };
         let plan_lines = if let Some(plan) = data.plan {
@@ -151,6 +153,39 @@ fn file_hash_lines(content: Option<&db::ContentObjectRow>) -> String {
         content.blake3.as_deref().unwrap_or("-"),
         content.sha256.as_deref().unwrap_or("-")
     )
+}
+
+fn file_appearance_lines(appearances: &[db::FileAppearanceRow]) -> String {
+    if appearances.is_empty() {
+        return "Appearances: -\n".to_string();
+    }
+    let mut lines = vec![format!("Appearances: {}", appearances.len())];
+    lines.extend(appearances.iter().take(8).map(|appearance| {
+        format!(
+            "- {} {}:{} | {} | {}",
+            short_id(&appearance.root_id),
+            truncate(&appearance_root_label(appearance), 24),
+            truncate(&appearance.relative_path, 52),
+            human_size(appearance.size_bytes),
+            appearance
+                .content_id
+                .as_deref()
+                .map(short_id)
+                .or(appearance.modified_at.as_deref())
+                .unwrap_or("stat-only")
+        )
+    }));
+    if appearances.len() > 8 {
+        lines.push(format!("... {} more", appearances.len() - 8));
+    }
+    format!("{}\n", lines.join("\n"))
+}
+
+fn appearance_root_label(appearance: &db::FileAppearanceRow) -> String {
+    appearance
+        .root_label
+        .clone()
+        .unwrap_or_else(|| appearance.root_path.clone())
 }
 
 fn collection_detail_lines(collection: &CollectionSnapshot) -> String {

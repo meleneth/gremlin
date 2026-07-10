@@ -55,6 +55,9 @@ struct AppState {
     active_job_ids: BTreeSet<String>,
     active_import_root_id: Option<String>,
     active_import_progress: Option<ImportProgress>,
+    active_file_appearance_key: Option<String>,
+    file_appearance_key: Option<String>,
+    file_appearances: Vec<db::FileAppearanceRow>,
     transfer_error_activity_keys: BTreeSet<String>,
     transfer_error_count_by_job: BTreeMap<String, i64>,
     resumable_transfer_plans: Vec<db::TransferPlanRow>,
@@ -267,6 +270,7 @@ struct FileViewRow {
     content_id: Option<String>,
     status: String,
     kind: FileKind,
+    occurrence_count: Option<i64>,
 }
 
 impl From<InitialBrowse> for TemporaryBrowse {
@@ -292,6 +296,7 @@ impl From<&db::FileRow> for FileViewRow {
             content_id: value.content_id.clone(),
             status: value.status.clone(),
             kind: FileKind::File,
+            occurrence_count: None,
         }
     }
 }
@@ -316,6 +321,7 @@ impl FileViewRow {
                 }
             }),
             kind,
+            occurrence_count: entry.occurrence_count,
         }
     }
 
@@ -336,6 +342,7 @@ impl FileViewRow {
                 "remote".to_string()
             },
             kind,
+            occurrence_count: None,
         }
     }
 }
@@ -446,6 +453,10 @@ enum TuiMessage {
         mark_all: bool,
         status: String,
     },
+    FileAppearancesLoaded {
+        key: String,
+        result: Result<Vec<db::FileAppearanceRow>, String>,
+    },
 }
 
 struct InfoBarData<'a> {
@@ -464,6 +475,7 @@ struct DetailData<'a> {
     selection: Option<&'a db::SelectionSummary>,
     file: Option<&'a FileViewRow>,
     content: Option<&'a db::ContentObjectRow>,
+    appearances: &'a [db::FileAppearanceRow],
     selected_paths: &'a BTreeSet<String>,
     plan: Option<&'a PlanSnapshot>,
     collection: Option<&'a CollectionSnapshot>,

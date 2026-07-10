@@ -71,17 +71,20 @@ pub(super) fn file_row_selected(file: &FileViewRow, selected_paths: &BTreeSet<St
 pub(super) fn file_header(view: FileView) -> String {
     match view {
         FileView::Basic => format!(
-            "{:<2} {:<1} {:<24} {:>9} {:<8}",
-            "", "M", "PATH", "SIZE", "STATE"
+            "{:<2} {:>3} {:<1} {:<22} {:>9} {:<8}",
+            "", "#", "M", "PATH", "SIZE", "STATE"
         ),
         FileView::Meta => format!(
-            "{:<2} {:<1} {:<18} {:>9} {:<18}",
-            "", "M", "PATH", "SIZE", "MODIFIED"
+            "{:<2} {:>3} {:<1} {:<16} {:>9} {:<18}",
+            "", "#", "M", "PATH", "SIZE", "MODIFIED"
         ),
-        FileView::Hash => format!("{:<2} {:<1} {:<26} {:<18}", "", "M", "PATH", "CONTENT"),
+        FileView::Hash => format!(
+            "{:<2} {:>3} {:<1} {:<24} {:<18}",
+            "", "#", "M", "PATH", "CONTENT"
+        ),
         FileView::All => format!(
-            "{:<2} {:<1} {:<14} {:>8} {:<6} {:<8} {:<10}",
-            "", "M", "PATH", "SIZE", "STATE", "HASH", "MODIFIED"
+            "{:<2} {:>3} {:<1} {:<12} {:>8} {:<6} {:<8} {:<10}",
+            "", "#", "M", "PATH", "SIZE", "STATE", "HASH", "MODIFIED"
         ),
     }
 }
@@ -90,6 +93,7 @@ pub(super) fn file_row(marker: &str, selected: bool, file: &FileViewRow, view: F
     let hash = file.content_id.as_deref().map(short_id).unwrap_or("stat");
     let modified = file.modified_at.as_deref().unwrap_or("-");
     let marked = if selected { "*" } else { " " };
+    let occurrences = file_occurrence_label(file);
     let path = if file.kind == FileKind::Directory {
         format!("{}/", file.relative_path)
     } else {
@@ -97,38 +101,52 @@ pub(super) fn file_row(marker: &str, selected: bool, file: &FileViewRow, view: F
     };
     match view {
         FileView::Basic => format!(
-            "{:<2} {:<1} {:<24} {:>9} {:<8}",
+            "{:<2} {:>3} {:<1} {:<22} {:>9} {:<8}",
             marker,
+            occurrences,
             marked,
-            truncate(&path, 24),
+            truncate(&path, 22),
             human_size(file.size_bytes as u64),
             truncate(&file.status, 8)
         ),
         FileView::Meta => format!(
-            "{:<2} {:<1} {:<18} {:>9} {:<18}",
+            "{:<2} {:>3} {:<1} {:<16} {:>9} {:<18}",
             marker,
+            occurrences,
             marked,
-            truncate(&path, 18),
+            truncate(&path, 16),
             human_size(file.size_bytes as u64),
             truncate(modified, 18)
         ),
         FileView::Hash => format!(
-            "{:<2} {:<1} {:<26} {:<18}",
+            "{:<2} {:>3} {:<1} {:<24} {:<18}",
             marker,
+            occurrences,
             marked,
-            truncate(&path, 26),
+            truncate(&path, 24),
             truncate(hash, 18)
         ),
         FileView::All => format!(
-            "{:<2} {:<1} {:<14} {:>8} {:<6} {:<8} {:<10}",
+            "{:<2} {:>3} {:<1} {:<12} {:>8} {:<6} {:<8} {:<10}",
             marker,
+            occurrences,
             marked,
-            truncate(&path, 14),
+            truncate(&path, 12),
             human_size(file.size_bytes as u64),
             truncate(&file.status, 6),
             truncate(hash, 8),
             truncate(modified, 10)
         ),
+    }
+}
+
+fn file_occurrence_label(file: &FileViewRow) -> String {
+    if file.kind == FileKind::Directory {
+        "-".to_string()
+    } else {
+        file.occurrence_count
+            .map(|count| count.to_string())
+            .unwrap_or_else(|| "-".to_string())
     }
 }
 
