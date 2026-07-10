@@ -14,10 +14,12 @@ mod util;
 use anyhow::Context;
 use clap::Parser;
 use cli::{
-    Cli, Commands, ConfigCommands, JobCommands, TargetCommands, TransferCommands, WorkerCommands,
+    Cli, Commands, ConfigCommands, DbCommands, JobCommands, TargetCommands, TransferCommands,
+    WorkerCommands,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Command;
@@ -233,6 +235,12 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         }
+        Some(Commands::Db { command }) => match command {
+            DbCommands::Delete { yes } => {
+                let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
+                delete_database_file(&db, yes)?;
+            }
+        },
         Some(Commands::Job { command }) => match command {
             JobCommands::Create { kind, path } => {
                 let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
@@ -533,6 +541,48 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn delete_database_file(db_path: &std::path::Path, yes: bool) -> anyhow::Result<()> {
+    let sidecars = sqlite_sidecar_paths(db_path);
+    if !yes {
+        println!("db:\t{}", db_path.display());
+        println!("exists:\t{}", db_path.exists());
+        for sidecar in &sidecars {
+            println!("sidecar:\t{}\t{}", sidecar.display(), sidecar.exists());
+        }
+        println!("confirm:\trerun with db delete --yes to remove this database file");
+        return Ok(());
+    }
+
+    let mut removed = 0usize;
+    for path in std::iter::once(db_path.to_path_buf()).chain(sidecars) {
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                removed += 1;
+                println!("removed:\t{}", path.display());
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                println!("missing:\t{}", path.display());
+            }
+            Err(err) => {
+                return Err(err).with_context(|| format!("removing {}", path.display()));
+            }
+        }
+    }
+    println!("deleted:\t{removed} file(s)");
+    Ok(())
+}
+
+fn sqlite_sidecar_paths(db_path: &std::path::Path) -> Vec<PathBuf> {
+    ["-wal", "-shm"]
+        .into_iter()
+        .map(|suffix| {
+            let mut path = db_path.as_os_str().to_os_string();
+            path.push(suffix);
+            PathBuf::from(path)
+        })
+        .collect()
 }
 
 fn open_root_provider(db_path: PathBuf, machine_label: Option<String>) -> tui::OpenRootProvider {

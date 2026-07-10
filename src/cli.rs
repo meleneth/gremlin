@@ -81,6 +81,10 @@ pub enum Commands {
     Events,
     Files,
     Jobs,
+    Db {
+        #[command(subcommand)]
+        command: DbCommands,
+    },
     Job {
         #[command(subcommand)]
         command: JobCommands,
@@ -103,6 +107,15 @@ pub enum Commands {
         kind: Option<TargetKind>,
     },
     Tui,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DbCommands {
+    #[command(visible_alias = "reset")]
+    Delete {
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

@@ -152,4 +152,23 @@ RSpec.describe "Gremlin local file CLI integration" do
     repeat_plan = gremlin!("transfer", "plan", fixture_root, dest_root, "--all")
     expect(repeat_plan.stdout).to include("skip:\t3")
   end
+
+  it "deletes the configured database file only after confirmation" do
+    gremlin!("init")
+    File.binwrite("#{db_path}-wal", "wal")
+    File.binwrite("#{db_path}-shm", "shm")
+
+    preview = gremlin!("db", "delete")
+    expect(preview.stdout).to include("confirm:")
+    expect(File.exist?(db_path)).to eq(true)
+    expect(File.exist?("#{db_path}-wal")).to eq(true)
+    expect(File.exist?("#{db_path}-shm")).to eq(true)
+
+    deleted = gremlin!("db", "delete", "--yes")
+    expect(deleted.stdout).to include("removed:\t#{db_path}")
+    expect(deleted.stdout).to include("deleted:\t3 file(s)")
+    expect(File.exist?(db_path)).to eq(false)
+    expect(File.exist?("#{db_path}-wal")).to eq(false)
+    expect(File.exist?("#{db_path}-shm")).to eq(false)
+  end
 end

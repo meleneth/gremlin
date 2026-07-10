@@ -75,6 +75,8 @@ gremlin nas01:
 gremlin --no-tui nas01:
 
 gremlin init --db ./gremlin.db
+gremlin db delete --db ./gremlin.db
+gremlin db delete --yes --db ./gremlin.db
 gremlin config init --default-db ./gremlin.db --machine-label workstation
 
 gremlin scan PATH --db ./gremlin.db
@@ -119,6 +121,8 @@ gremlin tui --db ./gremlin.db
 ```
 
 `--db` is a global override and may appear before or after a subcommand. If it is omitted, Gremlin checks `GREMLIN_DB`, then `default_db` in the config file. Positional target flows open the TUI by default; use `--no-tui` when you want only the command-line registration/status output. Passing `host:` or `host:/path` as a positional target starts from a temporary SSH browse target; it does not persist a root unless you explicitly import observations for that target or run `target add`.
+
+`gremlin db delete` prints the resolved database path and whether the SQLite database and sidecar files exist. Add `--yes` to remove the database file plus `-wal` and `-shm` sidecars. The `reset` alias is available as `gremlin db reset --yes`.
 
 For the smooth target flow, Gremlin can also auto-create a default database at:
 
