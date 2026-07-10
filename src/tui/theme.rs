@@ -19,6 +19,8 @@ pub const ATTENTION: Color = Color::Rgb(0x1e, 0x40, 0x44);
 pub const REMOTE_UNINDEXED_BG: Color = Color::Rgb(0x2c, 0x1e, 0x31);
 pub const INDEXED_BG: Color = Color::Rgb(0x1e, 0x40, 0x44);
 pub const AVAILABLE_BG: Color = Color::Rgb(0x30, 0x53, 0x3a);
+pub const CHANGED_BG: Color = Color::Rgb(0x5a, 0x3f, 0x2c);
+pub const MISSING_BG: Color = Color::Rgb(0x4b, 0x1f, 0x35);
 pub const PROGRESS_GRADIENT: [Color; 6] = [BLUE, CYAN, LIME, ACCENT, ORANGE, RED];
 
 pub fn base() -> Style {
@@ -81,6 +83,20 @@ pub fn available_file() -> Style {
     Style::default()
         .fg(LIME)
         .bg(AVAILABLE_BG)
+        .add_modifier(Modifier::BOLD)
+}
+
+pub fn changed_file() -> Style {
+    Style::default()
+        .fg(ACCENT)
+        .bg(CHANGED_BG)
+        .add_modifier(Modifier::BOLD)
+}
+
+pub fn missing_file() -> Style {
+    Style::default()
+        .fg(RED)
+        .bg(MISSING_BG)
         .add_modifier(Modifier::BOLD)
 }
 

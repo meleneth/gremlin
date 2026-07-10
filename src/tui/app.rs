@@ -261,27 +261,7 @@ pub(super) async fn run_loop(
                 .iter()
                 .map(FileViewRow::from_cached_directory_entry)
                 .collect(),
-                (None, Some(browse)) => {
-                    let indexed_entries = temporary_browse_indexed_entries(conn, &roots, browse)?;
-                    let local_keys =
-                        temporary_browse_local_availability_keys(conn, browse, &indexed_entries)?;
-                    browse
-                        .entries
-                        .iter()
-                        .map(|entry| {
-                            let indexed = indexed_entries.get(entry.name.as_str());
-                            FileViewRow::from_temporary_entry(
-                                entry,
-                                indexed,
-                                if local_keys.contains(&entry.name) {
-                                    1
-                                } else {
-                                    0
-                                },
-                            )
-                        })
-                        .collect()
-                }
+                (None, Some(browse)) => temporary_browse_rows(conn, &roots, browse)?,
                 (None, None) => Vec::new(),
             };
             (
@@ -856,6 +836,43 @@ fn selected_file_content(
         return Ok(None);
     };
     Ok(db::content_object_by_id(conn, content_id)?)
+}
+
+pub(super) fn temporary_browse_rows(
+    conn: &Connection,
+    roots: &[db::RootRow],
+    browse: &TemporaryBrowse,
+) -> anyhow::Result<Vec<FileViewRow>> {
+    let indexed_entries = temporary_browse_indexed_entries(conn, roots, browse)?;
+    let local_keys = temporary_browse_local_availability_keys(conn, browse, &indexed_entries)?;
+    let live_names = browse
+        .entries
+        .iter()
+        .map(|entry| entry.name.clone())
+        .collect::<BTreeSet<_>>();
+    let mut rows = browse
+        .entries
+        .iter()
+        .map(|entry| {
+            let indexed = indexed_entries.get(entry.name.as_str());
+            FileViewRow::from_temporary_entry(
+                entry,
+                indexed,
+                if local_keys.contains(&entry.name) {
+                    1
+                } else {
+                    0
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.extend(
+        indexed_entries
+            .values()
+            .filter(|entry| !live_names.contains(&entry.name))
+            .map(FileViewRow::from_missing_temporary_indexed),
+    );
+    Ok(rows)
 }
 
 fn temporary_browse_local_availability_keys(

@@ -375,15 +375,137 @@ fn file_rows_show_unicode_evidence_markers() {
         occurrence_count: Some(1),
         index_state: FileIndexState::Available,
     };
+    let changed = FileViewRow {
+        relative_path: "changed.bin".to_string(),
+        size_bytes: 10,
+        modified_at: None,
+        content_id: None,
+        status: "changed".to_string(),
+        kind: FileKind::File,
+        occurrence_count: Some(1),
+        index_state: FileIndexState::RemoteChanged,
+    };
+    let missing = FileViewRow {
+        relative_path: "missing.bin".to_string(),
+        size_bytes: 10,
+        modified_at: None,
+        content_id: None,
+        status: "missing".to_string(),
+        kind: FileKind::File,
+        occurrence_count: Some(1),
+        index_state: FileIndexState::RemoteMissing,
+    };
 
     assert!(file_row("  ", false, &remote, FileView::Basic).contains("◇"));
     assert!(file_row("  ", false, &fast, FileView::Basic).contains("◌"));
     assert!(file_row("  ", false, &hashed, FileView::Basic).contains("◆"));
     assert!(file_row("  ", false, &local, FileView::Basic).contains("◉"));
+    assert!(file_row("  ", false, &changed, FileView::Basic).contains("!"));
+    assert!(file_row("  ", false, &missing, FileView::Basic).contains("×"));
     assert_eq!(
         file_row_style(&local, false, false).bg,
         theme::available_file().bg
     );
+    assert_eq!(
+        file_row_style(&changed, false, false).bg,
+        theme::changed_file().bg
+    );
+    assert_eq!(
+        file_row_style(&missing, false, false).bg,
+        theme::missing_file().bg
+    );
+    assert!(file_legend().contains("◇ remote"));
+    assert!(file_legend().contains("× missing"));
+}
+
+#[test]
+fn temporary_browse_rows_reconcile_live_remote_with_index() {
+    let conn = Connection::open_in_memory().unwrap();
+    db::init_schema(&conn).unwrap();
+    let ssh_machine = db::ensure_machine_hint(&conn, "nas01", Some("ssh")).unwrap();
+    let ssh_root = db::ensure_root(&conn, &ssh_machine, "nas01:/srv/photos").unwrap();
+    for (path, size, modified) in [
+        ("indexed.bin", 10, "2026-07-10T01:00:00Z"),
+        ("changed.bin", 11, "2026-07-10T01:00:00Z"),
+        ("missing.bin", 12, "2026-07-10T01:00:00Z"),
+    ] {
+        db::insert_path_observation(
+            &conn,
+            db::PathObservationInput {
+                machine_id: &ssh_machine,
+                root_id: &ssh_root,
+                relative_path: path,
+                basename: path,
+                parent_path: ".",
+                size_bytes: size,
+                modified_at: Some(modified),
+                content_id: None,
+            },
+        )
+        .unwrap();
+    }
+    let local_machine = db::ensure_local_machine_with_label(&conn, None).unwrap();
+    let local_root = db::ensure_root(&conn, &local_machine, "/tmp/local").unwrap();
+    db::insert_path_observation(
+        &conn,
+        db::PathObservationInput {
+            machine_id: &local_machine,
+            root_id: &local_root,
+            relative_path: "local.bin",
+            basename: "local.bin",
+            parent_path: ".",
+            size_bytes: 20,
+            modified_at: Some("2026-07-10T02:00:00Z"),
+            content_id: None,
+        },
+    )
+    .unwrap();
+    let browse = TemporaryBrowse {
+        label: "nas01:/srv/photos".to_string(),
+        machine_id: ssh_machine.clone(),
+        root_path: "/srv/photos".to_string(),
+        current_path: "/srv/photos".to_string(),
+        entries: vec![
+            InitialBrowseEntry {
+                kind: "file".to_string(),
+                name: "remote.bin".to_string(),
+                size_bytes: 9,
+                modified_at: Some("2026-07-10T01:00:00Z".to_string()),
+            },
+            InitialBrowseEntry {
+                kind: "file".to_string(),
+                name: "indexed.bin".to_string(),
+                size_bytes: 10,
+                modified_at: Some("2026-07-10T01:00:00Z".to_string()),
+            },
+            InitialBrowseEntry {
+                kind: "file".to_string(),
+                name: "changed.bin".to_string(),
+                size_bytes: 12,
+                modified_at: Some("2026-07-10T01:00:00Z".to_string()),
+            },
+            InitialBrowseEntry {
+                kind: "file".to_string(),
+                name: "local.bin".to_string(),
+                size_bytes: 20,
+                modified_at: Some("2026-07-10T02:00:00Z".to_string()),
+            },
+        ],
+        browse_provider: None,
+        import_provider: None,
+    };
+
+    let rows = app::temporary_browse_rows(&conn, &db::roots(&conn).unwrap(), &browse).unwrap();
+    let state_by_path = rows
+        .iter()
+        .map(|row| (row.relative_path.as_str(), row.index_state))
+        .collect::<BTreeMap<_, _>>();
+
+    assert_eq!(state_by_path["remote.bin"], FileIndexState::RemoteUnindexed);
+    assert_eq!(state_by_path["indexed.bin"], FileIndexState::Indexed);
+    assert_eq!(state_by_path["changed.bin"], FileIndexState::RemoteChanged);
+    assert_eq!(state_by_path["local.bin"], FileIndexState::Available);
+    assert_eq!(state_by_path["missing.bin"], FileIndexState::RemoteMissing);
 }
 
 #[test]

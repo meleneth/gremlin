@@ -20,6 +20,7 @@ impl Widget for FilesPane<'_> {
         } else {
             let mut rows =
                 vec![ListItem::new(file_header(self.state.file_view)).style(theme::header())];
+            rows.push(ListItem::new(file_legend()).style(theme::muted()));
             rows.extend(visible.map(|(idx, file)| {
                 let marker = if idx == self.state.file_offset {
                     "> "
@@ -41,6 +42,10 @@ impl Widget for FilesPane<'_> {
             ))
             .render(area, buf);
     }
+}
+
+pub(super) fn file_legend() -> &'static str {
+    "◇ remote  ◌ indexed  ◆ hash  ◉ local  ! changed  × missing  ▸ dir"
 }
 
 pub(super) fn files_title(state: &AppState) -> String {
@@ -145,6 +150,8 @@ pub(super) fn file_row_style(file: &FileViewRow, selected: bool, focused: bool) 
         FileIndexState::RemoteUnindexed => theme::remote_file(),
         FileIndexState::Indexed => theme::indexed_file(),
         FileIndexState::Available => theme::available_file(),
+        FileIndexState::RemoteChanged => theme::changed_file(),
+        FileIndexState::RemoteMissing => theme::missing_file(),
     }
 }
 
@@ -158,6 +165,8 @@ fn file_evidence_label(file: &FileViewRow, selected: bool) -> String {
     match file.index_state {
         FileIndexState::RemoteUnindexed => "◇".to_string(),
         FileIndexState::Available => "◉".to_string(),
+        FileIndexState::RemoteChanged => "!".to_string(),
+        FileIndexState::RemoteMissing => "×".to_string(),
         FileIndexState::Indexed if file.content_id.is_some() => "◆".to_string(),
         FileIndexState::Indexed => "◌".to_string(),
     }

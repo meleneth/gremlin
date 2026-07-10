@@ -267,6 +267,8 @@ enum FileIndexState {
     RemoteUnindexed,
     Indexed,
     Available,
+    RemoteChanged,
+    RemoteMissing,
 }
 
 #[derive(Debug, Clone)]
@@ -350,7 +352,10 @@ impl FileViewRow {
         let has_hash = content_id.is_some();
         let index_state = match indexed {
             Some(entry) if entry.kind == "dir" => FileIndexState::Indexed,
-            Some(_) if local_appearance_count > 0 => FileIndexState::Available,
+            Some(indexed) if temporary_entry_metadata_changed(entry, indexed) => {
+                FileIndexState::RemoteChanged
+            }
+            _ if local_appearance_count > 0 => FileIndexState::Available,
             Some(_) => FileIndexState::Indexed,
             None => FileIndexState::RemoteUnindexed,
         };
@@ -359,7 +364,9 @@ impl FileViewRow {
             size_bytes: entry.size_bytes as i64,
             modified_at: entry.modified_at.clone(),
             content_id,
-            status: if kind == FileKind::Directory {
+            status: if index_state == FileIndexState::RemoteChanged {
+                "changed".to_string()
+            } else if kind == FileKind::Directory {
                 if indexed.is_some() {
                     "dir:indexed".to_string()
                 } else {
@@ -379,6 +386,32 @@ impl FileViewRow {
             index_state,
         }
     }
+
+    fn from_missing_temporary_indexed(entry: &db::CachedDirectoryEntry) -> Self {
+        let kind = if entry.kind == "dir" {
+            FileKind::Directory
+        } else {
+            FileKind::File
+        };
+        Self {
+            relative_path: entry.name.clone(),
+            size_bytes: entry.size_bytes,
+            modified_at: entry.modified_at.clone(),
+            content_id: entry.content_id.clone(),
+            status: "missing".to_string(),
+            kind,
+            occurrence_count: entry.occurrence_count,
+            index_state: FileIndexState::RemoteMissing,
+        }
+    }
+}
+
+fn temporary_entry_metadata_changed(
+    live: &InitialBrowseEntry,
+    indexed: &db::CachedDirectoryEntry,
+) -> bool {
+    indexed.kind != "dir"
+        && (indexed.size_bytes != live.size_bytes as i64 || indexed.modified_at != live.modified_at)
 }
 
 #[derive(Debug, Clone)]
