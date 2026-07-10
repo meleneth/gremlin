@@ -194,6 +194,42 @@ pub(super) fn export_selected_root_snapshot(
     Ok(())
 }
 
+pub(super) fn export_selected_root_sfv(
+    conn: &Connection,
+    selected_root: Option<&db::RootRow>,
+    state: &mut AppState,
+) -> anyhow::Result<()> {
+    let Some(root) = selected_root else {
+        state.set_status(
+            ActivityLevel::Warning,
+            "No persisted root selected to export SFV",
+        );
+        return Ok(());
+    };
+    match crate::sfv::export_root_default_path(conn, root) {
+        Ok(result) => {
+            let path = result
+                .path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "-".to_string());
+            state.set_status(
+                ActivityLevel::Success,
+                format!(
+                    "exported SFV {} to {} ({} files)",
+                    short_id(&root.id),
+                    path,
+                    result.file_count
+                ),
+            );
+        }
+        Err(err) => {
+            state.set_status(ActivityLevel::Warning, format!("SFV export failed: {err}"));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn toggle_selected_file_mark(
     conn: &Connection,
     selected_root: Option<&db::RootRow>,

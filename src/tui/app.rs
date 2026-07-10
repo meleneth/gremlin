@@ -608,6 +608,13 @@ pub(super) async fn run_loop(
                             &mut state,
                         )?;
                     }
+                    KeyCode::Char('y') => {
+                        export_selected_root_sfv(
+                            conn,
+                            selected_persisted_root(&roots, &state),
+                            &mut state,
+                        )?;
+                    }
                     KeyCode::Char('x') => {
                         start_delete_root_confirmation(
                             selected_persisted_root(&roots, &state),

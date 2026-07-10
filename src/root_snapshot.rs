@@ -250,7 +250,7 @@ fn validate_snapshot(snapshot: &RootSnapshot) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn short_root_name(root: &db::RootRow) -> String {
+pub(crate) fn short_root_name(root: &db::RootRow) -> String {
     if let Some(label) = root
         .label
         .as_deref()
@@ -267,7 +267,7 @@ fn short_root_name(root: &db::RootRow) -> String {
         .to_string()
 }
 
-fn safe_file_stem(name: &str) -> String {
+pub(crate) fn safe_file_stem(name: &str) -> String {
     let stem = name
         .chars()
         .map(|ch| {
