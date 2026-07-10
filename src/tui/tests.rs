@@ -959,6 +959,84 @@ fn root_selection_can_target_resume_transfer_plan_rows() {
 }
 
 #[test]
+fn drop_queued_transfer_confirmation_marks_plan_canceled() {
+    let conn = Connection::open_in_memory().unwrap();
+    db::init_schema(&conn).unwrap();
+    let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+    let source_id = db::ensure_root(&conn, &machine_id, "/tmp/source").unwrap();
+    let dest_id = db::ensure_root(&conn, &machine_id, "/tmp/dest").unwrap();
+    let plan_id = db::create_transfer_plan(
+        &conn,
+        None,
+        &source_id,
+        &dest_id,
+        None,
+        serde_json::json!({}),
+    )
+    .unwrap();
+    db::update_transfer_plan_status(&conn, &plan_id, "queued").unwrap();
+    let plan = db::transfer_plan_by_id(&conn, &plan_id).unwrap().unwrap();
+    let mut state = AppState::default();
+
+    start_drop_queued_transfer_confirmation(Some(&plan), &mut state);
+    assert_eq!(
+        state.pending_drop_transfer_plan_id.as_deref(),
+        Some(plan_id.as_str())
+    );
+
+    handle_drop_queued_transfer_confirmation(&conn, &mut state, KeyCode::Char('y')).unwrap();
+
+    assert!(state.pending_drop_transfer_plan_id.is_none());
+    assert_eq!(
+        db::transfer_plan_by_id(&conn, &plan_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "canceled"
+    );
+    assert!(state.status.contains("dropped queued transfer"));
+}
+
+#[test]
+fn running_resume_transfer_cancel_requests_plan_job_cancel() {
+    let conn = Connection::open_in_memory().unwrap();
+    db::init_schema(&conn).unwrap();
+    let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+    let source_id = db::ensure_root(&conn, &machine_id, "/tmp/source").unwrap();
+    let dest_id = db::ensure_root(&conn, &machine_id, "/tmp/dest").unwrap();
+    let job_id = db::create_job(
+        &conn,
+        "transfer_copy",
+        Some(&machine_id),
+        Some(&source_id),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    db::start_job(&conn, &job_id).unwrap();
+    let plan_id = db::create_transfer_plan(
+        &conn,
+        Some(&job_id),
+        &source_id,
+        &dest_id,
+        None,
+        serde_json::json!({}),
+    )
+    .unwrap();
+    db::update_transfer_plan_status(&conn, &plan_id, "running").unwrap();
+    let plan = db::transfer_plan_by_id(&conn, &plan_id).unwrap().unwrap();
+    let mut state = AppState::default();
+
+    assert!(request_selected_resume_transfer_cancel(&conn, Some(&plan), &mut state).unwrap());
+
+    assert!(db::job_cancel_requested(&conn, &job_id).unwrap());
+    assert!(state.status.contains("cancel requested"));
+    assert!(db::recent_jobs_and_events(&conn, 10)
+        .unwrap()
+        .iter()
+        .any(|event| event.event_kind == "job_cancel_requested"));
+}
+
+#[test]
 fn transfer_plan_destination_uses_visible_persisted_root_with_temporary_browse() {
     let conn = Connection::open_in_memory().unwrap();
     db::init_schema(&conn).unwrap();

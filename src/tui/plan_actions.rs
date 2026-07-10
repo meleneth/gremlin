@@ -68,6 +68,143 @@ pub(super) fn start_next_queued_transfer(
     Ok(())
 }
 
+pub(super) fn start_drop_queued_transfer_confirmation(
+    selected_plan: Option<&db::TransferPlanRow>,
+    state: &mut AppState,
+) {
+    let Some(plan) = selected_plan else {
+        state.status = "Select a queued transfer resume row to drop".to_string();
+        return;
+    };
+    match plan.status.as_str() {
+        "queued" => {
+            state.pending_drop_transfer_plan_id = Some(plan.id.clone());
+            state.set_status(
+                ActivityLevel::Warning,
+                format!("Drop queued transfer {}? y confirms", short_id(&plan.id)),
+            );
+        }
+        "running" => {
+            state.status = "Transfer is running; press c to request cancellation".to_string();
+        }
+        "canceled" => {
+            state.status = format!("transfer {} is already canceled", short_id(&plan.id));
+        }
+        status => {
+            state.status = format!(
+                "transfer {} is {status}; it is not queued",
+                short_id(&plan.id)
+            );
+        }
+    }
+}
+
+pub(super) fn handle_drop_queued_transfer_confirmation(
+    conn: &Connection,
+    state: &mut AppState,
+    code: KeyCode,
+) -> anyhow::Result<()> {
+    let Some(plan_id) = state.pending_drop_transfer_plan_id.clone() else {
+        return Ok(());
+    };
+    match code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => {
+            state.pending_drop_transfer_plan_id = None;
+            let Some(plan) = db::transfer_plan_by_id(conn, &plan_id)? else {
+                state.set_status(
+                    ActivityLevel::Error,
+                    format!("queued transfer {} no longer exists", short_id(&plan_id)),
+                );
+                return Ok(());
+            };
+            if plan.status != "queued" {
+                state.set_status(
+                    ActivityLevel::Warning,
+                    format!(
+                        "transfer {} is now {}; not dropped",
+                        short_id(&plan_id),
+                        plan.status
+                    ),
+                );
+                return Ok(());
+            }
+            db::update_transfer_plan_status(conn, &plan_id, "canceled")?;
+            if let Some(plan) = state
+                .last_plan
+                .as_mut()
+                .filter(|plan| plan.plan_id == plan_id)
+            {
+                plan.status = "canceled".to_string();
+            }
+            state.set_status(
+                ActivityLevel::Warning,
+                format!("dropped queued transfer {}", short_id(&plan_id)),
+            );
+        }
+        KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+            state.pending_drop_transfer_plan_id = None;
+            state.status = "drop queued transfer canceled".to_string();
+        }
+        _ => {
+            state.status = "Confirm drop with y, or cancel with n/Esc".to_string();
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn request_selected_resume_transfer_cancel(
+    conn: &Connection,
+    selected_plan: Option<&db::TransferPlanRow>,
+    state: &mut AppState,
+) -> anyhow::Result<bool> {
+    let Some(plan) = selected_plan else {
+        return Ok(false);
+    };
+    match plan.status.as_str() {
+        "queued" => {
+            start_drop_queued_transfer_confirmation(Some(plan), state);
+            Ok(true)
+        }
+        "running" => {
+            let Some(job_id) = plan.job_id.as_deref() else {
+                state.set_status(
+                    ActivityLevel::Error,
+                    format!("running transfer {} has no job id", short_id(&plan.id)),
+                );
+                return Ok(true);
+            };
+            if db::request_job_cancel(conn, job_id)? {
+                let envelope = crate::events::EventEnvelope {
+                    event_kind: crate::events::EventKind::JobCancelRequested,
+                    job_id: Some(job_id.to_string()),
+                    sequence: None,
+                    created_at: crate::util::now_rfc3339(),
+                    payload: crate::events::EventPayload::Job {
+                        kind: "transfer_copy".to_string(),
+                        path: Some(plan.source_path.clone()),
+                        message: Some("cancel requested from resume row".to_string()),
+                        files_seen: Some(plan.entry_count as u64),
+                        errors: None,
+                    },
+                };
+                db::persist_event(conn, &envelope)?;
+                state.set_status(
+                    ActivityLevel::Warning,
+                    format!("cancel requested for transfer {}", short_id(&plan.id)),
+                );
+            } else {
+                state.status = format!("transfer {} is not cancelable", short_id(&plan.id));
+            }
+            Ok(true)
+        }
+        "canceled" => {
+            state.status = format!("transfer {} is already canceled", short_id(&plan.id));
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 pub(super) fn decide_current_plan_entry(
     conn: &Connection,
     state: &mut AppState,

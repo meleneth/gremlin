@@ -52,6 +52,7 @@ struct AppState {
     transfer_run_plan_id: Option<String>,
     retarget_draft: Option<RetargetDraft>,
     pending_delete_root_id: Option<String>,
+    pending_drop_transfer_plan_id: Option<String>,
     pending_import: Option<PendingTemporaryImport>,
     pending_open_root: Option<OpenRootDraft>,
     pending_scoped_job: Option<PendingScopedJob>,

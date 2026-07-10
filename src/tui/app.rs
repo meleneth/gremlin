@@ -362,6 +362,10 @@ pub(super) async fn run_loop(
                     handle_delete_root_confirmation(conn, &mut state, key.code)?;
                     continue;
                 }
+                if state.pending_drop_transfer_plan_id.is_some() {
+                    handle_drop_queued_transfer_confirmation(conn, &mut state, key.code)?;
+                    continue;
+                }
                 if state.pending_import.is_some() {
                     handle_temporary_import_choice(&mut state, key.code, job_tx.clone());
                     continue;
@@ -546,11 +550,18 @@ pub(super) async fn run_loop(
                         )?;
                     }
                     KeyCode::Char('c') => {
-                        request_selected_cancel(
+                        let selected_resume = selected_resume_plan(&state, roots.len()).cloned();
+                        if !request_selected_resume_transfer_cancel(
                             conn,
-                            job_rows.get(state.event_offset),
+                            selected_resume.as_ref(),
                             &mut state,
-                        )?;
+                        )? {
+                            request_selected_cancel(
+                                conn,
+                                job_rows.get(state.event_offset),
+                                &mut state,
+                            )?;
+                        }
                     }
                     KeyCode::Char('t') => {
                         if selected_temporary_browse(&state).is_some() {
@@ -604,12 +615,21 @@ pub(super) async fn run_loop(
                         )?;
                     }
                     KeyCode::Char('d') => {
-                        decide_current_plan_entry(
-                            conn,
-                            &mut state,
-                            "skip",
-                            "review dropped by user",
-                        )?;
+                        if state.focus == FocusPane::Roots {
+                            let selected_resume =
+                                selected_resume_plan(&state, roots.len()).cloned();
+                            start_drop_queued_transfer_confirmation(
+                                selected_resume.as_ref(),
+                                &mut state,
+                            );
+                        } else {
+                            decide_current_plan_entry(
+                                conn,
+                                &mut state,
+                                "skip",
+                                "review dropped by user",
+                            )?;
+                        }
                     }
                     KeyCode::Char('e') => {
                         start_retarget_current_plan_entry(&mut state);

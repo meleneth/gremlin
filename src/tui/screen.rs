@@ -165,6 +165,18 @@ fn decision_modal(state: &AppState) -> Option<DecisionModal> {
             height: 7,
         });
     }
+    if state.pending_drop_transfer_plan_id.is_some() {
+        return Some(DecisionModal {
+            title: "Drop Queued Transfer",
+            lines: vec![
+                Line::from("Remove this transfer plan from the run queue?"),
+                Line::from("The plan history stays in the database."),
+                Line::from("y confirm  n/Esc cancel"),
+            ],
+            width: 64,
+            height: 7,
+        });
+    }
     if let Some(draft) = state.retarget_draft.as_ref() {
         return Some(DecisionModal {
             title: "Retarget Copy",

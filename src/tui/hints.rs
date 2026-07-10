@@ -52,6 +52,7 @@ fn command_hint_needs_attention(state: &AppState) -> bool {
         || state.event_filter_editing
         || state.retarget_draft.is_some()
         || state.pending_delete_root_id.is_some()
+        || state.pending_drop_transfer_plan_id.is_some()
         || state.pending_import.is_some()
         || state.pending_open_root.is_some()
         || state.pending_scoped_job.is_some()
@@ -73,6 +74,9 @@ pub(super) fn active_command_hint(state: &AppState, has_temporary_browse: bool) 
     }
     if state.pending_delete_root_id.is_some() {
         return "y confirm remove root from database  n/Esc cancel";
+    }
+    if state.pending_drop_transfer_plan_id.is_some() {
+        return "y drop queued transfer  n/Esc cancel";
     }
     if state.pending_import.is_some() {
         return "n root only  f fast stat import  h SHA-256 hash import  Esc cancel";
@@ -96,7 +100,7 @@ pub(super) fn active_command_hint(state: &AppState, has_temporary_browse: bool) 
         FocusPane::Roots if has_temporary_browse && state.selected_root == 0 => {
             "/ filter roots  Tab files  u refresh  i import browsed path  t copy from browsed path  PgUp/PgDn jump"
         }
-        FocusPane::Roots => "/ filter roots  Enter load resume row  r run resume row  Space mark in Files  s scan  h hash  v verify  m compare  t source  p open plan  x remove",
+        FocusPane::Roots => "/ filter roots  Enter load resume row  r run resume row  d drop queued  c cancel running  s scan  h hash  v verify  m compare  t source  p open plan  x remove",
         FocusPane::Files if has_temporary_browse && state.selected_root == 0 => {
             "/ filter  u refresh  PgUp/PgDn jump  Enter open dir  Backspace parent  i import  t copy"
         }

@@ -474,6 +474,15 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             UNIQUE(job_id, sequence)
         );
 
+        CREATE INDEX IF NOT EXISTS idx_job_events_recent
+            ON job_events(created_at DESC, sequence DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_job_events_job_recent
+            ON job_events(job_id, created_at DESC, sequence DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_jobs_root_recent
+            ON jobs(root_id, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS checksum_collections (
             id TEXT PRIMARY KEY,
             machine_id TEXT,
@@ -525,6 +534,12 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             created_at TEXT NOT NULL,
             params_json TEXT
         );
+
+        CREATE INDEX IF NOT EXISTS idx_transfer_plans_status_created
+            ON transfer_plans(status, created_at);
+
+        CREATE INDEX IF NOT EXISTS idx_transfer_plans_roots
+            ON transfer_plans(source_root_id, dest_root_id);
 
         CREATE TABLE IF NOT EXISTS transfer_plan_entries (
             id TEXT PRIMARY KEY,
@@ -3086,6 +3101,46 @@ mod tests {
         configure(&conn).unwrap();
         init_schema(&conn).unwrap();
         assert_eq!(table_count(&conn, "machines").unwrap(), 0);
+    }
+
+    #[test]
+    fn initializes_query_indexes_for_tui_startup_paths() {
+        let conn = Connection::open_in_memory().unwrap();
+        configure(&conn).unwrap();
+        init_schema(&conn).unwrap();
+
+        let indexes = conn
+            .prepare(
+                r#"
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'index'
+                  AND name IN (
+                    'idx_job_events_recent',
+                    'idx_job_events_job_recent',
+                    'idx_jobs_root_recent',
+                    'idx_transfer_plans_status_created',
+                    'idx_transfer_plans_roots'
+                  )
+                ORDER BY name
+                "#,
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .unwrap();
+
+        assert_eq!(
+            indexes,
+            vec![
+                "idx_job_events_job_recent",
+                "idx_job_events_recent",
+                "idx_jobs_root_recent",
+                "idx_transfer_plans_roots",
+                "idx_transfer_plans_status_created"
+            ]
+        );
     }
 
     #[test]
