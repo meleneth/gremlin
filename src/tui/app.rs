@@ -437,6 +437,9 @@ pub(super) async fn run_loop(
                         state.file_view = state.file_view.next();
                         state.status = format!("file fields: {}", state.file_view.label());
                     }
+                    KeyCode::Char('u') => {
+                        refresh_current_file_listing(&mut state, job_tx.clone());
+                    }
                     KeyCode::Down => {
                         let plan_count = active_plan_row_count(&state);
                         move_down(
@@ -755,6 +758,24 @@ fn start_temporary_parent_browse(state: &mut AppState, job_tx: mpsc::UnboundedSe
         return;
     };
     start_temporary_browse_load(state, parent, job_tx);
+}
+
+pub(super) fn refresh_current_file_listing(
+    state: &mut AppState,
+    job_tx: mpsc::UnboundedSender<TuiMessage>,
+) {
+    if let Some(path) = state
+        .temporary_browse
+        .as_ref()
+        .map(|browse| browse.current_path.clone())
+    {
+        start_temporary_browse_load(state, path, job_tx);
+    } else {
+        state.set_status(
+            ActivityLevel::Info,
+            "indexed file views refresh from the database automatically; use s to rescan files",
+        );
+    }
 }
 
 fn start_temporary_browse_load(

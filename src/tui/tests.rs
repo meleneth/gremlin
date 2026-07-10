@@ -184,8 +184,29 @@ fn command_hints_explain_temporary_file_browse_actions() {
 
     assert_eq!(
         active_command_hint(&state, true),
-        "/ filter  PgUp/PgDn jump  Enter open dir  Backspace parent  i import  t copy"
+        "/ filter  u refresh  PgUp/PgDn jump  Enter open dir  Backspace parent  i import  t copy"
     );
+}
+
+#[test]
+fn command_hints_include_refresh_for_db_file_view() {
+    let state = AppState {
+        focus: FocusPane::Files,
+        ..AppState::default()
+    };
+
+    assert!(active_command_hint(&state, false).contains("u refresh db"));
+}
+
+#[test]
+fn refresh_current_file_listing_explains_db_backed_views() {
+    let (job_tx, _job_rx) = mpsc::unbounded_channel();
+    let mut state = AppState::default();
+
+    app::refresh_current_file_listing(&mut state, job_tx);
+
+    assert!(state.status.contains("refresh from the database"));
+    assert_eq!(state.activities.back().unwrap().level, ActivityLevel::Info);
 }
 
 #[test]
