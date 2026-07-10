@@ -50,8 +50,11 @@ fn temporary_import_prompt_targets_selected_file() {
         }),
         ..AppState::default()
     };
-    let selected =
-        FileViewRow::from_temporary_entry(&state.temporary_browse.as_ref().unwrap().entries[0]);
+    let selected = FileViewRow::from_temporary_entry(
+        &state.temporary_browse.as_ref().unwrap().entries[0],
+        None,
+        0,
+    );
 
     start_temporary_import_prompt(&mut state, Some(&selected));
 
@@ -271,6 +274,7 @@ fn file_filter_matches_paths_and_status() {
             status: "present".to_string(),
             kind: FileKind::File,
             occurrence_count: None,
+            index_state: FileIndexState::Indexed,
         },
         FileViewRow {
             relative_path: "docs/readme.md".to_string(),
@@ -280,6 +284,7 @@ fn file_filter_matches_paths_and_status() {
             status: "remote".to_string(),
             kind: FileKind::File,
             occurrence_count: None,
+            index_state: FileIndexState::RemoteUnindexed,
         },
     ];
 
@@ -322,9 +327,63 @@ fn file_row_shows_index_appearance_count() {
         status: "present".to_string(),
         kind: FileKind::File,
         occurrence_count: Some(3),
+        index_state: FileIndexState::Available,
     };
 
     assert!(file_row("> ", false, &file, FileView::Basic).contains("   3"));
+}
+
+#[test]
+fn file_rows_show_unicode_evidence_markers() {
+    let remote = FileViewRow {
+        relative_path: "remote.bin".to_string(),
+        size_bytes: 10,
+        modified_at: None,
+        content_id: None,
+        status: "remote".to_string(),
+        kind: FileKind::File,
+        occurrence_count: None,
+        index_state: FileIndexState::RemoteUnindexed,
+    };
+    let fast = FileViewRow {
+        relative_path: "fast.bin".to_string(),
+        size_bytes: 10,
+        modified_at: None,
+        content_id: None,
+        status: "indexed".to_string(),
+        kind: FileKind::File,
+        occurrence_count: Some(1),
+        index_state: FileIndexState::Indexed,
+    };
+    let hashed = FileViewRow {
+        relative_path: "hash.bin".to_string(),
+        size_bytes: 10,
+        modified_at: None,
+        content_id: Some("content_1".to_string()),
+        status: "hash".to_string(),
+        kind: FileKind::File,
+        occurrence_count: Some(1),
+        index_state: FileIndexState::Indexed,
+    };
+    let local = FileViewRow {
+        relative_path: "local.bin".to_string(),
+        size_bytes: 10,
+        modified_at: None,
+        content_id: None,
+        status: "local".to_string(),
+        kind: FileKind::File,
+        occurrence_count: Some(1),
+        index_state: FileIndexState::Available,
+    };
+
+    assert!(file_row("  ", false, &remote, FileView::Basic).contains("◇"));
+    assert!(file_row("  ", false, &fast, FileView::Basic).contains("◌"));
+    assert!(file_row("  ", false, &hashed, FileView::Basic).contains("◆"));
+    assert!(file_row("  ", false, &local, FileView::Basic).contains("◉"));
+    assert_eq!(
+        file_row_style(&local, false, false).bg,
+        theme::available_file().bg
+    );
 }
 
 #[test]
@@ -685,6 +744,7 @@ fn persisted_root_enter_and_backspace_navigate_directories() {
         status: "dir:1".to_string(),
         kind: FileKind::Directory,
         occurrence_count: None,
+        index_state: FileIndexState::Indexed,
     };
 
     open_persisted_file_entry(&mut state, Some("root_1"), Some(&dir));
@@ -729,6 +789,7 @@ fn directory_rows_mark_descendant_files() {
         status: "dir:2".to_string(),
         kind: FileKind::Directory,
         occurrence_count: None,
+        index_state: FileIndexState::Indexed,
     };
     let mut state = AppState::default();
 
@@ -767,6 +828,7 @@ fn temporary_transfer_source_targets_selected_file() {
         status: "remote".to_string(),
         kind: FileKind::File,
         occurrence_count: None,
+        index_state: FileIndexState::RemoteUnindexed,
     };
 
     let target = temporary_transfer_import_target(FocusPane::Files, &browse, Some(&selected));
@@ -795,6 +857,7 @@ fn temporary_transfer_source_marks_all_for_directory_target() {
         status: "dir".to_string(),
         kind: FileKind::Directory,
         occurrence_count: None,
+        index_state: FileIndexState::RemoteUnindexed,
     };
 
     let target = temporary_transfer_import_target(FocusPane::Files, &browse, Some(&selected));
@@ -1273,6 +1336,7 @@ fn detail_pane_renders_selected_file_hashes() {
         status: "present".to_string(),
         kind: FileKind::File,
         occurrence_count: Some(2),
+        index_state: FileIndexState::Indexed,
     };
     let content = db::ContentObjectRow {
         size_bytes: 10,

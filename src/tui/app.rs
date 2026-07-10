@@ -261,11 +261,27 @@ pub(super) async fn run_loop(
                 .iter()
                 .map(FileViewRow::from_cached_directory_entry)
                 .collect(),
-                (None, Some(browse)) => browse
-                    .entries
-                    .iter()
-                    .map(FileViewRow::from_temporary_entry)
-                    .collect(),
+                (None, Some(browse)) => {
+                    let indexed_entries = temporary_browse_indexed_entries(conn, &roots, browse)?;
+                    let local_keys =
+                        temporary_browse_local_availability_keys(conn, browse, &indexed_entries)?;
+                    browse
+                        .entries
+                        .iter()
+                        .map(|entry| {
+                            let indexed = indexed_entries.get(entry.name.as_str());
+                            FileViewRow::from_temporary_entry(
+                                entry,
+                                indexed,
+                                if local_keys.contains(&entry.name) {
+                                    1
+                                } else {
+                                    0
+                                },
+                            )
+                        })
+                        .collect()
+                }
                 (None, None) => Vec::new(),
             };
             (
@@ -840,6 +856,75 @@ fn selected_file_content(
         return Ok(None);
     };
     Ok(db::content_object_by_id(conn, content_id)?)
+}
+
+fn temporary_browse_local_availability_keys(
+    conn: &Connection,
+    browse: &TemporaryBrowse,
+    indexed_entries: &BTreeMap<String, db::CachedDirectoryEntry>,
+) -> rusqlite::Result<BTreeSet<String>> {
+    let candidates = browse
+        .entries
+        .iter()
+        .filter(|entry| entry.kind != "dir")
+        .map(|entry| {
+            let indexed = indexed_entries.get(&entry.name);
+            db::LocalFileCandidate {
+                key: &entry.name,
+                content_id: indexed.and_then(|entry| entry.content_id.as_deref()),
+                basename: &entry.name,
+                size_bytes: entry.size_bytes,
+                modified_at: entry.modified_at.as_deref(),
+            }
+        })
+        .collect::<Vec<_>>();
+    db::local_file_availability_keys(conn, &candidates)
+}
+
+fn temporary_browse_indexed_entries(
+    conn: &Connection,
+    roots: &[db::RootRow],
+    browse: &TemporaryBrowse,
+) -> anyhow::Result<BTreeMap<String, db::CachedDirectoryEntry>> {
+    let Some((root, parent_path)) = roots
+        .iter()
+        .filter(|root| root.machine_id == browse.machine_id)
+        .filter_map(|root| {
+            remote_relative_parent_path(&root.path, &browse.current_path)
+                .map(|parent| (root, parent))
+        })
+        .max_by_key(|(root, _)| remote_path_for_matching(&root.path).len())
+    else {
+        return Ok(BTreeMap::new());
+    };
+    Ok(db::cached_directory_entries(conn, &root.id, &parent_path)?
+        .into_iter()
+        .map(|entry| (entry.name.clone(), entry))
+        .collect())
+}
+
+fn remote_relative_parent_path(root_path: &str, current_path: &str) -> Option<String> {
+    let root_path = remote_path_for_matching(root_path);
+    let current_path = current_path.trim_end_matches('/');
+    if current_path == root_path {
+        return Some(".".to_string());
+    }
+    current_path
+        .strip_prefix(&format!("{root_path}/"))
+        .map(|relative| {
+            if relative.is_empty() {
+                ".".to_string()
+            } else {
+                relative.to_string()
+            }
+        })
+}
+
+fn remote_path_for_matching(path: &str) -> &str {
+    path.split_once(':')
+        .map(|(_, remote)| remote)
+        .unwrap_or(path)
+        .trim_end_matches('/')
 }
 
 #[derive(Debug, Clone)]

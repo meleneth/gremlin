@@ -61,6 +61,15 @@ pub struct FileAppearanceRow {
     pub content_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct LocalFileCandidate<'a> {
+    pub key: &'a str,
+    pub content_id: Option<&'a str>,
+    pub basename: &'a str,
+    pub size_bytes: u64,
+    pub modified_at: Option<&'a str>,
+}
+
 #[derive(Debug, Clone)]
 pub struct RootSummary {
     pub file_count: i64,
@@ -2562,6 +2571,65 @@ pub fn file_appearances(
     rows.collect()
 }
 
+pub fn local_file_availability_keys(
+    conn: &Connection,
+    candidates: &[LocalFileCandidate<'_>],
+) -> rusqlite::Result<BTreeSet<String>> {
+    let mut available = BTreeSet::new();
+    for chunk in candidates.chunks(150) {
+        let placeholders = std::iter::repeat_n("(?, ?, ?, ?, ?)", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            r#"
+            WITH candidates(key, content_id, basename, size_bytes, modified_at) AS (
+                VALUES {placeholders}
+            )
+            SELECT DISTINCT c.key
+            FROM candidates c
+            JOIN path_observations p
+              ON (
+                   (c.content_id IS NOT NULL AND p.content_id = c.content_id)
+                   OR (
+                        p.basename = c.basename
+                        AND p.size_bytes = c.size_bytes
+                        AND (p.modified_at = c.modified_at OR (p.modified_at IS NULL AND c.modified_at IS NULL))
+                   )
+                 )
+            JOIN machines m ON m.id = p.machine_id
+            WHERE COALESCE(m.platform, '') != 'ssh'
+              AND p.status = 'present'
+            "#
+        );
+        let mut values = Vec::with_capacity(chunk.len() * 5);
+        for candidate in chunk {
+            values.push(rusqlite::types::Value::Text(candidate.key.to_string()));
+            values.push(
+                candidate
+                    .content_id
+                    .map(|value| rusqlite::types::Value::Text(value.to_string()))
+                    .unwrap_or(rusqlite::types::Value::Null),
+            );
+            values.push(rusqlite::types::Value::Text(candidate.basename.to_string()));
+            values.push(rusqlite::types::Value::Integer(candidate.size_bytes as i64));
+            values.push(
+                candidate
+                    .modified_at
+                    .map(|value| rusqlite::types::Value::Text(value.to_string()))
+                    .unwrap_or(rusqlite::types::Value::Null),
+            );
+        }
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), |row| {
+            row.get::<_, String>(0)
+        })?;
+        for row in rows {
+            available.insert(row?);
+        }
+    }
+    Ok(available)
+}
+
 struct FileAppearanceAliases {
     roots: Alias,
     path_observations: Alias,
@@ -3420,5 +3488,61 @@ mod tests {
         assert!(stat_matches
             .iter()
             .all(|row| row.relative_path.ends_with("bar.txt")));
+    }
+
+    #[test]
+    fn local_file_availability_keys_exclude_ssh_observations() {
+        let conn = Connection::open_in_memory().unwrap();
+        configure(&conn).unwrap();
+        init_schema(&conn).unwrap();
+        let ssh_machine = ensure_machine_hint(&conn, "nas01", Some("ssh")).unwrap();
+        let ssh_root = ensure_root(&conn, &ssh_machine, "nas01:/srv/archive").unwrap();
+        insert_path_observation(
+            &conn,
+            PathObservationInput {
+                machine_id: &ssh_machine,
+                root_id: &ssh_root,
+                relative_path: "copy.bin",
+                basename: "copy.bin",
+                parent_path: ".",
+                size_bytes: 99,
+                modified_at: Some("2026-07-10T01:02:03Z"),
+                content_id: None,
+            },
+        )
+        .unwrap();
+
+        let candidate = LocalFileCandidate {
+            key: "copy.bin",
+            content_id: None,
+            basename: "copy.bin",
+            size_bytes: 99,
+            modified_at: Some("2026-07-10T01:02:03Z"),
+        };
+        assert!(local_file_availability_keys(&conn, &[candidate])
+            .unwrap()
+            .is_empty());
+
+        let local_machine = ensure_local_machine_with_label(&conn, None).unwrap();
+        let local_root = ensure_root(&conn, &local_machine, "/tmp/local").unwrap();
+        insert_path_observation(
+            &conn,
+            PathObservationInput {
+                machine_id: &local_machine,
+                root_id: &local_root,
+                relative_path: "copy.bin",
+                basename: "copy.bin",
+                parent_path: ".",
+                size_bytes: 99,
+                modified_at: Some("2026-07-10T01:02:03Z"),
+                content_id: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            local_file_availability_keys(&conn, &[candidate]).unwrap(),
+            BTreeSet::from(["copy.bin".to_string()])
+        );
     }
 }

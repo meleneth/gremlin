@@ -16,6 +16,9 @@ pub const RED: Color = Color::Rgb(0xec, 0x27, 0x3f);
 pub const ORANGE: Color = Color::Rgb(0xe9, 0x85, 0x37);
 pub const SELECT: Color = Color::Rgb(0x6b, 0x26, 0x43);
 pub const ATTENTION: Color = Color::Rgb(0x1e, 0x40, 0x44);
+pub const REMOTE_UNINDEXED_BG: Color = Color::Rgb(0x2c, 0x1e, 0x31);
+pub const INDEXED_BG: Color = Color::Rgb(0x1e, 0x40, 0x44);
+pub const AVAILABLE_BG: Color = Color::Rgb(0x30, 0x53, 0x3a);
 pub const PROGRESS_GRADIENT: [Color; 6] = [BLUE, CYAN, LIME, ACCENT, ORANGE, RED];
 
 pub fn base() -> Style {
@@ -64,6 +67,21 @@ pub fn selected() -> Style {
 
 pub fn marked() -> Style {
     Style::default().fg(LIME).bg(PANEL)
+}
+
+pub fn remote_file() -> Style {
+    Style::default().fg(MUTED).bg(REMOTE_UNINDEXED_BG)
+}
+
+pub fn indexed_file() -> Style {
+    Style::default().fg(TEXT).bg(INDEXED_BG)
+}
+
+pub fn available_file() -> Style {
+    Style::default()
+        .fg(LIME)
+        .bg(AVAILABLE_BG)
+        .add_modifier(Modifier::BOLD)
 }
 
 pub fn muted() -> Style {

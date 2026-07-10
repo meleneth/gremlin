@@ -27,13 +27,7 @@ impl Widget for FilesPane<'_> {
                     "  "
                 };
                 let selected = file_row_selected(file, self.selected_paths);
-                let style = if idx == self.state.file_offset {
-                    theme::selected()
-                } else if selected {
-                    theme::marked()
-                } else {
-                    file_status_style(&file.status)
-                };
+                let style = file_row_style(file, selected, idx == self.state.file_offset);
                 ListItem::new(file_row(marker, selected, file, self.state.file_view)).style(style)
             }));
             rows
@@ -72,19 +66,19 @@ pub(super) fn file_header(view: FileView) -> String {
     match view {
         FileView::Basic => format!(
             "{:<2} {:>3} {:<1} {:<22} {:>9} {:<8}",
-            "", "#", "M", "PATH", "SIZE", "STATE"
+            "", "#", "E", "PATH", "SIZE", "STATE"
         ),
         FileView::Meta => format!(
             "{:<2} {:>3} {:<1} {:<16} {:>9} {:<18}",
-            "", "#", "M", "PATH", "SIZE", "MODIFIED"
+            "", "#", "E", "PATH", "SIZE", "MODIFIED"
         ),
         FileView::Hash => format!(
             "{:<2} {:>3} {:<1} {:<24} {:<18}",
-            "", "#", "M", "PATH", "CONTENT"
+            "", "#", "E", "PATH", "CONTENT"
         ),
         FileView::All => format!(
             "{:<2} {:>3} {:<1} {:<12} {:>8} {:<6} {:<8} {:<10}",
-            "", "#", "M", "PATH", "SIZE", "STATE", "HASH", "MODIFIED"
+            "", "#", "E", "PATH", "SIZE", "STATE", "HASH", "MODIFIED"
         ),
     }
 }
@@ -92,7 +86,7 @@ pub(super) fn file_header(view: FileView) -> String {
 pub(super) fn file_row(marker: &str, selected: bool, file: &FileViewRow, view: FileView) -> String {
     let hash = file.content_id.as_deref().map(short_id).unwrap_or("stat");
     let modified = file.modified_at.as_deref().unwrap_or("-");
-    let marked = if selected { "*" } else { " " };
+    let evidence = file_evidence_label(file, selected);
     let occurrences = file_occurrence_label(file);
     let path = if file.kind == FileKind::Directory {
         format!("{}/", file.relative_path)
@@ -104,7 +98,7 @@ pub(super) fn file_row(marker: &str, selected: bool, file: &FileViewRow, view: F
             "{:<2} {:>3} {:<1} {:<22} {:>9} {:<8}",
             marker,
             occurrences,
-            marked,
+            evidence,
             truncate(&path, 22),
             human_size(file.size_bytes as u64),
             truncate(&file.status, 8)
@@ -113,7 +107,7 @@ pub(super) fn file_row(marker: &str, selected: bool, file: &FileViewRow, view: F
             "{:<2} {:>3} {:<1} {:<16} {:>9} {:<18}",
             marker,
             occurrences,
-            marked,
+            evidence,
             truncate(&path, 16),
             human_size(file.size_bytes as u64),
             truncate(modified, 18)
@@ -122,7 +116,7 @@ pub(super) fn file_row(marker: &str, selected: bool, file: &FileViewRow, view: F
             "{:<2} {:>3} {:<1} {:<24} {:<18}",
             marker,
             occurrences,
-            marked,
+            evidence,
             truncate(&path, 24),
             truncate(hash, 18)
         ),
@@ -130,13 +124,42 @@ pub(super) fn file_row(marker: &str, selected: bool, file: &FileViewRow, view: F
             "{:<2} {:>3} {:<1} {:<12} {:>8} {:<6} {:<8} {:<10}",
             marker,
             occurrences,
-            marked,
+            evidence,
             truncate(&path, 12),
             human_size(file.size_bytes as u64),
             truncate(&file.status, 6),
             truncate(hash, 8),
             truncate(modified, 10)
         ),
+    }
+}
+
+pub(super) fn file_row_style(file: &FileViewRow, selected: bool, focused: bool) -> Style {
+    if focused {
+        return theme::selected();
+    }
+    if selected {
+        return theme::marked();
+    }
+    match file.index_state {
+        FileIndexState::RemoteUnindexed => theme::remote_file(),
+        FileIndexState::Indexed => theme::indexed_file(),
+        FileIndexState::Available => theme::available_file(),
+    }
+}
+
+fn file_evidence_label(file: &FileViewRow, selected: bool) -> String {
+    if selected {
+        return "*".to_string();
+    }
+    if file.kind == FileKind::Directory {
+        return "▸".to_string();
+    }
+    match file.index_state {
+        FileIndexState::RemoteUnindexed => "◇".to_string(),
+        FileIndexState::Available => "◉".to_string(),
+        FileIndexState::Indexed if file.content_id.is_some() => "◆".to_string(),
+        FileIndexState::Indexed => "◌".to_string(),
     }
 }
 

@@ -262,6 +262,13 @@ enum FileKind {
     Directory,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FileIndexState {
+    RemoteUnindexed,
+    Indexed,
+    Available,
+}
+
 #[derive(Debug, Clone)]
 struct FileViewRow {
     relative_path: String,
@@ -271,6 +278,7 @@ struct FileViewRow {
     status: String,
     kind: FileKind,
     occurrence_count: Option<i64>,
+    index_state: FileIndexState,
 }
 
 impl From<InitialBrowse> for TemporaryBrowse {
@@ -297,6 +305,7 @@ impl From<&db::FileRow> for FileViewRow {
             status: value.status.clone(),
             kind: FileKind::File,
             occurrence_count: None,
+            index_state: FileIndexState::Indexed,
         }
     }
 }
@@ -322,27 +331,52 @@ impl FileViewRow {
             }),
             kind,
             occurrence_count: entry.occurrence_count,
+            index_state: FileIndexState::Indexed,
         }
     }
 
-    fn from_temporary_entry(entry: &InitialBrowseEntry) -> Self {
+    fn from_temporary_entry(
+        entry: &InitialBrowseEntry,
+        indexed: Option<&db::CachedDirectoryEntry>,
+        local_appearance_count: i64,
+    ) -> Self {
         let kind = if entry.kind == "dir" {
             FileKind::Directory
         } else {
             FileKind::File
         };
+        let content_id = indexed.and_then(|entry| entry.content_id.clone());
+        let occurrence_count = indexed.and_then(|entry| entry.occurrence_count);
+        let has_hash = content_id.is_some();
+        let index_state = match indexed {
+            Some(entry) if entry.kind == "dir" => FileIndexState::Indexed,
+            Some(_) if local_appearance_count > 0 => FileIndexState::Available,
+            Some(_) => FileIndexState::Indexed,
+            None => FileIndexState::RemoteUnindexed,
+        };
         Self {
             relative_path: entry.name.clone(),
             size_bytes: entry.size_bytes as i64,
             modified_at: entry.modified_at.clone(),
-            content_id: None,
+            content_id,
             status: if kind == FileKind::Directory {
-                "dir".to_string()
+                if indexed.is_some() {
+                    "dir:indexed".to_string()
+                } else {
+                    "dir:remote".to_string()
+                }
+            } else if local_appearance_count > 0 {
+                "local".to_string()
+            } else if has_hash {
+                "hash".to_string()
+            } else if indexed.is_some() {
+                "indexed".to_string()
             } else {
                 "remote".to_string()
             },
             kind,
-            occurrence_count: None,
+            occurrence_count,
+            index_state,
         }
     }
 }
@@ -631,15 +665,6 @@ fn focus_block(title: impl Into<String>, pane: FocusPane, active: FocusPane) -> 
         .style(theme::panel())
         .border_style(Style::default().fg(border).bg(theme::PANEL))
         .title_style(title_style)
-}
-
-fn file_status_style(status: &str) -> Style {
-    match status {
-        "present" => theme::panel(),
-        "missing" => theme::warn(),
-        "error" => theme::error(),
-        _ => theme::muted(),
-    }
 }
 
 fn job_status_style(status: &str) -> Style {
