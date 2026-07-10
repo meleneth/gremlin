@@ -1692,12 +1692,15 @@ fn info_bar_renders_active_import_operation() {
         root_path: "nas01:/srv/archive".to_string(),
         files_imported: 12,
         files_queued: 4,
+        files_skipped: 8,
+        bytes_imported: 512,
+        bytes_total: 1024,
         directories_processed: 3,
         directories_queued: 2,
         current_path: Some("photos/foo.png".to_string()),
         phase: "remote helper hash indexing".to_string(),
     };
-    let mut buffer = Buffer::empty(Rect::new(0, 0, 150, 6));
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 150, 8));
 
     InfoBar {
         data: InfoBarData {
@@ -1722,6 +1725,9 @@ fn info_bar_renders_active_import_operation() {
     assert!(text.contains("Active: background tasks 1"));
     assert!(text.contains("Import: remote helper hash indexing"));
     assert!(text.contains("files 12 done | 4 remaining | 16 total"));
+    assert!(text.contains("Import hash:"));
+    assert!(text.contains("50%"));
+    assert!(text.contains("skipped 8 files (33%)"));
     assert!(text.contains("Import current: root nas01:/srv/archive"));
     assert!(text.contains("photos/foo.png"));
 }
@@ -2145,6 +2151,9 @@ fn import_helper_progress_can_be_logged_as_activity() {
         root_path: "host:/archive".to_string(),
         files_imported: 2,
         files_queued: 4,
+        files_skipped: 0,
+        bytes_imported: 0,
+        bytes_total: 0,
         directories_processed: 1,
         directories_queued: 1,
         current_path: Some("bad.bin".to_string()),
@@ -2413,6 +2422,9 @@ fn detail_pane_renders_import_progress() {
         root_path: "nas01:/srv/archive".to_string(),
         files_imported: 42,
         files_queued: 7,
+        files_skipped: 0,
+        bytes_imported: 0,
+        bytes_total: 0,
         directories_processed: 5,
         directories_queued: 2,
         current_path: Some("photos/foo.png".to_string()),
@@ -2496,6 +2508,9 @@ fn app_screen_renders_import_progress_in_empty_file_pane() {
             root_path: "nas01:/srv/archive".to_string(),
             files_imported: 2,
             files_queued: 10,
+            files_skipped: 0,
+            bytes_imported: 0,
+            bytes_total: 0,
             directories_processed: 1,
             directories_queued: 3,
             current_path: Some("dir/a.bin".to_string()),

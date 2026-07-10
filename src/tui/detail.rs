@@ -292,6 +292,9 @@ impl Widget for InfoBar<'_> {
         }
         if let Some(progress) = self.data.import_progress {
             lines.push(Line::from(brief_import_execution_line(progress)));
+            if let Some(line) = import_hash_progress_line(progress) {
+                lines.push(Line::from(line));
+            }
             lines.push(Line::from(import_current_execution_line(progress)));
         }
         if let Some(job) = self.data.event.filter(|job| job.status == "running") {
@@ -382,6 +385,33 @@ fn brief_import_execution_line(progress: &ImportProgress) -> String {
     )
 }
 
+fn import_hash_progress_line(progress: &ImportProgress) -> Option<String> {
+    if progress.bytes_total == 0 && progress.files_skipped == 0 {
+        return None;
+    }
+    let total_files = progress.files_imported + progress.files_queued + progress.files_skipped;
+    let skipped_percent = progress
+        .files_skipped
+        .saturating_mul(100)
+        .checked_div(total_files)
+        .unwrap_or(0);
+    let byte_summary = if progress.bytes_total == 0 {
+        "hash bytes -".to_string()
+    } else {
+        format!(
+            "{} {:>3}% {}/{}",
+            progress_bar(progress.bytes_imported, progress.bytes_total, 18),
+            progress_percent(progress.bytes_imported, progress.bytes_total),
+            human_size(progress.bytes_imported),
+            human_size(progress.bytes_total)
+        )
+    };
+    Some(format!(
+        "Import hash: {} | skipped {} files ({}%)",
+        byte_summary, progress.files_skipped, skipped_percent
+    ))
+}
+
 fn import_current_execution_line(progress: &ImportProgress) -> String {
     format!(
         "Import current: root {} | {}",
@@ -392,7 +422,7 @@ fn import_current_execution_line(progress: &ImportProgress) -> String {
 
 fn info_activity_count(has_transfer: bool, has_execution: bool, has_import: bool) -> usize {
     let reserved =
-        usize::from(has_transfer) * 3 + usize::from(has_execution) + usize::from(has_import) * 2;
+        usize::from(has_transfer) * 3 + usize::from(has_execution) + usize::from(has_import) * 3;
     3_usize.saturating_sub(reserved)
 }
 

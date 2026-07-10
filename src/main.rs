@@ -52,8 +52,10 @@ async fn main() -> anyhow::Result<()> {
                 }
                 let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
                 let conn = db::open_or_create(&db)?;
+                eprintln!("gremlin: preparing database {}", db.display());
                 db::init_schema(&conn)?;
                 let open_root_provider = open_root_provider(db.clone(), machine_label.clone());
+                eprintln!("gremlin: starting TUI");
                 tui::run_with_options(&conn, &db, machine_label, open_root_provider).await?;
                 return Ok(());
             };
@@ -80,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
                 let conn = db::open_existing(&default_target.db_path)?;
                 let open_root_provider =
                     open_root_provider(default_target.db_path.clone(), machine_label.clone());
+                eprintln!("gremlin: starting TUI");
                 tui::run_with_initial_browse(
                     &conn,
                     &default_target.db_path,
@@ -597,7 +600,10 @@ async fn main() -> anyhow::Result<()> {
         Some(Commands::Tui) => {
             let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
             let conn = db::open_existing(&db)?;
+            eprintln!("gremlin: preparing database {}", db.display());
+            db::init_schema(&conn)?;
             let open_root_provider = open_root_provider(db.clone(), machine_label.clone());
+            eprintln!("gremlin: starting TUI");
             tui::run_with_options(&conn, &db, machine_label, open_root_provider).await?;
         }
     }
@@ -764,6 +770,9 @@ fn run_default_target(
     };
     let db_path = config_ctx.resolve_db_or_default(cli_db)?;
     let conn = db::open_or_create(&db_path)?;
+    if will_open_tui {
+        eprintln!("gremlin: preparing database {}", db_path.display());
+    }
     db::init_schema(&conn)?;
     let parsed = targets::parse_target(target, None)?;
     let (machine_id, root_path) = resolve_target_identity(&conn, &parsed, machine_label)?;
@@ -1245,6 +1254,7 @@ fn import_ssh_root(
     progress: tui::ImportProgressCallback,
 ) -> anyhow::Result<tui::ImportResult> {
     let conn = db::open_existing(db_path)?;
+    db::init_schema(&conn)?;
     let host = parsed
         .machine_hint
         .as_deref()
@@ -1450,6 +1460,11 @@ fn import_ssh_native_hash(
         &stat_entries,
     )?;
     let hash_entries = prioritized_remote_hash_entries(&stat_entries, &previous);
+    let hash_bytes_total = hash_entries
+        .iter()
+        .map(|entry| entry.size_bytes)
+        .sum::<u64>();
+    let skipped_hash_files = stat_entries.len().saturating_sub(hash_entries.len()) as u64;
     emit_import_progress(
         progress,
         root_id,
@@ -1486,7 +1501,8 @@ fn import_ssh_native_hash(
         hash_entries
             .iter()
             .map(|entry| remote_parent(&entry.relative_path)),
-    );
+    )
+    .with_bytes(hash_bytes_total, skipped_hash_files);
     let helper_result = stream_helper_hash_ssh_entries(
         host,
         remote_path,
@@ -1764,7 +1780,7 @@ fn persist_remote_hash_entry(
         persist_remote_chunk_hashes(conn, root.root_id, &entry, job_id, chunk_size_bytes)?;
     }
     if let Some(reporter) = reporter {
-        reporter.record_path(&entry.relative_path, &entry.parent_path);
+        reporter.record_hash_path(&entry.relative_path, &entry.parent_path, entry.size_bytes);
     }
     Ok(())
 }
@@ -1925,7 +1941,10 @@ struct ImportProgressReporter<'a> {
     last_emit: Instant,
     dirty: bool,
     files_imported: u64,
+    files_skipped: u64,
     total_files: u64,
+    bytes_imported: u64,
+    bytes_total: u64,
     processed_dirs: BTreeSet<String>,
     queued_dir_file_counts: BTreeMap<String, u64>,
     current_path: Option<String>,
@@ -1956,11 +1975,20 @@ impl<'a> ImportProgressReporter<'a> {
             last_emit: Instant::now() - Duration::from_millis(250),
             dirty: false,
             files_imported: 0,
+            files_skipped: 0,
             total_files,
+            bytes_imported: 0,
+            bytes_total: 0,
             processed_dirs: BTreeSet::new(),
             queued_dir_file_counts,
             current_path: None,
         }
+    }
+
+    fn with_bytes(mut self, total_bytes: u64, skipped_files: u64) -> Self {
+        self.bytes_total = total_bytes;
+        self.files_skipped = skipped_files;
+        self
     }
 
     fn record_path(&mut self, current_path: &str, parent_path: &str) {
@@ -1979,6 +2007,11 @@ impl<'a> ImportProgressReporter<'a> {
         }
     }
 
+    fn record_hash_path(&mut self, current_path: &str, parent_path: &str, size_bytes: u64) {
+        self.bytes_imported = self.bytes_imported.saturating_add(size_bytes);
+        self.record_path(current_path, parent_path);
+    }
+
     fn finish(&mut self) {
         if self.dirty {
             self.emit();
@@ -1991,6 +2024,9 @@ impl<'a> ImportProgressReporter<'a> {
             root_path: self.root_path.to_string(),
             files_imported: self.files_imported,
             files_queued: self.total_files.saturating_sub(self.files_imported),
+            files_skipped: self.files_skipped,
+            bytes_imported: self.bytes_imported,
+            bytes_total: self.bytes_total,
             directories_processed: self.processed_dirs.len() as u64,
             directories_queued: self.queued_dir_file_counts.len() as u64,
             current_path: self.current_path.clone(),
@@ -2015,6 +2051,9 @@ fn emit_import_progress(
         root_path: root_path.to_string(),
         files_imported,
         files_queued,
+        files_skipped: 0,
+        bytes_imported: 0,
+        bytes_total: 0,
         directories_processed: 0,
         directories_queued: 0,
         current_path,

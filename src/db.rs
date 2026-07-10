@@ -689,6 +689,14 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         "dest_relative_path",
         "ALTER TABLE transfer_plan_entries ADD COLUMN dest_relative_path TEXT",
     )?;
+    dedupe_path_observations(conn)?;
+    conn.execute(
+        r#"
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_path_observations_root_relative_path
+            ON path_observations(root_id, relative_path)
+        "#,
+        [],
+    )?;
     Ok(())
 }
 
@@ -706,6 +714,78 @@ fn ensure_column(
         }
     }
     conn.execute(alter_sql, [])?;
+    Ok(())
+}
+
+fn dedupe_path_observations(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TEMP TABLE IF NOT EXISTS path_observation_dedupe_keep (
+            id TEXT PRIMARY KEY
+        );
+        DELETE FROM path_observation_dedupe_keep;
+        INSERT INTO path_observation_dedupe_keep (id)
+        SELECT p.id
+        FROM path_observations p
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM path_observations q
+            WHERE q.root_id = p.root_id
+              AND q.relative_path = p.relative_path
+              AND (
+                CASE WHEN q.status = 'present' THEN 1 ELSE 0 END >
+                    CASE WHEN p.status = 'present' THEN 1 ELSE 0 END
+                OR (
+                    CASE WHEN q.status = 'present' THEN 1 ELSE 0 END =
+                        CASE WHEN p.status = 'present' THEN 1 ELSE 0 END
+                    AND CASE WHEN q.content_id IS NOT NULL THEN 1 ELSE 0 END >
+                        CASE WHEN p.content_id IS NOT NULL THEN 1 ELSE 0 END
+                )
+                OR (
+                    CASE WHEN q.status = 'present' THEN 1 ELSE 0 END =
+                        CASE WHEN p.status = 'present' THEN 1 ELSE 0 END
+                    AND CASE WHEN q.content_id IS NOT NULL THEN 1 ELSE 0 END =
+                        CASE WHEN p.content_id IS NOT NULL THEN 1 ELSE 0 END
+                    AND COALESCE(q.last_seen_at, '') > COALESCE(p.last_seen_at, '')
+                )
+                OR (
+                    CASE WHEN q.status = 'present' THEN 1 ELSE 0 END =
+                        CASE WHEN p.status = 'present' THEN 1 ELSE 0 END
+                    AND CASE WHEN q.content_id IS NOT NULL THEN 1 ELSE 0 END =
+                        CASE WHEN p.content_id IS NOT NULL THEN 1 ELSE 0 END
+                    AND COALESCE(q.last_seen_at, '') = COALESCE(p.last_seen_at, '')
+                    AND q.id > p.id
+                )
+              )
+        );
+        DELETE FROM path_observation_chunk_hashes
+        WHERE path_observation_id NOT IN (
+            SELECT id FROM path_observation_dedupe_keep
+        );
+        DELETE FROM path_observations
+        WHERE id NOT IN (
+            SELECT id FROM path_observation_dedupe_keep
+        );
+        DROP TABLE path_observation_dedupe_keep;
+        "#,
+    )?;
+    refresh_all_root_current_sizes(conn)?;
+    Ok(())
+}
+
+fn refresh_all_root_current_sizes(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        r#"
+        UPDATE roots
+        SET current_size_bytes = (
+            SELECT COALESCE(SUM(size_bytes), 0)
+            FROM path_observations
+            WHERE path_observations.root_id = roots.id
+              AND path_observations.status = 'present'
+        )
+        "#,
+        [],
+    )?;
     Ok(())
 }
 
@@ -1197,7 +1277,8 @@ pub fn insert_path_observation(
             (id, machine_id, root_id, relative_path, basename, parent_path, size_bytes,
              modified_at, content_id, last_seen_at, status)
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'present')
-        ON CONFLICT(machine_id, root_id, relative_path) DO UPDATE SET
+        ON CONFLICT(root_id, relative_path) DO UPDATE SET
+            machine_id = excluded.machine_id,
             basename = excluded.basename,
             parent_path = excluded.parent_path,
             size_bytes = excluded.size_bytes,
@@ -3481,6 +3562,103 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(root.current_size_bytes, 2);
+    }
+
+    #[test]
+    fn path_observations_are_current_per_root_path() {
+        let conn = Connection::open_in_memory().unwrap();
+        configure(&conn).unwrap();
+        init_schema(&conn).unwrap();
+        let machine_id = ensure_local_machine_with_label(&conn, None).unwrap();
+        let other_machine_id =
+            ensure_machine_record(&conn, "machine_other", "other", Some("linux")).unwrap();
+        let root_id = ensure_root(&conn, &machine_id, "/tmp/root").unwrap();
+        insert_path_observation(
+            &conn,
+            PathObservationInput {
+                machine_id: &machine_id,
+                root_id: &root_id,
+                relative_path: "a.txt",
+                basename: "a.txt",
+                parent_path: ".",
+                size_bytes: 1,
+                modified_at: Some("2026-07-01T00:00:00Z"),
+                content_id: None,
+            },
+        )
+        .unwrap();
+        let content_id = ensure_content_object_sha256(&conn, 2, "sha256").unwrap();
+        insert_path_observation(
+            &conn,
+            PathObservationInput {
+                machine_id: &other_machine_id,
+                root_id: &root_id,
+                relative_path: "a.txt",
+                basename: "a.txt",
+                parent_path: ".",
+                size_bytes: 2,
+                modified_at: Some("2026-07-02T00:00:00Z"),
+                content_id: Some(&content_id),
+            },
+        )
+        .unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM path_observations WHERE root_id = ?1 AND relative_path = 'a.txt'",
+                params![root_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let row = path_observation_for_root_path(&conn, &root_id, "a.txt")
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(row.size_bytes, 2);
+        assert_eq!(row.content_id.as_deref(), Some(content_id.as_str()));
+    }
+
+    #[test]
+    fn init_schema_dedupes_legacy_path_observation_duplicates() {
+        let conn = Connection::open_in_memory().unwrap();
+        configure(&conn).unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute("DROP INDEX idx_path_observations_root_relative_path", [])
+            .unwrap();
+        let machine_id = ensure_local_machine_with_label(&conn, None).unwrap();
+        let other_machine_id =
+            ensure_machine_record(&conn, "machine_other", "other", Some("linux")).unwrap();
+        let root_id = ensure_root(&conn, &machine_id, "/tmp/root").unwrap();
+        let content_id = ensure_content_object_sha256(&conn, 1, "sha256").unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO path_observations
+                (id, machine_id, root_id, relative_path, basename, parent_path, size_bytes,
+                 modified_at, content_id, last_seen_at, status)
+            VALUES
+                ('path_fast', ?1, ?3, 'dup.txt', 'dup.txt', '.', 1, NULL, NULL, '2026-07-02T00:00:00Z', 'present'),
+                ('path_hash', ?2, ?3, 'dup.txt', 'dup.txt', '.', 1, NULL, ?4, '2026-07-01T00:00:00Z', 'present')
+            "#,
+            params![machine_id, other_machine_id, root_id, content_id],
+        )
+        .unwrap();
+
+        init_schema(&conn).unwrap();
+
+        let rows = conn
+            .prepare(
+                "SELECT id, content_id FROM path_observations WHERE root_id = ?1 AND relative_path = 'dup.txt'",
+            )
+            .unwrap()
+            .query_map(params![root_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+
+        assert_eq!(rows, vec![("path_hash".to_string(), Some(content_id))]);
     }
 
     #[test]

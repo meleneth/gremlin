@@ -163,6 +163,8 @@ struct JobProgress {
     files_seen: u64,
     files_done: u64,
     files_skipped: u64,
+    bytes_done: u64,
+    bytes_total: u64,
     errors: u64,
 }
 
@@ -175,6 +177,8 @@ impl JobProgress {
             files_seen: 0,
             files_done: 0,
             files_skipped: 0,
+            bytes_done: 0,
+            bytes_total: 0,
             errors: 0,
         }
     }
@@ -710,6 +714,7 @@ fn run_hash_job(ctx: RootJobContext<'_>, hash_all: bool) -> anyhow::Result<HashS
                     persist_progress(conn, job_id, &mut sequence, &progress, None)?;
                     continue;
                 }
+                progress.bytes_total = progress.bytes_total.saturating_add(meta.size_bytes);
                 progress.phase = "processing";
                 persist_progress(conn, job_id, &mut sequence, &progress, None)?;
                 persist_db_event(
@@ -728,6 +733,7 @@ fn run_hash_job(ctx: RootJobContext<'_>, hash_all: bool) -> anyhow::Result<HashS
                         hashed_paths.push(result.relative_path);
                         files_hashed += 1;
                         progress.files_done = files_hashed;
+                        progress.bytes_done = progress.bytes_done.saturating_add(result.size_bytes);
                         persist_progress(conn, job_id, &mut sequence, &progress, None)?;
                     }
                     Err(err) => {
@@ -1664,8 +1670,8 @@ fn persist_progress(
             files_done: progress.files_done,
             files_skipped: progress.files_skipped,
             errors: progress.errors,
-            bytes_done: None,
-            bytes_total: None,
+            bytes_done: (progress.bytes_total > 0).then_some(progress.bytes_done),
+            bytes_total: (progress.bytes_total > 0).then_some(progress.bytes_total),
             file_bytes_done: None,
             file_bytes_total: None,
             bytes_per_second: None,
@@ -2213,6 +2219,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(first.files_hashed, 1);
+        let first_progress = db::events_for_job(&conn, &first.job_id)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_kind == "job_progress")
+            .filter_map(|event| serde_json::from_str::<serde_json::Value>(&event.payload_json).ok())
+            .find(|payload| {
+                payload.get("bytes_total").and_then(|value| value.as_u64()) == Some(5)
+                    && payload.get("bytes_done").and_then(|value| value.as_u64()) == Some(5)
+            })
+            .unwrap();
+        assert_eq!(first_progress["bytes_done"], 5);
+        assert_eq!(first_progress["files_skipped"], 0);
         let second = hash_to_db(
             &conn,
             dir.path(),
