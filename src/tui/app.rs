@@ -156,9 +156,13 @@ pub(super) async fn run_loop(
                             message,
                         );
                     } else {
+                        let total_files = progress.files_imported + progress.files_queued;
                         state.status = format!(
-                            "importing {}: {} files indexed, {} queued",
-                            progress.root_path, progress.files_imported, progress.files_queued
+                            "importing {}: {} files indexed, {} remaining, {} total",
+                            progress.root_path,
+                            progress.files_imported,
+                            progress.files_queued,
+                            total_files
                         );
                     }
                 }

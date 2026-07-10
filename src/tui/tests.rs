@@ -1678,9 +1678,56 @@ fn info_bar_renders_active_import_operation() {
 
     assert!(text.contains("Active: background tasks 1"));
     assert!(text.contains("Import: remote helper hash indexing"));
-    assert!(text.contains("root nas01:/srv/archive"));
-    assert!(text.contains("files 12/4"));
-    assert!(text.contains("current photos/foo.png"));
+    assert!(text.contains("files 12 done | 4 remaining | 16 total"));
+    assert!(text.contains("Import current: root nas01:/srv/archive"));
+    assert!(text.contains("photos/foo.png"));
+}
+
+#[test]
+fn info_bar_renders_selected_running_job_progress() {
+    let state = AppState::default();
+    let job = db::JobEventRow {
+        job_id: "job_hash_1".to_string(),
+        job_kind: "hash".to_string(),
+        root_id: Some("root_1".to_string()),
+        status: "running".to_string(),
+        phase: Some("processing".to_string()),
+        current_path: Some("photos/current-file.png".to_string()),
+        files_seen: 42,
+        files_done: 17,
+        files_skipped: 2,
+        errors: 1,
+        cancel_requested: false,
+        sequence: 9,
+        event_kind: "job_progress".to_string(),
+        payload_json: "{}".to_string(),
+        params_json: None,
+    };
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 150, 6));
+
+    InfoBar {
+        data: InfoBarData {
+            root_name: Some("root".to_string()),
+            file: None,
+            selection: None,
+            event: Some(&job),
+            root_count: 1,
+            transfer_progress: None,
+            import_progress: None,
+        },
+        state: &state,
+    }
+    .render(buffer.area, &mut buffer);
+
+    let text = buffer
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+
+    assert!(text.contains("Job: hash processing"));
+    assert!(text.contains("17 done | 42 seen | 2 skipped | 1 errors"));
+    assert!(text.contains("current photos/current-file.png"));
 }
 
 #[test]
@@ -2355,7 +2402,7 @@ fn detail_pane_renders_import_progress() {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert!(text.contains("Import: fast stat indexing"));
-    assert!(text.contains("Import files: 42 processed | 7 queued"));
+    assert!(text.contains("Import files: 42 processed | 7 remaining | 49 total"));
     assert!(text.contains("Import dirs: 5 processed | 2 queued"));
     assert!(text.contains("Import current: photos/foo.png"));
 }

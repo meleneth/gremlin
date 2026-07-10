@@ -104,6 +104,7 @@ impl Widget for DetailPane<'_> {
 }
 
 fn import_progress_lines(progress: &ImportProgress) -> Vec<Line<'static>> {
+    let total_files = progress.files_imported + progress.files_queued;
     vec![
         Line::from(format!(
             "Import: {} | {}",
@@ -111,8 +112,8 @@ fn import_progress_lines(progress: &ImportProgress) -> Vec<Line<'static>> {
             truncate(&progress.root_path, 48)
         )),
         Line::from(format!(
-            "Import files: {} processed | {} queued",
-            progress.files_imported, progress.files_queued
+            "Import files: {} processed | {} remaining | {} total",
+            progress.files_imported, progress.files_queued, total_files
         )),
         Line::from(format!(
             "Import dirs: {} processed | {} queued",
@@ -291,6 +292,10 @@ impl Widget for InfoBar<'_> {
         }
         if let Some(progress) = self.data.import_progress {
             lines.push(Line::from(brief_import_execution_line(progress)));
+            lines.push(Line::from(import_current_execution_line(progress)));
+        }
+        if let Some(job) = self.data.event.filter(|job| job.status == "running") {
+            lines.push(Line::from(active_job_progress_line(job)));
         }
         let mut activity_lines = self
             .state
@@ -344,22 +349,50 @@ fn active_execution_line(state: &AppState) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" | "))
 }
 
-fn brief_import_execution_line(progress: &ImportProgress) -> String {
+fn active_job_progress_line(job: &db::JobEventRow) -> String {
+    let phase = job.phase.as_deref().unwrap_or(&job.event_kind);
+    let current = job.current_path.as_deref().unwrap_or("-");
+    let progress = if job.files_skipped > 0 || job.errors > 0 {
+        format!(
+            "{} done | {} seen | {} skipped | {} errors",
+            job.files_done, job.files_seen, job.files_skipped, job.errors
+        )
+    } else {
+        format!("{} done | {} seen", job.files_done, job.files_seen)
+    };
     format!(
-        "Import: {} | root {} | files {}/{} | dirs {}/{} | current {}",
+        "Job: {} {} | {} | current {}",
+        truncate(&job.job_kind, 20),
+        truncate(phase, 24),
+        progress,
+        truncate(current, 70)
+    )
+}
+
+fn brief_import_execution_line(progress: &ImportProgress) -> String {
+    let total_files = progress.files_imported + progress.files_queued;
+    format!(
+        "Import: {} | files {} done | {} remaining | {} total | dirs {} done | {} queued",
         truncate(&progress.phase, 28),
-        truncate(&progress.root_path, 36),
         progress.files_imported,
         progress.files_queued,
+        total_files,
         progress.directories_processed,
-        progress.directories_queued,
-        truncate(progress.current_path.as_deref().unwrap_or("-"), 50)
+        progress.directories_queued
+    )
+}
+
+fn import_current_execution_line(progress: &ImportProgress) -> String {
+    format!(
+        "Import current: root {} | {}",
+        truncate(&progress.root_path, 36),
+        truncate(progress.current_path.as_deref().unwrap_or("-"), 86)
     )
 }
 
 fn info_activity_count(has_transfer: bool, has_execution: bool, has_import: bool) -> usize {
     let reserved =
-        usize::from(has_transfer) * 3 + usize::from(has_execution) + usize::from(has_import);
+        usize::from(has_transfer) * 3 + usize::from(has_execution) + usize::from(has_import) * 2;
     3_usize.saturating_sub(reserved)
 }
 

@@ -14,11 +14,13 @@ impl Widget for FilesPane<'_> {
             } else if selected_temporary_browse(self.state).is_some() {
                 "No files in this remote directory"
             } else if let Some(progress) = self.state.active_import_progress.as_ref() {
+                let total_files = progress.files_imported + progress.files_queued;
                 return Paragraph::new(format!(
-                    "Import in progress: {}\n{} processed | {} queued\n{}",
+                    "Import in progress: {}\n{} processed | {} remaining | {} total\n{}",
                     progress.phase,
                     progress.files_imported,
                     progress.files_queued,
+                    total_files,
                     progress
                         .current_path
                         .as_deref()
