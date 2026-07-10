@@ -434,6 +434,7 @@ fn job_filter_matches_projected_job_metadata() {
         db::JobEventRow {
             job_id: "job_scan_1".to_string(),
             job_kind: "scan".to_string(),
+            root_id: None,
             status: "completed".to_string(),
             phase: Some("finalizing".to_string()),
             current_path: Some("photos/a.png".to_string()),
@@ -450,6 +451,7 @@ fn job_filter_matches_projected_job_metadata() {
         db::JobEventRow {
             job_id: "job_transfer_1".to_string(),
             job_kind: "transfer_copy".to_string(),
+            root_id: None,
             status: "running".to_string(),
             phase: Some("copying".to_string()),
             current_path: Some("video/b.mkv".to_string()),
@@ -591,6 +593,25 @@ fn file_row_shows_index_appearance_count() {
     };
 
     assert!(file_row("> ", false, &file, FileView::Basic).contains("   3"));
+}
+
+#[test]
+fn basic_file_row_shows_loaded_hash_and_wider_path() {
+    let file = FileViewRow {
+        relative_path: "very/long/path/with/a/descriptive/photo-name.png".to_string(),
+        size_bytes: 42,
+        modified_at: None,
+        content_id: Some("content_abcdef1234567890".to_string()),
+        status: "present".to_string(),
+        kind: FileKind::File,
+        occurrence_count: Some(2),
+        index_state: FileIndexState::Indexed,
+    };
+
+    let row = file_row("  ", false, &file, FileView::Basic);
+
+    assert!(row.contains("content_a~"));
+    assert!(row.contains("very/long/path/with/a/descriptive/photo~"));
 }
 
 #[test]
@@ -1429,7 +1450,7 @@ fn formats_byte_progress_summary() {
     });
     assert_eq!(
         byte_progress_summary(&payload.to_string()).unwrap(),
-        "▕███████░░░░░░░▏  50% 1.0 MiB/s"
+        "▕███████░░░░░░░▏  50% 512 B/1.00 KiB @ 1.0 MiB/s"
     );
 }
 
@@ -1468,7 +1489,15 @@ fn formats_transfer_progress_detail() {
         "file_bytes_total": 256,
         "bytes_per_second": 2.0 * 1024.0 * 1024.0,
         "errors": 1,
-        "message": "2/8 reused local checkpoint after MD5 verify offset=67108864 size=67108864"
+        "message": "2/8 reused local checkpoint after MD5 verify offset=67108864 size=67108864",
+        "chunk_confidence": {
+            "chunks_total": 8,
+            "chunks_done": 2,
+            "chunks_reused": 1,
+            "chunks_copied": 1,
+            "chunks_verified": 2,
+            "checkpoint_misses": 0
+        }
     });
     let progress = transfer_progress_snapshot(&payload.to_string()).unwrap();
     let lines = transfer_progress_lines(&progress);
@@ -1479,6 +1508,7 @@ fn formats_transfer_progress_detail() {
     assert!(lines.contains("(3/4)"));
     assert!(lines.contains("Path incoming/photos/foo.png | errors 1"));
     assert!(lines.contains("Chunk 2/8 reused local checkpoint after MD5 verify"));
+    assert!(lines.contains("Trust chunks 2/8 | reused 1 | copied 1 | verified 2 | misses 0"));
 }
 
 #[test]
@@ -1495,6 +1525,7 @@ fn info_bar_renders_active_transfer_progress() {
         bytes_per_second: 2.0 * 1024.0 * 1024.0,
         errors: 1,
         message: None,
+        chunk_confidence: None,
     };
     let mut buffer = Buffer::empty(Rect::new(0, 0, 140, 9));
 
@@ -1529,6 +1560,7 @@ fn finds_latest_transfer_progress_event() {
     let complete = db::JobEventRow {
         job_id: "job_1".to_string(),
         job_kind: "transfer_copy".to_string(),
+        root_id: None,
         status: "completed".to_string(),
         phase: Some("copying".to_string()),
         current_path: None,
@@ -1571,6 +1603,7 @@ fn job_rows_keep_one_latest_row_per_job() {
     let latest = db::JobEventRow {
         job_id: "job_1".to_string(),
         job_kind: "transfer_copy".to_string(),
+        root_id: None,
         status: "running".to_string(),
         phase: Some("copying".to_string()),
         current_path: Some("b.bin".to_string()),
@@ -1604,10 +1637,83 @@ fn job_rows_keep_one_latest_row_per_job() {
 }
 
 #[test]
+fn enter_on_job_opens_current_file_under_job_root() {
+    let conn = Connection::open_in_memory().unwrap();
+    db::init_schema(&conn).unwrap();
+    let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+    let root_id = db::ensure_root(&conn, &machine_id, "/tmp/root").unwrap();
+    db::insert_path_observation(
+        &conn,
+        db::PathObservationInput {
+            machine_id: &machine_id,
+            root_id: &root_id,
+            relative_path: "incoming/photos/foo.png",
+            basename: "foo.png",
+            parent_path: "incoming/photos",
+            size_bytes: 5,
+            modified_at: None,
+            content_id: None,
+        },
+    )
+    .unwrap();
+    db::insert_path_observation(
+        &conn,
+        db::PathObservationInput {
+            machine_id: &machine_id,
+            root_id: &root_id,
+            relative_path: "incoming/photos/bar.png",
+            basename: "bar.png",
+            parent_path: "incoming/photos",
+            size_bytes: 5,
+            modified_at: None,
+            content_id: None,
+        },
+    )
+    .unwrap();
+    let root = db::root_by_id(&conn, &root_id).unwrap().unwrap();
+    let job = db::JobEventRow {
+        job_id: "job_1".to_string(),
+        job_kind: "transfer_copy".to_string(),
+        root_id: Some(root_id.clone()),
+        status: "running".to_string(),
+        phase: Some("copying".to_string()),
+        current_path: Some("older/path.bin".to_string()),
+        files_seen: 1,
+        files_done: 0,
+        files_skipped: 0,
+        errors: 0,
+        cancel_requested: false,
+        sequence: 1,
+        event_kind: "job_progress".to_string(),
+        payload_json: serde_json::json!({
+            "type": "job_progress",
+            "current_path": "incoming/photos/foo.png"
+        })
+        .to_string(),
+        params_json: None,
+    };
+    let mut state = AppState {
+        focus: FocusPane::Events,
+        ..AppState::default()
+    };
+
+    open_job_current_path(&conn, &[root], Some(&job), &mut state).unwrap();
+
+    assert_eq!(state.focus, FocusPane::Files);
+    assert_eq!(
+        state.root_browse_dirs.get(&root_id).map(String::as_str),
+        Some("incoming/photos")
+    );
+    assert_eq!(state.file_offset, 1);
+    assert!(state.status.contains("incoming/photos/foo.png"));
+}
+
+#[test]
 fn activity_rows_show_transfer_direction() {
     let row = db::JobEventRow {
         job_id: "job_transfer_1".to_string(),
         job_kind: "transfer_copy".to_string(),
+        root_id: None,
         status: "running".to_string(),
         phase: Some("copying".to_string()),
         current_path: Some("a.bin".to_string()),
@@ -1651,6 +1757,7 @@ fn visible_transfer_failed_events_enter_activity_log_once() {
     let event = db::JobEventRow {
         job_id: "job_transfer_1".to_string(),
         job_kind: "transfer_copy".to_string(),
+        root_id: None,
         status: "running".to_string(),
         phase: Some("copying".to_string()),
         current_path: Some("incoming/foo.png".to_string()),
@@ -1687,6 +1794,7 @@ fn visible_transfer_error_count_gets_fallback_activity_without_reason() {
     let event = db::JobEventRow {
         job_id: "job_transfer_1".to_string(),
         job_kind: "transfer_copy".to_string(),
+        root_id: None,
         status: "running".to_string(),
         phase: Some("copying".to_string()),
         current_path: Some("incoming/foo.png".to_string()),

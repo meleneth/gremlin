@@ -569,6 +569,17 @@ struct TransferProgressSnapshot {
     bytes_per_second: f64,
     errors: u64,
     message: Option<String>,
+    chunk_confidence: Option<TransferChunkConfidenceSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+struct TransferChunkConfidenceSnapshot {
+    chunks_total: u64,
+    chunks_done: u64,
+    chunks_reused: u64,
+    chunks_copied: u64,
+    chunks_verified: u64,
+    checkpoint_misses: u64,
 }
 
 #[derive(Debug, Clone)]

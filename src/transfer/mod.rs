@@ -11,6 +11,7 @@ use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
 use crate::db::{self, RootRow, TransferPlanActionSummary};
+use crate::events::TransferChunkConfidence;
 use crate::events::{EventEnvelope, EventKind, EventPayload};
 use crate::util::{basename, local_machine_id, now_rfc3339, parent_path, system_time_rfc3339};
 
@@ -47,10 +48,11 @@ struct TransferProgressEventInput<'a> {
     file_bytes_total: u64,
     bytes_per_second: f64,
     message: Option<&'a str>,
+    chunk_confidence: Option<TransferChunkConfidence>,
 }
 
-type TransferProgressCallback<'a> =
-    dyn FnMut(u64, u64, f64, Option<&str>) -> anyhow::Result<()> + 'a;
+type TransferProgressCallback<'a> = dyn FnMut(u64, u64, f64, Option<&str>, Option<TransferChunkConfidence>) -> anyhow::Result<()>
+    + 'a;
 
 struct CopyContext<'a> {
     conn: &'a Connection,

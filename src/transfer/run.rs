@@ -93,7 +93,8 @@ pub fn run_transfer_plan(
         let mut on_progress = |file_bytes_done: u64,
                                file_bytes_total: u64,
                                bytes_per_second: f64,
-                               message: Option<&str>|
+                               message: Option<&str>,
+                               chunk_confidence: Option<TransferChunkConfidence>|
          -> anyhow::Result<()> {
             persist_transfer_progress_event(
                 conn,
@@ -111,6 +112,7 @@ pub fn run_transfer_plan(
                     file_bytes_total,
                     bytes_per_second,
                     message,
+                    chunk_confidence,
                 },
             )
         };
@@ -191,6 +193,7 @@ pub fn run_transfer_plan(
                 file_bytes_total: Some(entry.size_bytes),
                 bytes_per_second: Some(rate_per_second(entry.size_bytes, started_at)),
                 message: None,
+                chunk_confidence: None,
             },
         };
         db::persist_event(conn, &progress)?;
@@ -287,6 +290,7 @@ pub(super) fn complete_transfer_if_canceled(
             file_bytes_total: None,
             bytes_per_second: None,
             message: Some("cancel requested".to_string()),
+            chunk_confidence: None,
         },
     };
     db::persist_event(conn, &progress)?;

@@ -287,6 +287,7 @@ pub struct EventRow {
 pub struct JobEventRow {
     pub job_id: String,
     pub job_kind: String,
+    pub root_id: Option<String>,
     pub status: String,
     pub phase: Option<String>,
     pub current_path: Option<String>,
@@ -3044,7 +3045,7 @@ pub fn target_status(
 pub fn recent_jobs_and_events(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<JobEventRow>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT j.id, j.kind, j.status, j.phase, j.current_path, j.files_seen,
+        SELECT j.id, j.kind, j.root_id, j.status, j.phase, j.current_path, j.files_seen,
                j.files_done, j.files_skipped, j.errors, j.cancel_requested,
                e.sequence, e.event_kind, e.payload_json, j.params_json
         FROM job_events e
@@ -3057,18 +3058,19 @@ pub fn recent_jobs_and_events(conn: &Connection, limit: i64) -> rusqlite::Result
         Ok(JobEventRow {
             job_id: row.get(0)?,
             job_kind: row.get(1)?,
-            status: row.get(2)?,
-            phase: row.get(3)?,
-            current_path: row.get(4)?,
-            files_seen: row.get(5)?,
-            files_done: row.get(6)?,
-            files_skipped: row.get(7)?,
-            errors: row.get(8)?,
-            cancel_requested: row.get::<_, i64>(9)? != 0,
-            sequence: row.get(10)?,
-            event_kind: row.get(11)?,
-            payload_json: row.get(12)?,
-            params_json: row.get(13)?,
+            root_id: row.get(2)?,
+            status: row.get(3)?,
+            phase: row.get(4)?,
+            current_path: row.get(5)?,
+            files_seen: row.get(6)?,
+            files_done: row.get(7)?,
+            files_skipped: row.get(8)?,
+            errors: row.get(9)?,
+            cancel_requested: row.get::<_, i64>(10)? != 0,
+            sequence: row.get(11)?,
+            event_kind: row.get(12)?,
+            payload_json: row.get(13)?,
+            params_json: row.get(14)?,
         })
     })?;
     rows.collect()
@@ -3081,7 +3083,7 @@ pub fn recent_jobs_and_events_for_root(
 ) -> rusqlite::Result<Vec<JobEventRow>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT j.id, j.kind, j.status, j.phase, j.current_path, j.files_seen,
+        SELECT j.id, j.kind, j.root_id, j.status, j.phase, j.current_path, j.files_seen,
                j.files_done, j.files_skipped, j.errors, j.cancel_requested,
                e.sequence, e.event_kind, e.payload_json, j.params_json
         FROM job_events e
@@ -3095,18 +3097,19 @@ pub fn recent_jobs_and_events_for_root(
         Ok(JobEventRow {
             job_id: row.get(0)?,
             job_kind: row.get(1)?,
-            status: row.get(2)?,
-            phase: row.get(3)?,
-            current_path: row.get(4)?,
-            files_seen: row.get(5)?,
-            files_done: row.get(6)?,
-            files_skipped: row.get(7)?,
-            errors: row.get(8)?,
-            cancel_requested: row.get::<_, i64>(9)? != 0,
-            sequence: row.get(10)?,
-            event_kind: row.get(11)?,
-            payload_json: row.get(12)?,
-            params_json: row.get(13)?,
+            root_id: row.get(2)?,
+            status: row.get(3)?,
+            phase: row.get(4)?,
+            current_path: row.get(5)?,
+            files_seen: row.get(6)?,
+            files_done: row.get(7)?,
+            files_skipped: row.get(8)?,
+            errors: row.get(9)?,
+            cancel_requested: row.get::<_, i64>(10)? != 0,
+            sequence: row.get(11)?,
+            event_kind: row.get(12)?,
+            payload_json: row.get(13)?,
+            params_json: row.get(14)?,
         })
     })?;
     rows.collect()

@@ -89,19 +89,19 @@ pub(super) fn file_row_selected(file: &FileViewRow, selected_paths: &BTreeSet<St
 pub(super) fn file_header(view: FileView) -> String {
     match view {
         FileView::Basic => format!(
-            "{:<2} {:>3} {:<1} {:<22} {:>9} {:<8}",
-            "", "#", "E", "PATH", "SIZE", "STATE"
+            "{:<2} {:>3} {:<1} {:<40} {:>9} {:<8} {:<10}",
+            "", "#", "E", "PATH", "SIZE", "STATE", "HASH"
         ),
         FileView::Meta => format!(
-            "{:<2} {:>3} {:<1} {:<16} {:>9} {:<18}",
+            "{:<2} {:>3} {:<1} {:<34} {:>9} {:<18}",
             "", "#", "E", "PATH", "SIZE", "MODIFIED"
         ),
         FileView::Hash => format!(
-            "{:<2} {:>3} {:<1} {:<24} {:<18}",
+            "{:<2} {:>3} {:<1} {:<40} {:<18}",
             "", "#", "E", "PATH", "CONTENT"
         ),
         FileView::All => format!(
-            "{:<2} {:>3} {:<1} {:<12} {:>8} {:<6} {:<8} {:<10}",
+            "{:<2} {:>3} {:<1} {:<28} {:>8} {:<6} {:<10} {:<10}",
             "", "#", "E", "PATH", "SIZE", "STATE", "HASH", "MODIFIED"
         ),
     }
@@ -119,40 +119,41 @@ pub(super) fn file_row(marker: &str, selected: bool, file: &FileViewRow, view: F
     };
     match view {
         FileView::Basic => format!(
-            "{:<2} {:>3} {:<1} {:<22} {:>9} {:<8}",
+            "{:<2} {:>3} {:<1} {:<40} {:>9} {:<8} {:<10}",
             marker,
             occurrences,
             evidence,
-            truncate(&path, 22),
+            truncate(&path, 40),
             human_size(file.size_bytes as u64),
-            truncate(&file.status, 8)
+            truncate(&file.status, 8),
+            truncate(hash, 10)
         ),
         FileView::Meta => format!(
-            "{:<2} {:>3} {:<1} {:<16} {:>9} {:<18}",
+            "{:<2} {:>3} {:<1} {:<34} {:>9} {:<18}",
             marker,
             occurrences,
             evidence,
-            truncate(&path, 16),
+            truncate(&path, 34),
             human_size(file.size_bytes as u64),
             truncate(modified, 18)
         ),
         FileView::Hash => format!(
-            "{:<2} {:>3} {:<1} {:<24} {:<18}",
+            "{:<2} {:>3} {:<1} {:<40} {:<18}",
             marker,
             occurrences,
             evidence,
-            truncate(&path, 24),
+            truncate(&path, 40),
             truncate(hash, 18)
         ),
         FileView::All => format!(
-            "{:<2} {:>3} {:<1} {:<12} {:>8} {:<6} {:<8} {:<10}",
+            "{:<2} {:>3} {:<1} {:<28} {:>8} {:<6} {:<10} {:<10}",
             marker,
             occurrences,
             evidence,
-            truncate(&path, 12),
+            truncate(&path, 28),
             human_size(file.size_bytes as u64),
             truncate(&file.status, 6),
-            truncate(hash, 8),
+            truncate(hash, 10),
             truncate(modified, 10)
         ),
     }

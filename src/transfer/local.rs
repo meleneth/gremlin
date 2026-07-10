@@ -65,7 +65,8 @@ pub(super) fn copy_local_to_local(
     }
 
     let parent_created = ensure_dest_parent(dest_path)?;
-    let mut progress = |done: u64, total: u64, rate: f64| on_progress(done, total, rate, None);
+    let mut progress =
+        |done: u64, total: u64, rate: f64| on_progress(done, total, rate, None, None);
     let copy_hash = copy_with_hash(source_path, dest_path, Some(&mut progress))?;
     if copy_hash.bytes != entry.size_bytes {
         anyhow::bail!(

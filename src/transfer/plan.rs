@@ -128,6 +128,7 @@ fn plan_files(
                     file_bytes_total: None,
                     bytes_per_second: None,
                     message: Some(format!("transfer plan {plan_id} created")),
+                    chunk_confidence: None,
                 },
             };
             db::persist_event(conn, &progress)?;

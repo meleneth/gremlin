@@ -67,6 +67,7 @@ pub(super) fn persist_transfer_progress_event(
             file_bytes_total: Some(input.file_bytes_total),
             bytes_per_second: Some(input.bytes_per_second),
             message: input.message.map(str::to_string),
+            chunk_confidence: input.chunk_confidence,
         },
     };
     db::persist_event(conn, &envelope)?;

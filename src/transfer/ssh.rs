@@ -202,18 +202,26 @@ pub(super) fn copy_ssh_to_local_chunked(
     let started_at = Instant::now();
     let chunks = transfer_chunks(entry.size_bytes);
     let chunk_total = chunks.len() as u64;
+    let mut confidence = TransferChunkConfidence {
+        chunks_total: chunk_total,
+        ..TransferChunkConfidence::default()
+    };
     for chunk in chunks {
         let mut chunk_state = "fetching and verifying remote chunk";
+        let mut reused_chunk = false;
+        let mut checkpoint_miss = false;
         let bytes = if let Some(checkpoint) =
             matching_copy_chunk_checkpoint(conn, plan_id, entry, chunk)?
         {
             match local_chunk_bytes(temp_path, chunk) {
                 Ok(bytes) if format!("{:x}", md5::compute(&bytes)) == checkpoint.digest => {
                     chunk_state = "reused local checkpoint after MD5 verify";
+                    reused_chunk = true;
                     bytes
                 }
                 _ => {
                     chunk_state = "checkpoint miss; fetched and MD5 verified remote chunk";
+                    checkpoint_miss = true;
                     fetch_verified_remote_chunk(host, path, chunk)?
                 }
             }
@@ -232,11 +240,22 @@ pub(super) fn copy_ssh_to_local_chunked(
         blake3_hasher.update(&bytes);
         sha256_hasher.update(&bytes);
         copied += bytes.len() as u64;
+        confidence.chunks_done += 1;
+        confidence.chunks_verified += 1;
+        if reused_chunk {
+            confidence.chunks_reused += 1;
+        } else {
+            confidence.chunks_copied += 1;
+        }
+        if checkpoint_miss {
+            confidence.checkpoint_misses += 1;
+        }
         on_progress(
             copied,
             entry.size_bytes,
             rate_per_second(copied, started_at),
             Some(&chunk_progress_message(chunk, chunk_total, chunk_state)),
+            Some(confidence),
         )?;
     }
     dest.sync_all()
@@ -267,7 +286,7 @@ pub(super) fn copy_local_to_ssh_chunked(
                 .arg(format!(": > {}", remote_shell_path(path))),
         )
         .with_context(|| format!("creating empty remote file {host}:{path}"))?;
-        on_progress(0, 0, 0.0, Some("created empty remote file"))?;
+        on_progress(0, 0, 0.0, Some("created empty remote file"), None)?;
         return Ok(());
     }
     let mut source = std::fs::File::open(source_path)
@@ -276,6 +295,10 @@ pub(super) fn copy_local_to_ssh_chunked(
     let started_at = Instant::now();
     let chunks = transfer_chunks(entry.size_bytes);
     let chunk_total = chunks.len() as u64;
+    let mut confidence = TransferChunkConfidence {
+        chunks_total: chunk_total,
+        ..TransferChunkConfidence::default()
+    };
     for chunk in chunks {
         let mut bytes = vec![0_u8; chunk.size as usize];
         source
@@ -287,6 +310,8 @@ pub(super) fn copy_local_to_ssh_chunked(
         let local_md5 = format!("{:x}", md5::compute(&bytes));
         let checkpoint = matching_copy_chunk_checkpoint(conn, plan_id, entry, chunk)?;
         let mut chunk_state = "wrote and MD5 verified remote chunk";
+        let mut reused_chunk = false;
+        let mut checkpoint_miss = false;
         let remote_md5 = if checkpoint
             .as_ref()
             .is_some_and(|checkpoint| checkpoint.digest == local_md5)
@@ -294,9 +319,11 @@ pub(super) fn copy_local_to_ssh_chunked(
             let remote_md5 = remote_chunk_md5(host, path, chunk.index)?;
             if remote_md5 == local_md5 {
                 chunk_state = "reused remote checkpoint after MD5 verify";
+                reused_chunk = true;
                 remote_md5
             } else {
                 chunk_state = "checkpoint miss; rewrote and MD5 verified remote chunk";
+                checkpoint_miss = true;
                 write_remote_chunk(host, path, chunk.index, &bytes)?;
                 remote_chunk_md5(host, path, chunk.index)?
             }
@@ -315,11 +342,22 @@ pub(super) fn copy_local_to_ssh_chunked(
         }
         persist_copy_chunk_checkpoint(conn, job_id, plan_id, entry, chunk, &local_md5)?;
         copied += chunk.size;
+        confidence.chunks_done += 1;
+        confidence.chunks_verified += 1;
+        if reused_chunk {
+            confidence.chunks_reused += 1;
+        } else {
+            confidence.chunks_copied += 1;
+        }
+        if checkpoint_miss {
+            confidence.checkpoint_misses += 1;
+        }
         on_progress(
             copied,
             entry.size_bytes,
             rate_per_second(copied, started_at),
             Some(&chunk_progress_message(chunk, chunk_total, chunk_state)),
+            Some(confidence),
         )?;
     }
     Ok(())

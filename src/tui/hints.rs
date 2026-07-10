@@ -110,6 +110,8 @@ pub(super) fn active_command_hint(state: &AppState, has_temporary_browse: bool) 
         FocusPane::Plan => {
             "plan modal  arrows/PgUp/PgDn move  r run copies  a accept  d drop  e retarget  Esc close"
         }
-        FocusPane::Events => "/ filter jobs  c request cancel for selected job  Tab return to roots",
+        FocusPane::Events => {
+            "/ filter jobs  Enter open current file  c request cancel for selected job  Tab return to roots"
+        }
     }
 }

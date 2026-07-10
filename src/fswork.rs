@@ -1659,6 +1659,7 @@ fn persist_progress(
             file_bytes_total: None,
             bytes_per_second: None,
             message,
+            chunk_confidence: None,
         },
     )
 }

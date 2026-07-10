@@ -83,6 +83,8 @@ pub enum EventPayload {
         file_bytes_total: Option<u64>,
         bytes_per_second: Option<f64>,
         message: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        chunk_confidence: Option<TransferChunkConfidence>,
     },
     DirectorySeen {
         relative_path: String,
@@ -133,6 +135,16 @@ pub enum EventPayload {
         message: Option<String>,
         error: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct TransferChunkConfidence {
+    pub chunks_total: u64,
+    pub chunks_done: u64,
+    pub chunks_reused: u64,
+    pub chunks_copied: u64,
+    pub chunks_verified: u64,
+    pub checkpoint_misses: u64,
 }
 
 impl EventEnvelope {

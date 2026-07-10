@@ -84,21 +84,21 @@ pub(super) fn jobs_title(state: &AppState) -> String {
 
 pub(super) fn event_header() -> String {
     format!(
-        "{:<2} {:<12} {:<8} {:<10} {:<12} {:<28} {:<24}",
-        "", "JOB", "TYPE", "STATUS", "EVENT", "TARGET", "PROGRESS"
+        "{:<2} {:<12} {:<8} {:<10} {:<12} {:<34} {:<36}",
+        "", "JOB", "TYPE", "STATUS", "EVENT", "TARGET", "PROGRESS pct done/total @ rate"
     )
 }
 
 pub(super) fn event_row(marker: &str, row: &db::JobEventRow) -> String {
     format!(
-        "{:<2} {:<12} {:<8} {:<10} {:<12} {:<28} {:<24}",
+        "{:<2} {:<12} {:<8} {:<10} {:<12} {:<34} {:<36}",
         marker,
         truncate(short_id(&row.job_id), 12),
         truncate(&row.job_kind, 8),
         truncate(&event_status(row), 10),
         truncate(&event_label(row), 12),
-        truncate(&event_target(row), 28),
-        truncate(&progress_count(row), 24)
+        truncate(&event_target(row), 34),
+        truncate(&progress_count(row), 36)
     )
 }
 
@@ -210,6 +210,20 @@ pub(super) fn transfer_progress_snapshot(payload_json: &str) -> Option<TransferP
             .get("message")
             .and_then(|value| value.as_str())
             .map(str::to_string),
+        chunk_confidence: payload
+            .get("chunk_confidence")
+            .and_then(chunk_confidence_snapshot),
+    })
+}
+
+fn chunk_confidence_snapshot(value: &serde_json::Value) -> Option<TransferChunkConfidenceSnapshot> {
+    Some(TransferChunkConfidenceSnapshot {
+        chunks_total: value.get("chunks_total")?.as_u64()?,
+        chunks_done: value.get("chunks_done")?.as_u64()?,
+        chunks_reused: value.get("chunks_reused")?.as_u64()?,
+        chunks_copied: value.get("chunks_copied")?.as_u64()?,
+        chunks_verified: value.get("chunks_verified")?.as_u64()?,
+        checkpoint_misses: value.get("checkpoint_misses")?.as_u64()?,
     })
 }
 
@@ -251,6 +265,17 @@ pub(super) fn transfer_progress_lines(progress: &TransferProgressSnapshot) -> St
     );
     if let Some(message) = progress.message.as_deref() {
         lines.push_str(&format!("\nChunk {}", truncate(message, 72)));
+    }
+    if let Some(confidence) = progress.chunk_confidence.as_ref() {
+        lines.push_str(&format!(
+            "\nTrust chunks {}/{} | reused {} | copied {} | verified {} | misses {}",
+            confidence.chunks_done,
+            confidence.chunks_total,
+            confidence.chunks_reused,
+            confidence.chunks_copied,
+            confidence.chunks_verified,
+            confidence.checkpoint_misses
+        ));
     }
     lines
 }
@@ -305,6 +330,20 @@ pub(super) fn transfer_progress_styled_lines(
     ];
     if let Some(message) = progress.message.as_deref() {
         lines.push(Line::from(format!("Chunk {}", truncate(message, 72))));
+    }
+    if let Some(confidence) = progress.chunk_confidence.as_ref() {
+        lines.push(Line::from(vec![
+            Span::styled("Trust ", theme::header()),
+            Span::raw(format!(
+                "chunks {}/{} | reused {} | copied {} | verified {} | misses {}",
+                confidence.chunks_done,
+                confidence.chunks_total,
+                confidence.chunks_reused,
+                confidence.chunks_copied,
+                confidence.chunks_verified,
+                confidence.checkpoint_misses
+            )),
+        ]));
     }
     lines
 }
@@ -424,9 +463,11 @@ pub(super) fn byte_progress_summary(payload_json: &str) -> Option<String> {
         .and_then(|value| value.as_f64())
         .unwrap_or(0.0);
     Some(format!(
-        "{} {:>3}% {:>7}/s",
+        "{} {:>3}% {}/{} @ {}/s",
         progress_bar(done, total, EVENT_PROGRESS_WIDTH),
-        ((done.saturating_mul(100)) / total).min(100),
+        progress_percent(done, total),
+        human_size(done),
+        human_size(total),
         transfer_rate(rate)
     ))
 }

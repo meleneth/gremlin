@@ -678,6 +678,13 @@ pub(super) async fn run_loop(
                             } else {
                                 create_transfer_plan_from_selection(conn, &roots, &mut state)?;
                             }
+                        } else if state.focus == FocusPane::Events {
+                            open_job_current_path(
+                                conn,
+                                &roots,
+                                job_rows.get(state.event_offset),
+                                &mut state,
+                            )?;
                         } else {
                             create_transfer_plan_from_selection(conn, &roots, &mut state)?;
                         }

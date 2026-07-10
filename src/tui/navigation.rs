@@ -256,6 +256,72 @@ pub(super) fn open_persisted_parent(state: &mut AppState, root_id: Option<&str>)
     };
 }
 
+pub(super) fn open_job_current_path(
+    conn: &Connection,
+    roots: &[db::RootRow],
+    selected_job: Option<&db::JobEventRow>,
+    state: &mut AppState,
+) -> anyhow::Result<bool> {
+    let Some(job) = selected_job else {
+        state.status = "No job selected".to_string();
+        return Ok(true);
+    };
+    let Some(root_id) = job.root_id.as_deref() else {
+        state.status = format!("job {} has no root to browse", short_id(&job.job_id));
+        return Ok(true);
+    };
+    let Some(root_idx) = roots.iter().position(|root| root.id == root_id) else {
+        state.status = format!("job {} root is filtered out", short_id(&job.job_id));
+        return Ok(true);
+    };
+    let Some(current_path) = job_current_path(job) else {
+        state.status = format!("job {} has no current file", short_id(&job.job_id));
+        return Ok(true);
+    };
+    let parent = file_parent_path(&current_path);
+    state.selected_root = visible_index_for_persisted(state, root_idx);
+    if parent == "." {
+        state.root_browse_dirs.remove(root_id);
+    } else {
+        state
+            .root_browse_dirs
+            .insert(root_id.to_string(), parent.clone());
+    }
+    let rows = db::cached_directory_entries(conn, root_id, &parent)?;
+    state.file_offset = rows
+        .iter()
+        .position(|row| row.relative_path == current_path)
+        .unwrap_or(0);
+    state.focus = FocusPane::Files;
+    state.status = format!("opened job {} at {}", short_id(&job.job_id), current_path);
+    Ok(true)
+}
+
+fn job_current_path(job: &db::JobEventRow) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(&job.payload_json)
+        .ok()
+        .and_then(|payload| {
+            payload
+                .get("current_path")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .or_else(|| job.current_path.clone())
+        .filter(|path| !path.trim().is_empty() && path != "-")
+}
+
+fn file_parent_path(path: &str) -> String {
+    path.rsplit_once('/')
+        .map(|(parent, _)| {
+            if parent.is_empty() {
+                ".".to_string()
+            } else {
+                parent.to_string()
+            }
+        })
+        .unwrap_or_else(|| ".".to_string())
+}
+
 pub(super) fn remote_child_path(root_path: &str, child_path: &str) -> String {
     let child = child_path.trim().trim_matches('/');
     if child.is_empty() || child == "." {
