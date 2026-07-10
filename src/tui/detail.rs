@@ -87,16 +87,10 @@ impl Widget for DetailPane<'_> {
             "{root_lines}\n{file_lines}\n{plan_lines}{collection_lines}"
         ));
         match data.transfer_progress.as_ref() {
-            Some(progress) => {
-                lines.push(Line::from(format!(
-                    "Transfer file: {}",
-                    progress.current_path
-                )));
-                lines.extend(transfer_progress_styled_lines(
-                    progress,
-                    progress_animation_phase(),
-                ));
-            }
+            Some(progress) => lines.push(Line::from(format!(
+                "Transfer: active in Info | {}",
+                truncate(&progress.current_path, 72)
+            ))),
             None => lines.push(Line::from("Transfer: -")),
         }
         if let Some(progress) = data.import_progress {
@@ -257,12 +251,36 @@ impl Widget for InfoBar<'_> {
             status
         );
         let mut lines = vec![Line::from(context)];
+        if let Some(progress) = self.data.transfer_progress.as_ref() {
+            lines.push(Line::from(format!(
+                "Transfer file: {}",
+                truncate(&progress.current_path, 120)
+            )));
+            lines.extend(transfer_progress_styled_lines(
+                progress,
+                progress_animation_phase(),
+            ));
+        }
+        let execution = active_execution_line(self.state);
+        if let Some(execution) = execution.as_ref() {
+            lines.push(Line::from(vec![
+                Span::styled("run ", theme::ok()),
+                Span::styled(execution.clone(), theme::ok()),
+            ]));
+        }
+        if let Some(progress) = self.data.import_progress {
+            lines.push(Line::from(brief_import_execution_line(progress)));
+        }
         let mut activity_lines = self
             .state
             .activities
             .iter()
             .rev()
-            .take(3)
+            .take(info_activity_count(
+                self.data.transfer_progress.is_some(),
+                execution.is_some(),
+                self.data.import_progress.is_some(),
+            ))
             .collect::<Vec<_>>();
         activity_lines.reverse();
         for activity in activity_lines {
@@ -277,6 +295,50 @@ impl Widget for InfoBar<'_> {
             .block(panel_block("Info", true))
             .render(area, buf);
     }
+}
+
+fn active_execution_line(state: &AppState) -> Option<String> {
+    let mut parts = Vec::new();
+    if state.active_background_jobs > 0 {
+        parts.push(format!("bg {}", state.active_background_jobs));
+    }
+    if !state.active_job_ids.is_empty() {
+        let ids = state
+            .active_job_ids
+            .iter()
+            .take(3)
+            .map(|id| short_id(id))
+            .collect::<Vec<_>>()
+            .join(",");
+        let suffix = if state.active_job_ids.len() > 3 {
+            format!("+{}", state.active_job_ids.len() - 3)
+        } else {
+            String::new()
+        };
+        parts.push(format!("jobs {ids}{suffix}"));
+    }
+    if state.active_file_appearance_key.is_some() {
+        parts.push("index lookup".to_string());
+    }
+    (!parts.is_empty()).then(|| parts.join(" | "))
+}
+
+fn brief_import_execution_line(progress: &ImportProgress) -> String {
+    format!(
+        "Import {} | files {} queued {} | dirs {} queued {} | {}",
+        truncate(&progress.phase, 18),
+        progress.files_imported,
+        progress.files_queued,
+        progress.directories_processed,
+        progress.directories_queued,
+        truncate(progress.current_path.as_deref().unwrap_or("-"), 50)
+    )
+}
+
+fn info_activity_count(has_transfer: bool, has_execution: bool, has_import: bool) -> usize {
+    let reserved =
+        usize::from(has_transfer) * 3 + usize::from(has_execution) + usize::from(has_import);
+    3_usize.saturating_sub(reserved)
 }
 
 pub(super) struct ActivityPane<'a> {

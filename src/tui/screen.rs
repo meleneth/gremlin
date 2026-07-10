@@ -27,7 +27,7 @@ impl Widget for AppScreen<'_> {
                 Constraint::Length(4),
                 Constraint::Min(5),
                 Constraint::Percentage(38),
-                Constraint::Length(6),
+                Constraint::Length(9),
             ])
             .split(area);
         let middle = Layout::default()
@@ -74,7 +74,7 @@ impl Widget for AppScreen<'_> {
                 selected_paths: self.selected_paths,
                 plan: self.state.last_plan.as_ref(),
                 collection: self.state.collection_result.as_ref(),
-                transfer_progress: self.transfer_progress,
+                transfer_progress: self.transfer_progress.clone(),
                 import_progress: self.import_progress,
             },
         }
@@ -92,6 +92,8 @@ impl Widget for AppScreen<'_> {
                 selection: self.selection,
                 event: self.events.get(self.state.event_offset),
                 root_count: self.root_count,
+                transfer_progress: self.transfer_progress,
+                import_progress: self.import_progress,
             },
             state: self.state,
         }

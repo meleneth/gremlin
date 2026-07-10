@@ -913,6 +913,49 @@ fn formats_transfer_progress_detail() {
 }
 
 #[test]
+fn info_bar_renders_active_transfer_progress() {
+    let state = AppState::default();
+    let progress = TransferProgressSnapshot {
+        current_path: "incoming/photos/foo.png".to_string(),
+        files_done: 2,
+        files_total: 4,
+        bytes_done: 512,
+        bytes_total: 1024,
+        file_bytes_done: 128,
+        file_bytes_total: 256,
+        bytes_per_second: 2.0 * 1024.0 * 1024.0,
+        errors: 1,
+        message: None,
+    };
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 140, 9));
+
+    InfoBar {
+        data: InfoBarData {
+            root_name: Some("root".to_string()),
+            file: None,
+            selection: None,
+            event: None,
+            root_count: 1,
+            transfer_progress: Some(progress),
+            import_progress: None,
+        },
+        state: &state,
+    }
+    .render(buffer.area, &mut buffer);
+
+    let text = buffer
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("Info"));
+    assert!(text.contains("Transfer file: incoming/photos/foo.png"));
+    assert!(text.contains("Job"));
+    assert!(text.contains("File"));
+    assert!(text.contains("@ 2.0 MiB/s"));
+}
+
+#[test]
 fn finds_latest_transfer_progress_event() {
     let complete = db::JobEventRow {
         job_id: "job_1".to_string(),
