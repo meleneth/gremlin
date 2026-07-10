@@ -1723,6 +1723,67 @@ fn plan_modal_ignores_non_modal_keys() {
     assert!(state.status.contains("plan modal"));
 }
 
+#[tokio::test]
+async fn running_transfer_from_plan_modal_closes_modal() {
+    let conn = Connection::open_in_memory().unwrap();
+    db::init_schema(&conn).unwrap();
+    let db_path = PathBuf::from("unused.db");
+    let (job_tx, _job_rx) = mpsc::unbounded_channel();
+    let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+    let source_id = db::ensure_root(&conn, &machine_id, "/tmp/source").unwrap();
+    let dest_id = db::ensure_root(&conn, &machine_id, "/tmp/dest").unwrap();
+    let plan_id = db::create_transfer_plan(
+        &conn,
+        None,
+        &source_id,
+        &dest_id,
+        None,
+        serde_json::json!({}),
+    )
+    .unwrap();
+    db::insert_transfer_plan_entry(
+        &conn,
+        db::TransferPlanEntryInput {
+            plan_id: &plan_id,
+            relative_path: "incoming/foo.png",
+            dest_relative_path: None,
+            size_bytes: 10,
+            source_content_id: None,
+            dest_content_id: None,
+            action: "copy",
+            reason: "destination path is not indexed",
+            metadata_json: serde_json::json!({}),
+        },
+    )
+    .unwrap();
+    let mut state = AppState {
+        focus: FocusPane::Plan,
+        last_plan: Some(PlanSnapshot {
+            plan_id: plan_id.clone(),
+            source_root_id: source_id,
+            status: "planned".to_string(),
+            source_name: "source".to_string(),
+            dest_name: "dest".to_string(),
+            summary: Vec::new(),
+            entries: db::transfer_plan_entries(&conn, &plan_id).unwrap(),
+        }),
+        ..AppState::default()
+    };
+
+    app::handle_plan_modal_key(&conn, &db_path, job_tx, KeyCode::Char('r'), 40, &mut state)
+        .unwrap();
+
+    assert_eq!(state.focus, FocusPane::Events);
+    assert_eq!(
+        db::transfer_plan_by_id(&conn, &plan_id)
+            .unwrap()
+            .unwrap()
+            .status,
+        "queued"
+    );
+    assert!(state.status.contains("running queued transfer"));
+}
+
 #[test]
 fn detail_pane_renders_selected_file_hashes() {
     let selected_paths = BTreeSet::new();

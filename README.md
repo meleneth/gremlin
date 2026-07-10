@@ -4,7 +4,7 @@ Gremlin is a local-first file database, checksum, audit, and transfer-planning t
 
 This project is heavily vibe-coded with Codex using GPT-5.
 
-The current version is still intentionally conservative: a single Rust CLI crate, a Tokio runtime baseline, a local SQLite database, append-only job events, projected query tables, stat-only scanning, file hashing, JSONL worker/import seams, persisted transfer plans, TUI-queued transfer execution, a hash-checked local and one-sided SSH copy runner, resumable SSH chunk checkpoints, and a Ratatui TUI.
+The current version is still intentionally conservative, but it is no longer just a sketch: a single Rust CLI crate, a Tokio runtime baseline, a local SQLite database, append-only job events, projected query tables, stat-only scanning, file hashing, JSONL worker/import seams, streamed SSH stat/hash imports, persisted transfer plans, TUI-queued transfer execution, queue controls, a hash-checked local and one-sided SSH copy runner, resumable SSH chunk checkpoints, and a Ratatui TUI. Gremlin can now browse, index, compare, plan, copy, resume, and explain a surprising amount of file movement without pretending the filesystem is simpler than it is.
 
 ## Build and Install
 
@@ -214,17 +214,17 @@ Most scan/hash/verify commands print a compact summary plus capped highlights. U
 
 Future seams deliberately left open:
 
-- SSH remote scan/hash dispatch: TUI import can hash through native remote `find`/`sha256sum`; next steps are live progress streaming and resumable remote worker state.
-- Remote browsing: live temporary SSH listings can be navigated in the TUI and imported as roots; next steps are richer cached directory observations and explicit refresh controls.
+- SSH remote scan/hash dispatch: TUI import can hash through native remote `find`/`sha256sum` with streamed progress; next steps are resumable remote worker state and richer failure recovery.
+- Remote browsing: live temporary SSH listings can be navigated in the TUI and imported as roots; next steps are richer cached directory observations and more deliberate refresh controls.
 - Manifest reconciliation: checksum collections can now be compared to root observations by path, size, and comparable BLAKE3/SHA-256 hashes from the CLI and TUI; next steps are CRC/PAR2-specific verification and richer collection selection.
 - SMB path mapping: add machine/root mapping without changing content identity.
-- Transfer planning/copying: persisted dry-run root-to-root plans, job events, CLI inspection, TUI persisted-plan loading, queueing, resume rows, TUI plan browsing/run/review/retarget controls, detailed transfer progress, streamed hash-checked local copy execution, checkpointed chunk-verified one-sided SSH copies, optional local root chunk hashes, optional local paranoid readback, and checksum collection comparison exist for TUI selections; next slices should add richer queue controls and SSH resume summaries.
+- Transfer planning/copying: persisted dry-run root-to-root plans, job events, CLI inspection, TUI persisted-plan loading, queueing, resume rows, queued-plan drop controls, running-plan cancellation, TUI plan browsing/run/review/retarget controls, detailed transfer progress, streamed hash-checked local copy execution, checkpointed chunk-verified one-sided SSH copies, optional local root chunk hashes, optional local paranoid readback, and checksum collection comparison exist for TUI selections; next slices should add SSH resume summaries and queue reordering.
 - Seamless resume: make interrupted remote browsing, hashing, importing, and future copy jobs restart from durable job/event state instead of requiring manual cleanup.
 - Metadata extractors: add new job kinds and events rather than expanding scan/hash responsibilities.
-- Richer TUI job control: the TUI can start local jobs and queue transfer runs now; future slices should add better job filtering, queue reordering/drop controls, clearer cancellation states, transfer chunk/resume summaries, and async remote supervision without putting scan/hash/copy logic in TUI code.
+- Richer TUI job control: the TUI can start local jobs, filter Jobs, queue/drop/cancel transfer runs, and keep copy progress in Info; future slices should add queue reordering, clearer cancellation states, transfer chunk/resume summaries, and async remote supervision without putting scan/hash/copy logic in TUI code.
 
 ## Known v0 Limits
 
 - Path storage uses UTF-8 lossy display strings; raw non-UTF-8 Unix path support should be added later.
 - Import preserves evidence and checksum entries. Target-aware worker imports can update projected root state for completed hash events. `verify-collection` can compare imported collections against projected root state, but CRC/PAR2 repair and verification are not implemented.
-- No daemon, remote-to-remote transfer, queued-transfer reordering, streamed SSH supervision, or metadata extraction is implemented. Transfer execution supports local-to-local and one-sided SSH copies through `ssh`; remote import supports fast stat observations and native SSH SHA-256 hashing.
+- No daemon, remote-to-remote transfer, queued-transfer reordering, streamed SSH copy supervision, or metadata extraction is implemented. Transfer execution supports local-to-local and one-sided SSH copies through `ssh`; remote import supports fast stat observations and streamed native SSH SHA-256 hashing.

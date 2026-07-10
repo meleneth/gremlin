@@ -24,7 +24,7 @@ pub(super) fn run_current_transfer_plan(
     if let Some(plan) = state.last_plan.as_mut() {
         plan.status = "queued".to_string();
     }
-    state.focus = FocusPane::Plan;
+    state.focus = FocusPane::Events;
     state.set_status(
         ActivityLevel::Info,
         format!(
