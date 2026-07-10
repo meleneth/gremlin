@@ -238,7 +238,8 @@ pub(super) async fn run_loop(
                 }
             }
         }
-        let roots = db::roots(conn)?;
+        let all_roots = db::roots(conn)?;
+        let roots = filtered_root_rows(&all_roots, &state.root_filter);
         select_active_import_root(&mut state, &roots);
         if state.active_background_jobs == 0 {
             state.active_import_root_id = None;
@@ -340,6 +341,10 @@ pub(super) async fn run_loop(
                     request_immediate_quit(conn, &mut state)?;
                     return Ok(TuiExit::QuitNow);
                 }
+                if state.root_filter_editing {
+                    handle_root_filter_input(&mut state, key.code);
+                    continue;
+                }
                 if state.file_filter_editing {
                     handle_file_filter_input(&mut state, key.code);
                     continue;
@@ -418,6 +423,14 @@ pub(super) async fn run_loop(
                     KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         start_open_root_prompt(&mut state);
                     }
+                    KeyCode::Char('/') if state.focus == FocusPane::Roots => {
+                        state.root_filter_editing = true;
+                        state.status = if state.root_filter.is_empty() {
+                            "root filter: type text, Enter keep, Esc clear".to_string()
+                        } else {
+                            format!("root filter: {}", state.root_filter)
+                        };
+                    }
                     KeyCode::Char('/') if state.focus == FocusPane::Files => {
                         state.file_filter_editing = true;
                         state.status = if state.file_filter.is_empty() {
@@ -425,6 +438,13 @@ pub(super) async fn run_loop(
                         } else {
                             format!("file filter: {}", state.file_filter)
                         };
+                    }
+                    KeyCode::Esc
+                        if state.focus == FocusPane::Roots && !state.root_filter.is_empty() =>
+                    {
+                        state.root_filter.clear();
+                        normalize_root_filter_selection(&mut state);
+                        state.status = "root filter cleared".to_string();
                     }
                     KeyCode::Esc
                         if state.focus == FocusPane::Files && !state.file_filter.is_empty() =>

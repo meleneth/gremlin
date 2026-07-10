@@ -34,6 +34,8 @@ struct AppState {
     focus: FocusPane,
     file_view: FileView,
     selected_root: usize,
+    root_filter: String,
+    root_filter_editing: bool,
     file_offset: usize,
     file_filter: String,
     file_filter_editing: bool,

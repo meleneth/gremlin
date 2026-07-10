@@ -61,6 +61,44 @@ pub(super) fn selected_root_name(
         .or_else(|| root.map(root_display_name))
 }
 
+pub(super) fn filtered_root_rows(roots: &[db::RootRow], filter: &str) -> Vec<db::RootRow> {
+    let needle = filter.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return roots.to_vec();
+    }
+    roots
+        .iter()
+        .filter(|root| root_matches_filter(root, &needle))
+        .cloned()
+        .collect()
+}
+
+fn root_matches_filter(root: &db::RootRow, needle: &str) -> bool {
+    root_display_name(root)
+        .to_ascii_lowercase()
+        .contains(needle)
+        || root.path.to_ascii_lowercase().contains(needle)
+        || root.machine_id.to_ascii_lowercase().contains(needle)
+        || root
+            .label
+            .as_deref()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .contains(needle)
+        || root
+            .latest_job_kind
+            .as_deref()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .contains(needle)
+        || root
+            .latest_job_status
+            .as_deref()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .contains(needle)
+}
+
 pub(super) fn filtered_file_rows(files: &[FileViewRow], filter: &str) -> Vec<FileViewRow> {
     let needle = filter.trim().to_ascii_lowercase();
     if needle.is_empty() {
@@ -90,6 +128,12 @@ fn file_matches_filter(file: &FileViewRow, needle: &str) -> bool {
             .contains(needle)
 }
 
+pub(super) fn normalize_root_filter_selection(state: &mut AppState) {
+    state.selected_root = usize::from(state.temporary_browse.is_some());
+    state.file_offset = 0;
+    state.event_offset = 0;
+}
+
 pub(super) fn detail_selection_key(
     root: Option<&db::RootRow>,
     browse: Option<&TemporaryBrowse>,
@@ -106,6 +150,48 @@ pub(super) fn detail_selection_key(
         )
     } else {
         "none".to_string()
+    }
+}
+
+pub(super) fn handle_root_filter_input(state: &mut AppState, key: KeyCode) -> bool {
+    match key {
+        KeyCode::Enter => {
+            state.root_filter_editing = false;
+            if state.root_filter.trim().is_empty() {
+                state.root_filter.clear();
+                state.status = "root filter cleared".to_string();
+            } else {
+                state.status = format!("root filter: {}", state.root_filter);
+            }
+            true
+        }
+        KeyCode::Esc => {
+            state.root_filter_editing = false;
+            state.root_filter.clear();
+            normalize_root_filter_selection(state);
+            state.status = "root filter cleared".to_string();
+            true
+        }
+        KeyCode::Backspace => {
+            state.root_filter.pop();
+            normalize_root_filter_selection(state);
+            state.status = if state.root_filter.is_empty() {
+                "root filter cleared".to_string()
+            } else {
+                format!("root filter: {}", state.root_filter)
+            };
+            true
+        }
+        KeyCode::Char(ch) => {
+            if !ch.is_control() {
+                state.root_filter.push(ch);
+                normalize_root_filter_selection(state);
+                state.status = format!("root filter: {}", state.root_filter);
+                return true;
+            }
+            false
+        }
+        _ => false,
     }
 }
 

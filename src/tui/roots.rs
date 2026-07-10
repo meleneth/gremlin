@@ -8,9 +8,12 @@ impl Widget for RootsPane<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let root_count = visible_root_count(self.state, self.roots.len());
         let items = if root_count == 0 {
-            vec![ListItem::new(
-                "No roots yet\nRun `gremlin /path` or `gremlin target add /path`",
-            )]
+            let message = if self.state.root_filter.is_empty() {
+                "No roots yet\nRun `gremlin /path` or `gremlin target add /path`"
+            } else {
+                "No roots match the active filter"
+            };
+            vec![ListItem::new(message)]
         } else {
             let mut rows = vec![ListItem::new(root_header()).style(theme::header())];
             if let Some(browse) = self.state.temporary_browse.as_ref() {
@@ -80,8 +83,22 @@ impl Widget for RootsPane<'_> {
         };
         List::new(items)
             .style(theme::panel())
-            .block(focus_block("Roots", FocusPane::Roots, self.state.focus))
+            .block(focus_block(
+                roots_title(self.state),
+                FocusPane::Roots,
+                self.state.focus,
+            ))
             .render(area, buf);
+    }
+}
+
+pub(super) fn roots_title(state: &AppState) -> String {
+    if state.root_filter.is_empty() {
+        "Roots".to_string()
+    } else if state.root_filter_editing {
+        format!("Roots /{}", state.root_filter)
+    } else {
+        format!("Roots filter:{}", state.root_filter)
     }
 }
 

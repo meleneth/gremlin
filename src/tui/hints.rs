@@ -47,7 +47,8 @@ pub(super) fn command_hint_lines(
 }
 
 fn command_hint_needs_attention(state: &AppState) -> bool {
-    state.file_filter_editing
+    state.root_filter_editing
+        || state.file_filter_editing
         || state.retarget_draft.is_some()
         || state.pending_delete_root_id.is_some()
         || state.pending_import.is_some()
@@ -57,6 +58,9 @@ fn command_hint_needs_attention(state: &AppState) -> bool {
 }
 
 pub(super) fn active_command_hint(state: &AppState, has_temporary_browse: bool) -> &'static str {
+    if state.root_filter_editing {
+        return "type root filter text  Backspace edit  Enter keep  Esc clear";
+    }
     if state.file_filter_editing {
         return "type filter text  Backspace edit  Enter keep  Esc clear";
     }
@@ -86,9 +90,9 @@ pub(super) fn active_command_hint(state: &AppState, has_temporary_browse: bool) 
     }
     match state.focus {
         FocusPane::Roots if has_temporary_browse && state.selected_root == 0 => {
-            "Tab files  u refresh  i import browsed path  t copy from browsed path  PgUp/PgDn jump"
+            "/ filter roots  Tab files  u refresh  i import browsed path  t copy from browsed path  PgUp/PgDn jump"
         }
-        FocusPane::Roots => "Enter load resume row  r run resume row  Space mark in Files  s scan  h hash  v verify  m compare  t source  p open plan  x remove",
+        FocusPane::Roots => "/ filter roots  Enter load resume row  r run resume row  Space mark in Files  s scan  h hash  v verify  m compare  t source  p open plan  x remove",
         FocusPane::Files if has_temporary_browse && state.selected_root == 0 => {
             "/ filter  u refresh  PgUp/PgDn jump  Enter open dir  Backspace parent  i import  t copy"
         }

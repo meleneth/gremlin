@@ -266,6 +266,7 @@ fn command_hints_include_root_verify() {
     let state = AppState::default();
 
     assert!(active_command_hint(&state, false).contains("v verify"));
+    assert!(active_command_hint(&state, false).contains("/ filter roots"));
 }
 
 #[test]
@@ -282,6 +283,87 @@ fn command_hints_explain_scoped_job_choice() {
         active_command_hint(&state, false),
         "a all files in root  m marked paths only  Esc cancel"
     );
+}
+
+#[test]
+fn root_filter_matches_root_metadata() {
+    let roots = vec![
+        db::RootRow {
+            id: "root_1".to_string(),
+            machine_id: "machine_local".to_string(),
+            path: "/srv/photos".to_string(),
+            label: Some("Photo Import".to_string()),
+            current_size_bytes: 0,
+            latest_job_kind: Some("scan".to_string()),
+            latest_job_status: Some("completed".to_string()),
+            latest_job_phase: None,
+        },
+        db::RootRow {
+            id: "root_2".to_string(),
+            machine_id: "machine_remote".to_string(),
+            path: "/mnt/video".to_string(),
+            label: None,
+            current_size_bytes: 0,
+            latest_job_kind: Some("hash".to_string()),
+            latest_job_status: Some("failed".to_string()),
+            latest_job_phase: None,
+        },
+    ];
+
+    let label_matches = filtered_root_rows(&roots, "photo");
+    assert_eq!(label_matches.len(), 1);
+    assert_eq!(label_matches[0].id, "root_1");
+
+    let status_matches = filtered_root_rows(&roots, "FAILED");
+    assert_eq!(status_matches.len(), 1);
+    assert_eq!(status_matches[0].id, "root_2");
+
+    assert_eq!(filtered_root_rows(&roots, "missing").len(), 0);
+}
+
+#[test]
+fn root_filter_input_edits_and_clears_filter() {
+    let mut state = AppState {
+        root_filter_editing: true,
+        selected_root: 7,
+        file_offset: 5,
+        event_offset: 3,
+        ..AppState::default()
+    };
+
+    assert!(handle_root_filter_input(&mut state, KeyCode::Char('v')));
+    assert_eq!(state.root_filter, "v");
+    assert_eq!(state.selected_root, 0);
+    assert_eq!(state.file_offset, 0);
+    assert_eq!(state.event_offset, 0);
+    assert!(handle_root_filter_input(&mut state, KeyCode::Char('i')));
+    assert_eq!(state.root_filter, "vi");
+    assert!(handle_root_filter_input(&mut state, KeyCode::Backspace));
+    assert_eq!(state.root_filter, "v");
+    assert!(handle_root_filter_input(&mut state, KeyCode::Esc));
+    assert_eq!(state.root_filter, "");
+    assert!(!state.root_filter_editing);
+}
+
+#[test]
+fn root_filter_title_and_hint_show_editing_state() {
+    let state = AppState {
+        root_filter: "video".to_string(),
+        root_filter_editing: true,
+        ..AppState::default()
+    };
+
+    assert_eq!(roots_title(&state), "Roots /video");
+    assert_eq!(
+        active_command_hint(&state, false),
+        "type root filter text  Backspace edit  Enter keep  Esc clear"
+    );
+
+    let kept = AppState {
+        root_filter: "video".to_string(),
+        ..AppState::default()
+    };
+    assert_eq!(roots_title(&kept), "Roots filter:video");
 }
 
 #[test]
