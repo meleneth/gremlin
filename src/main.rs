@@ -1293,7 +1293,7 @@ fn ssh_root_display_path(host: &str, remote_path: &str) -> String {
     format!("{host}:{remote_path}")
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RemoteStatEntry {
     relative_path: String,
     size_bytes: u64,
@@ -1383,6 +1383,10 @@ fn import_ssh_native_hash(
         .machine_hint
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("SSH target missing machine hint"))?;
+    let previous = db::path_observations_for_root(conn, machine_id, root_id)?
+        .into_iter()
+        .map(|row| (row.relative_path.clone(), row))
+        .collect::<BTreeMap<_, _>>();
     let stat_entries = fast_scan_ssh_tree(parsed, remote_path)?;
     import_remote_stat_entries(
         conn,
@@ -1392,15 +1396,28 @@ fn import_ssh_native_hash(
         progress,
         &stat_entries,
     )?;
+    let hash_entries = prioritized_remote_hash_entries(&stat_entries, &previous);
     emit_import_progress(
         progress,
         root_id,
         root_path,
         "remote hash starting",
         0,
-        stat_entries.len() as u64,
+        hash_entries.len() as u64,
         None,
     );
+    if hash_entries.is_empty() {
+        emit_import_progress(
+            progress,
+            root_id,
+            root_path,
+            "remote hash indexed",
+            0,
+            0,
+            None,
+        );
+        return Ok(0);
+    }
     let collection_id = db::create_checksum_collection(
         conn,
         &format!("ssh native hash {root_path}"),
@@ -1413,11 +1430,11 @@ fn import_ssh_native_hash(
         root_id,
         root_path,
         "remote hash indexing",
-        stat_entries
+        hash_entries
             .iter()
             .map(|entry| remote_parent(&entry.relative_path)),
     );
-    stream_native_hash_ssh_tree(host, remote_path, |entry| {
+    stream_native_hash_ssh_entries(host, remote_path, &hash_entries, |entry| {
         db::insert_checksum_entry(
             conn,
             db::ChecksumEntryInput {
@@ -1453,6 +1470,48 @@ fn import_ssh_native_hash(
     })?;
     reporter.finish();
     Ok(reporter.files_imported)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RemoteHashPriority {
+    StaleMetadata,
+    MissingHash,
+}
+
+fn prioritized_remote_hash_entries(
+    entries: &[RemoteStatEntry],
+    previous: &BTreeMap<String, db::PathObservationRow>,
+) -> Vec<RemoteStatEntry> {
+    let mut needed = entries
+        .iter()
+        .filter_map(|entry| {
+            remote_hash_priority(entry, previous.get(&entry.relative_path))
+                .map(|priority| (priority, entry.clone()))
+        })
+        .collect::<Vec<_>>();
+    needed.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then_with(|| left.1.relative_path.cmp(&right.1.relative_path))
+    });
+    needed.into_iter().map(|(_, entry)| entry).collect()
+}
+
+fn remote_hash_priority(
+    entry: &RemoteStatEntry,
+    previous: Option<&db::PathObservationRow>,
+) -> Option<RemoteHashPriority> {
+    match previous {
+        None => Some(RemoteHashPriority::MissingHash),
+        Some(previous)
+            if previous.size_bytes != entry.size_bytes
+                || previous.modified_at != entry.modified_at =>
+        {
+            Some(RemoteHashPriority::StaleMetadata)
+        }
+        Some(previous) if previous.content_id.is_none() => Some(RemoteHashPriority::MissingHash),
+        Some(_) => None,
+    }
 }
 
 struct ImportProgressReporter<'a> {
@@ -1560,25 +1619,65 @@ fn emit_import_progress(
     });
 }
 
-fn stream_native_hash_ssh_tree(
+fn stream_native_hash_ssh_entries(
     host: &str,
     remote_path: &str,
+    entries: &[RemoteStatEntry],
     mut on_entry: impl FnMut(RemoteHashEntry) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    let command = format!(
-        "find -L {} -type f -printf '%P\\t%s\\t%T+\\t' -exec sha256sum {{}} \\;",
-        remote_shell_path(remote_path)
-    );
-    stream_ssh_lines(
-        host,
-        &command,
-        format!("hashing SSH target {host}:{remote_path}"),
-        |line| {
-            if let Some(entry) = parse_native_hash_line(remote_path, line) {
-                on_entry(entry)?;
-            }
-            Ok(())
-        },
+    for batch in remote_hash_batches(entries) {
+        let stat_by_path = batch
+            .iter()
+            .map(|entry| (entry.relative_path.as_str(), *entry))
+            .collect::<BTreeMap<_, _>>();
+        let command = remote_hash_batch_command(remote_path, &batch);
+        stream_ssh_lines(
+            host,
+            &command,
+            format!("hashing selected SSH target entries {host}:{remote_path}"),
+            |line| {
+                if let Some(entry) = parse_native_hash_batch_line(remote_path, &stat_by_path, line)
+                {
+                    on_entry(entry)?;
+                }
+                Ok(())
+            },
+        )?;
+    }
+    Ok(())
+}
+
+fn remote_hash_batches(entries: &[RemoteStatEntry]) -> Vec<Vec<&RemoteStatEntry>> {
+    const MAX_BATCH_COMMAND_CHARS: usize = 24_000;
+    let mut batches = Vec::new();
+    let mut current = Vec::new();
+    let mut current_len = 0_usize;
+    for entry in entries {
+        let quoted_len = shell_quote(&entry.relative_path).len() + 1;
+        if !current.is_empty() && current_len + quoted_len > MAX_BATCH_COMMAND_CHARS {
+            batches.push(current);
+            current = Vec::new();
+            current_len = 0;
+        }
+        current.push(entry);
+        current_len += quoted_len;
+    }
+    if !current.is_empty() {
+        batches.push(current);
+    }
+    batches
+}
+
+fn remote_hash_batch_command(remote_path: &str, entries: &[&RemoteStatEntry]) -> String {
+    let quoted_entries = entries
+        .iter()
+        .map(|entry| shell_quote(&entry.relative_path))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "p={}; if [ -d \"$p\" ]; then cd \"$p\" || exit 1; for f in {}; do sum=$(sha256sum -- \"$f\") || exit $?; printf '%s\\t%s\\n' \"$f\" \"$sum\"; done; else sum=$(sha256sum -- \"$p\") || exit $?; printf '\\t%s\\n' \"$sum\"; fi",
+        remote_shell_path(remote_path),
+        quoted_entries
     )
 }
 
@@ -1638,6 +1737,7 @@ fn parse_native_hash_output(remote_path: &str, stdout: &str) -> Vec<RemoteHashEn
     entries
 }
 
+#[cfg(test)]
 fn parse_native_hash_line(remote_path: &str, line: &str) -> Option<RemoteHashEntry> {
     let parts = line.splitn(4, '\t').collect::<Vec<_>>();
     if parts.len() != 4 {
@@ -1655,6 +1755,29 @@ fn parse_native_hash_line(remote_path: &str, line: &str) -> Option<RemoteHashEnt
         relative_path,
         size_bytes: parts[1].parse::<u64>().unwrap_or(0),
         modified_at: Some(parts[2].to_string()),
+        sha256: sha256.to_string(),
+    })
+}
+
+fn parse_native_hash_batch_line(
+    remote_path: &str,
+    stat_by_path: &BTreeMap<&str, &RemoteStatEntry>,
+    line: &str,
+) -> Option<RemoteHashEntry> {
+    let (relative, sum) = line.split_once('\t')?;
+    let sha256 = sum.split_whitespace().next()?;
+    let relative_path = if relative.is_empty() {
+        remote_path_basename(remote_path)
+    } else {
+        relative.to_string()
+    };
+    let stat = stat_by_path.get(relative_path.as_str())?;
+    Some(RemoteHashEntry {
+        basename: remote_basename(&relative_path).to_string(),
+        parent_path: remote_parent(&relative_path),
+        relative_path,
+        size_bytes: stat.size_bytes,
+        modified_at: stat.modified_at.clone(),
         sha256: sha256.to_string(),
     })
 }
@@ -2004,5 +2127,103 @@ mod tests {
         assert_eq!(entries[0].parent_path, ".");
         assert_eq!(entries[0].size_bytes, 7);
         assert_eq!(entries[0].sha256, "ffff");
+    }
+
+    #[test]
+    fn remote_hash_priority_skips_unchanged_and_prioritizes_stale_metadata() {
+        let entries = vec![
+            RemoteStatEntry {
+                relative_path: "missing.txt".to_string(),
+                size_bytes: 5,
+                modified_at: Some("2026-07-08T00:00:00Z".to_string()),
+            },
+            RemoteStatEntry {
+                relative_path: "stale-time.txt".to_string(),
+                size_bytes: 5,
+                modified_at: Some("2026-07-09T00:00:00Z".to_string()),
+            },
+            RemoteStatEntry {
+                relative_path: "stale-size.txt".to_string(),
+                size_bytes: 9,
+                modified_at: Some("2026-07-08T00:00:00Z".to_string()),
+            },
+            RemoteStatEntry {
+                relative_path: "unchanged.txt".to_string(),
+                size_bytes: 5,
+                modified_at: Some("2026-07-08T00:00:00Z".to_string()),
+            },
+        ];
+        let previous = BTreeMap::from([
+            (
+                "missing.txt".to_string(),
+                db::PathObservationRow {
+                    relative_path: "missing.txt".to_string(),
+                    size_bytes: 5,
+                    modified_at: Some("2026-07-08T00:00:00Z".to_string()),
+                    content_id: None,
+                },
+            ),
+            (
+                "stale-time.txt".to_string(),
+                db::PathObservationRow {
+                    relative_path: "stale-time.txt".to_string(),
+                    size_bytes: 5,
+                    modified_at: Some("2026-07-08T00:00:00Z".to_string()),
+                    content_id: Some("content_old".to_string()),
+                },
+            ),
+            (
+                "stale-size.txt".to_string(),
+                db::PathObservationRow {
+                    relative_path: "stale-size.txt".to_string(),
+                    size_bytes: 5,
+                    modified_at: Some("2026-07-08T00:00:00Z".to_string()),
+                    content_id: Some("content_old".to_string()),
+                },
+            ),
+            (
+                "unchanged.txt".to_string(),
+                db::PathObservationRow {
+                    relative_path: "unchanged.txt".to_string(),
+                    size_bytes: 5,
+                    modified_at: Some("2026-07-08T00:00:00Z".to_string()),
+                    content_id: Some("content_ok".to_string()),
+                },
+            ),
+        ]);
+
+        let prioritized = prioritized_remote_hash_entries(&entries, &previous)
+            .into_iter()
+            .map(|entry| entry.relative_path)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            prioritized,
+            vec!["stale-size.txt", "stale-time.txt", "missing.txt"]
+        );
+    }
+
+    #[test]
+    fn parses_selected_remote_hash_batch_output_with_stat_metadata() {
+        let stat = RemoteStatEntry {
+            relative_path: "dir/a file.txt".to_string(),
+            size_bytes: 42,
+            modified_at: Some("2026-07-08T00:00:00Z".to_string()),
+        };
+        let stat_by_path = BTreeMap::from([(stat.relative_path.as_str(), &stat)]);
+
+        let entry = parse_native_hash_batch_line(
+            "/srv/archive",
+            &stat_by_path,
+            "dir/a file.txt\tabcd1234  dir/a file.txt",
+        )
+        .unwrap();
+
+        assert_eq!(entry.relative_path, "dir/a file.txt");
+        assert_eq!(entry.basename, "a file.txt");
+        assert_eq!(entry.parent_path, "dir");
+        assert_eq!(entry.size_bytes, 42);
+        assert_eq!(entry.modified_at.as_deref(), Some("2026-07-08T00:00:00Z"));
+        assert_eq!(entry.sha256, "abcd1234");
     }
 }

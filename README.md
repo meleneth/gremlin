@@ -30,7 +30,7 @@ cargo build --release
 ./target/release/gremlin --help
 ```
 
-Manual SSH checksum imports can still use `gremlin worker hash --jsonl` if a compatible `gremlin` binary is available on the remote host. The TUI's SSH hash import path uses standard remote shell tools instead.
+Manual SSH checksum imports can still use `gremlin worker hash --jsonl` if a compatible `gremlin` binary is available on the remote host. The TUI's SSH hash import path uses standard remote shell tools instead. SSH hash import fast-scans first, preserves existing hash evidence during the stat refresh, then asks the remote host to hash only files with missing or stale hash evidence, prioritizing changed size/mtime entries before never-hashed entries.
 
 ## Development Checks
 
