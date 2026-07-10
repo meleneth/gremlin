@@ -1866,6 +1866,54 @@ fn app_screen_renders_empty_state_widgets() {
 }
 
 #[test]
+fn app_screen_renders_import_progress_in_empty_file_pane() {
+    let state = AppState {
+        active_import_progress: Some(ImportProgress {
+            root_id: "root_1".to_string(),
+            root_path: "nas01:/srv/archive".to_string(),
+            files_imported: 2,
+            files_queued: 10,
+            directories_processed: 1,
+            directories_queued: 3,
+            current_path: Some("dir/a.bin".to_string()),
+            phase: "remote hash indexing".to_string(),
+        }),
+        ..AppState::default()
+    };
+    let selected_paths = BTreeSet::new();
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 120, 42));
+
+    AppScreen {
+        state: &state,
+        roots: &[],
+        files: &[],
+        selected_paths: &selected_paths,
+        selected_root: None,
+        selected_temporary: None,
+        summary: None,
+        selection: None,
+        detail_content: None,
+        file_appearances: &[],
+        events: &[],
+        root_count: 0,
+        transfer_progress: None,
+        import_progress: state.active_import_progress.as_ref(),
+        detail_file_offset: 0,
+    }
+    .render(buffer.area, &mut buffer);
+
+    let text = buffer
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("Import in progress"));
+    assert!(text.contains("remote hash indexing"));
+    assert!(text.contains("2 processed"));
+    assert!(!text.contains("No indexed files"));
+}
+
+#[test]
 fn app_screen_renders_open_root_modal() {
     let state = AppState {
         pending_open_root: Some(OpenRootDraft {

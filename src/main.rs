@@ -20,9 +20,9 @@ use cli::{
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use targets::{ParsedTarget, TargetKind};
@@ -1178,6 +1178,15 @@ fn import_ssh_root(
     let execution_path = resolve_ssh_absolute_path(host, remote_path)?;
     let root_path = ssh_root_display_path(host, &execution_path);
     let root_id = db::ensure_root(&conn, machine_id, &root_path)?;
+    emit_import_progress(
+        &progress,
+        &root_id,
+        &root_path,
+        "import starting",
+        0,
+        0,
+        None,
+    );
     let files_imported = match mode {
         tui::ImportMode::No => 0,
         tui::ImportMode::Fast => import_ssh_fast_stat(
@@ -1258,6 +1267,27 @@ fn import_ssh_fast_stat(
     progress: &tui::ImportProgressCallback,
 ) -> anyhow::Result<u64> {
     let entries = fast_scan_ssh_tree(parsed, remote_path)?;
+    import_remote_stat_entries(conn, machine_id, root_id, root_path, progress, &entries)?;
+    emit_import_progress(
+        progress,
+        root_id,
+        root_path,
+        "fast stat indexed",
+        entries.len() as u64,
+        0,
+        None,
+    );
+    Ok(entries.len() as u64)
+}
+
+fn import_remote_stat_entries(
+    conn: &rusqlite::Connection,
+    machine_id: &str,
+    root_id: &str,
+    root_path: &str,
+    progress: &tui::ImportProgressCallback,
+    entries: &[RemoteStatEntry],
+) -> anyhow::Result<()> {
     let mut reporter = ImportProgressReporter::new(
         progress,
         root_id,
@@ -1267,7 +1297,7 @@ fn import_ssh_fast_stat(
             .iter()
             .map(|entry| remote_parent(&entry.relative_path)),
     );
-    for entry in &entries {
+    for entry in entries {
         db::insert_path_observation(
             conn,
             db::PathObservationInput {
@@ -1284,7 +1314,7 @@ fn import_ssh_fast_stat(
         reporter.record_path(&entry.relative_path, &remote_parent(&entry.relative_path));
     }
     reporter.finish();
-    Ok(entries.len() as u64)
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -1310,7 +1340,24 @@ fn import_ssh_native_hash(
         .machine_hint
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("SSH target missing machine hint"))?;
-    let entries = native_hash_ssh_tree(host, remote_path)?;
+    let stat_entries = fast_scan_ssh_tree(parsed, remote_path)?;
+    import_remote_stat_entries(
+        conn,
+        machine_id,
+        root_id,
+        root_path,
+        progress,
+        &stat_entries,
+    )?;
+    emit_import_progress(
+        progress,
+        root_id,
+        root_path,
+        "remote hash starting",
+        0,
+        stat_entries.len() as u64,
+        None,
+    );
     let collection_id = db::create_checksum_collection(
         conn,
         &format!("ssh native hash {root_path}"),
@@ -1323,9 +1370,11 @@ fn import_ssh_native_hash(
         root_id,
         root_path,
         "remote hash indexing",
-        entries.iter().map(|entry| entry.parent_path.clone()),
+        stat_entries
+            .iter()
+            .map(|entry| remote_parent(&entry.relative_path)),
     );
-    for entry in &entries {
+    stream_native_hash_ssh_tree(host, remote_path, |entry| {
         db::insert_checksum_entry(
             conn,
             db::ChecksumEntryInput {
@@ -1357,9 +1406,10 @@ fn import_ssh_native_hash(
             },
         )?;
         reporter.record_path(&entry.relative_path, &entry.parent_path);
-    }
+        Ok(())
+    })?;
     reporter.finish();
-    Ok(entries.len() as u64)
+    Ok(reporter.files_imported)
 }
 
 struct ImportProgressReporter<'a> {
@@ -1446,58 +1496,124 @@ impl<'a> ImportProgressReporter<'a> {
     }
 }
 
-fn native_hash_ssh_tree(host: &str, remote_path: &str) -> anyhow::Result<Vec<RemoteHashEntry>> {
+fn emit_import_progress(
+    callback: &tui::ImportProgressCallback,
+    root_id: &str,
+    root_path: &str,
+    phase: &str,
+    files_imported: u64,
+    files_queued: u64,
+    current_path: Option<String>,
+) {
+    callback(tui::ImportProgress {
+        root_id: root_id.to_string(),
+        root_path: root_path.to_string(),
+        files_imported,
+        files_queued,
+        directories_processed: 0,
+        directories_queued: 0,
+        current_path,
+        phase: phase.to_string(),
+    });
+}
+
+fn stream_native_hash_ssh_tree(
+    host: &str,
+    remote_path: &str,
+    mut on_entry: impl FnMut(RemoteHashEntry) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     let command = format!(
         "find -L {} -type f -printf '%P\\t%s\\t%T+\\t' -exec sha256sum {{}} \\;",
         remote_shell_path(remote_path)
     );
-    let output = Command::new("ssh")
+    stream_ssh_lines(
+        host,
+        &command,
+        format!("hashing SSH target {host}:{remote_path}"),
+        |line| {
+            if let Some(entry) = parse_native_hash_line(remote_path, line) {
+                on_entry(entry)?;
+            }
+            Ok(())
+        },
+    )
+}
+
+fn stream_ssh_lines(
+    host: &str,
+    command: &str,
+    context: String,
+    mut on_line: impl FnMut(&str) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let mut child = Command::new("ssh")
         .arg("-o")
         .arg("BatchMode=yes")
         .arg("-o")
         .arg("ConnectTimeout=2")
         .arg(host)
         .arg(command)
-        .output()
-        .with_context(|| format!("hashing SSH target {host}:{remote_path}"))?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "ssh native hash failed for {host}:{remote_path}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| context.clone())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("failed to capture ssh stdout"))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("failed to capture ssh stderr"))?;
+    let stderr_reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    });
+    for line in BufReader::new(stdout).lines() {
+        let line = line.with_context(|| context.clone())?;
+        if !line.trim().is_empty() {
+            on_line(&line)?;
+        }
     }
-    Ok(parse_native_hash_output(
-        remote_path,
-        &String::from_utf8_lossy(&output.stdout),
-    ))
+    let status = child.wait().with_context(|| context.clone())?;
+    let stderr = stderr_reader.join().unwrap_or_default();
+    if !status.success() {
+        anyhow::bail!("ssh command failed for {host}: {}", stderr.trim());
+    }
+    Ok(())
 }
 
+#[cfg(test)]
 fn parse_native_hash_output(remote_path: &str, stdout: &str) -> Vec<RemoteHashEntry> {
     let mut entries = Vec::new();
     for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
-        let parts = line.splitn(4, '\t').collect::<Vec<_>>();
-        if parts.len() != 4 {
-            continue;
+        if let Some(entry) = parse_native_hash_line(remote_path, line) {
+            entries.push(entry);
         }
-        let Some(sha256) = parts[3].split_whitespace().next() else {
-            continue;
-        };
-        let relative_path = if parts[0].is_empty() {
-            remote_path_basename(remote_path)
-        } else {
-            parts[0].to_string()
-        };
-        entries.push(RemoteHashEntry {
-            basename: remote_basename(&relative_path).to_string(),
-            parent_path: remote_parent(&relative_path),
-            relative_path,
-            size_bytes: parts[1].parse::<u64>().unwrap_or(0),
-            modified_at: Some(parts[2].to_string()),
-            sha256: sha256.to_string(),
-        });
     }
     entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     entries
+}
+
+fn parse_native_hash_line(remote_path: &str, line: &str) -> Option<RemoteHashEntry> {
+    let parts = line.splitn(4, '\t').collect::<Vec<_>>();
+    if parts.len() != 4 {
+        return None;
+    }
+    let sha256 = parts[3].split_whitespace().next()?;
+    let relative_path = if parts[0].is_empty() {
+        remote_path_basename(remote_path)
+    } else {
+        parts[0].to_string()
+    };
+    Some(RemoteHashEntry {
+        basename: remote_basename(&relative_path).to_string(),
+        parent_path: remote_parent(&relative_path),
+        relative_path,
+        size_bytes: parts[1].parse::<u64>().unwrap_or(0),
+        modified_at: Some(parts[2].to_string()),
+        sha256: sha256.to_string(),
+    })
 }
 
 fn fast_scan_ssh_tree(

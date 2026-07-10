@@ -13,6 +13,25 @@ impl Widget for FilesPane<'_> {
                 "No files match the active filter"
             } else if selected_temporary_browse(self.state).is_some() {
                 "No files in this remote directory"
+            } else if let Some(progress) = self.state.active_import_progress.as_ref() {
+                return Paragraph::new(format!(
+                    "Import in progress: {}\n{} processed | {} queued\n{}",
+                    progress.phase,
+                    progress.files_imported,
+                    progress.files_queued,
+                    progress
+                        .current_path
+                        .as_deref()
+                        .unwrap_or("waiting for first file")
+                ))
+                .style(theme::panel())
+                .wrap(Wrap { trim: true })
+                .block(focus_block(
+                    files_title(self.state),
+                    FocusPane::Files,
+                    self.state.focus,
+                ))
+                .render(area, buf);
             } else {
                 "No indexed files for this root"
             };
