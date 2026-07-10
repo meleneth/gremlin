@@ -170,67 +170,6 @@ pub(super) fn open_persisted_parent(state: &mut AppState, root_id: Option<&str>)
     };
 }
 
-pub(super) fn open_temporary_file_entry(state: &mut AppState, selected_file: Option<&FileViewRow>) {
-    let Some(file) = selected_file else {
-        state.status = "No remote entry selected".to_string();
-        return;
-    };
-    if file.kind != FileKind::Directory {
-        state.status = format!("selected remote file {}", file.relative_path);
-        return;
-    }
-    let Some(current) = state
-        .temporary_browse
-        .as_ref()
-        .map(|browse| browse.current_path.clone())
-    else {
-        state.status = "No temporary browse root selected".to_string();
-        return;
-    };
-    let next_path = remote_child_path(&current, &file.relative_path);
-    open_temporary_path(state, next_path);
-}
-
-pub(super) fn open_temporary_parent(state: &mut AppState) {
-    let Some(browse) = state.temporary_browse.as_ref() else {
-        state.status = "No temporary browse root selected".to_string();
-        return;
-    };
-    if browse.current_path == browse.root_path {
-        state.status = "Already at temporary root".to_string();
-        return;
-    }
-    let Some(parent) = remote_parent_path(&browse.current_path, &browse.root_path) else {
-        state.status = "Already at temporary root".to_string();
-        return;
-    };
-    open_temporary_path(state, parent);
-}
-
-pub(super) fn open_temporary_path(state: &mut AppState, next_path: String) {
-    let Some(provider) = state
-        .temporary_browse
-        .as_ref()
-        .and_then(|browse| browse.browse_provider.clone())
-    else {
-        state.status = "Remote browsing is unavailable for this temporary root".to_string();
-        return;
-    };
-    match provider(&next_path) {
-        Ok(entries) => {
-            if let Some(browse) = state.temporary_browse.as_mut() {
-                browse.current_path = next_path.clone();
-                browse.entries = entries;
-            }
-            state.file_offset = 0;
-            state.status = format!("browsing {next_path}");
-        }
-        Err(err) => {
-            state.status = format!("remote browse failed: {err}");
-        }
-    }
-}
-
 pub(super) fn remote_child_path(root_path: &str, child_path: &str) -> String {
     let child = child_path.trim().trim_matches('/');
     if child.is_empty() || child == "." {

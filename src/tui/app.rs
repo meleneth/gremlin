@@ -172,6 +172,25 @@ pub(super) async fn run_loop(
                         );
                     }
                 },
+                TuiMessage::TemporaryBrowseLoaded { path, result } => match result {
+                    Ok(entries) => {
+                        if let Some(browse) = state.temporary_browse.as_mut() {
+                            browse.current_path = path.clone();
+                            browse.entries = entries;
+                        }
+                        state.file_offset = 0;
+                        state.background_finished(
+                            ActivityLevel::Success,
+                            format!("browsing {path}"),
+                        );
+                    }
+                    Err(err) => {
+                        state.background_finished(
+                            ActivityLevel::Error,
+                            format!("remote browse failed: {err}"),
+                        );
+                    }
+                },
                 TuiMessage::TemporaryTransferSourceImported {
                     root_id,
                     selected_relative_path,
@@ -515,7 +534,7 @@ pub(super) async fn run_loop(
                             && selected_temporary_browse(&state).is_some()
                         {
                             let file = files.get(state.file_offset).cloned();
-                            open_temporary_file_entry(&mut state, file.as_ref());
+                            start_temporary_file_browse(&mut state, file.as_ref(), job_tx.clone());
                         } else if state.focus == FocusPane::Files {
                             let root_id = selected.map(|root| root.id.clone());
                             let file = files.get(state.file_offset).cloned();
@@ -540,14 +559,19 @@ pub(super) async fn run_loop(
                         if state.focus == FocusPane::Files
                             && selected_temporary_browse(&state).is_some()
                         {
-                            open_temporary_parent(&mut state);
+                            start_temporary_parent_browse(&mut state, job_tx.clone());
                         } else if state.focus == FocusPane::Files {
                             let root_id = selected.map(|root| root.id.clone());
                             open_persisted_parent(&mut state, root_id.as_deref());
                         }
                     }
                     KeyCode::Esc => {
-                        cancel_transfer_plan_selection(&mut state);
+                        if state.focus == FocusPane::Plan {
+                            state.focus = FocusPane::Roots;
+                            state.status = "plan closed".to_string();
+                        } else {
+                            cancel_transfer_plan_selection(&mut state);
+                        }
                     }
                     KeyCode::Char(' ') => {
                         toggle_selected_file_mark(
@@ -563,6 +587,70 @@ pub(super) async fn run_loop(
         }
     }
     Ok(TuiExit::Normal)
+}
+
+fn start_temporary_file_browse(
+    state: &mut AppState,
+    selected_file: Option<&FileViewRow>,
+    job_tx: mpsc::UnboundedSender<TuiMessage>,
+) {
+    let Some(file) = selected_file else {
+        state.status = "No remote entry selected".to_string();
+        return;
+    };
+    if file.kind != FileKind::Directory {
+        state.status = format!("selected remote file {}", file.relative_path);
+        return;
+    }
+    let Some(current) = state
+        .temporary_browse
+        .as_ref()
+        .map(|browse| browse.current_path.clone())
+    else {
+        state.status = "No temporary browse root selected".to_string();
+        return;
+    };
+    let next_path = remote_child_path(&current, &file.relative_path);
+    start_temporary_browse_load(state, next_path, job_tx);
+}
+
+fn start_temporary_parent_browse(state: &mut AppState, job_tx: mpsc::UnboundedSender<TuiMessage>) {
+    let Some(browse) = state.temporary_browse.as_ref() else {
+        state.status = "No temporary browse root selected".to_string();
+        return;
+    };
+    if browse.current_path == browse.root_path {
+        state.status = "Already at temporary root".to_string();
+        return;
+    }
+    let Some(parent) = remote_parent_path(&browse.current_path, &browse.root_path) else {
+        state.status = "Already at temporary root".to_string();
+        return;
+    };
+    start_temporary_browse_load(state, parent, job_tx);
+}
+
+fn start_temporary_browse_load(
+    state: &mut AppState,
+    path: String,
+    job_tx: mpsc::UnboundedSender<TuiMessage>,
+) {
+    let Some(provider) = state
+        .temporary_browse
+        .as_ref()
+        .and_then(|browse| browse.browse_provider.clone())
+    else {
+        state.status = "Remote browsing is unavailable for this temporary root".to_string();
+        return;
+    };
+    state.background_started(format!("loading remote directory {path}"));
+    task::spawn_blocking({
+        let path = path.clone();
+        move || {
+            let result = provider(&path).map_err(|err| err.to_string());
+            let _ = job_tx.send(TuiMessage::TemporaryBrowseLoaded { path, result });
+        }
+    });
 }
 
 fn start_open_root_prompt(state: &mut AppState) {

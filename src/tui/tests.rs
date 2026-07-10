@@ -1,5 +1,4 @@
 use super::*;
-use std::sync::Mutex;
 
 #[test]
 fn truncates_long_values() {
@@ -23,45 +22,12 @@ fn root_display_name_uses_basename_when_label_is_path() {
 }
 
 #[test]
-fn temporary_browse_enter_directory_loads_child_entries() {
-    let requested_paths = Arc::new(Mutex::new(Vec::<String>::new()));
-    let provider_paths = requested_paths.clone();
-    let provider: BrowseProvider = Arc::new(move |path| {
-        provider_paths.lock().unwrap().push(path.to_string());
-        Ok(vec![InitialBrowseEntry {
-            kind: "file".to_string(),
-            name: "inside.txt".to_string(),
-            size_bytes: 5,
-            modified_at: None,
-        }])
-    });
-    let mut state = AppState {
-        temporary_browse: Some(TemporaryBrowse {
-            label: "nas01:".to_string(),
-            machine_id: "machine_remote".to_string(),
-            root_path: "~".to_string(),
-            current_path: "~".to_string(),
-            entries: vec![InitialBrowseEntry {
-                kind: "dir".to_string(),
-                name: "photos".to_string(),
-                size_bytes: 0,
-                modified_at: None,
-            }],
-            browse_provider: Some(provider),
-            import_provider: None,
-        }),
-        ..AppState::default()
-    };
-    let selected =
-        FileViewRow::from_temporary_entry(&state.temporary_browse.as_ref().unwrap().entries[0]);
-
-    open_temporary_file_entry(&mut state, Some(&selected));
-
-    let browse = state.temporary_browse.as_ref().unwrap();
-    assert_eq!(browse.current_path, "~/photos");
-    assert_eq!(browse.entries.len(), 1);
-    assert_eq!(browse.entries[0].name, "inside.txt");
-    assert_eq!(requested_paths.lock().unwrap().as_slice(), ["~/photos"]);
+fn temporary_browse_directory_paths_are_remote_child_paths() {
+    assert_eq!(remote_child_path("~", "photos"), "~/photos");
+    assert_eq!(
+        remote_child_path("/srv/archive", "photos"),
+        "/srv/archive/photos"
+    );
 }
 
 #[test]
@@ -1115,6 +1081,65 @@ fn formats_plan_review_hint_and_count() {
 }
 
 #[test]
+fn app_screen_renders_plan_as_modal_when_plan_focus_is_active() {
+    let selected_paths = BTreeSet::new();
+    let state = AppState {
+        focus: FocusPane::Plan,
+        last_plan: Some(PlanSnapshot {
+            plan_id: "plan_1".to_string(),
+            source_root_id: "root_1".to_string(),
+            status: "planned".to_string(),
+            source_name: "source".to_string(),
+            dest_name: "dest".to_string(),
+            summary: vec![db::TransferPlanActionSummary {
+                action: "copy".to_string(),
+                files: 1,
+                bytes: 10,
+            }],
+            entries: vec![db::TransferPlanEntryRow {
+                relative_path: "incoming/foo.png".to_string(),
+                dest_relative_path: "incoming/foo.png".to_string(),
+                size_bytes: 10,
+                source_content_id: None,
+                dest_content_id: None,
+                action: "copy".to_string(),
+                reason: "destination path is not indexed".to_string(),
+                metadata_json: "{}".to_string(),
+            }],
+        }),
+        ..AppState::default()
+    };
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 140, 44));
+
+    AppScreen {
+        state: &state,
+        roots: &[],
+        files: &[],
+        selected_paths: &selected_paths,
+        selected_root: None,
+        selected_temporary: None,
+        summary: None,
+        selection: None,
+        detail_content: None,
+        events: &[],
+        root_count: 0,
+        transfer_progress: None,
+        import_progress: None,
+        detail_file_offset: 0,
+    }
+    .render(buffer.area, &mut buffer);
+
+    let text = buffer
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("Plan *"));
+    assert!(text.contains("incoming/foo.png"));
+    assert!(text.contains("destination path is not indexed"));
+}
+
+#[test]
 fn detail_pane_renders_selected_file_hashes() {
     let selected_paths = BTreeSet::new();
     let file = FileViewRow {
@@ -1237,7 +1262,7 @@ fn app_screen_renders_empty_state_widgets() {
     assert!(text.contains("Activity Log"));
     assert!(text.contains("No roots yet"));
     assert!(text.contains("No indexed files"));
-    assert!(text.contains("No transfer plan yet"));
+    assert!(!text.contains("No transfer plan yet"));
 }
 
 #[test]

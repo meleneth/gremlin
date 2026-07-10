@@ -436,6 +436,10 @@ enum TuiMessage {
     ImportFinished(String),
     ImportProgress(ImportProgress),
     OpenRootFinished(Result<OpenRootResult, String>),
+    TemporaryBrowseLoaded {
+        path: String,
+        result: Result<Vec<InitialBrowseEntry>, String>,
+    },
     TemporaryTransferSourceImported {
         root_id: String,
         selected_relative_path: Option<String>,
@@ -555,8 +559,8 @@ impl FocusPane {
     fn next(self) -> Self {
         match self {
             Self::Roots => Self::Files,
-            Self::Files => Self::Plan,
-            Self::Plan => Self::Events,
+            Self::Files => Self::Events,
+            Self::Plan => Self::Roots,
             Self::Events => Self::Roots,
         }
     }

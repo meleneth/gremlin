@@ -39,11 +39,7 @@ impl Widget for AppScreen<'_> {
             .split(vertical[2]);
         let bottom_right = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(7),
-                Constraint::Percentage(42),
-                Constraint::Percentage(58),
-            ])
+            .constraints([Constraint::Length(7), Constraint::Min(5)])
             .split(lower[1]);
 
         HeaderPane {
@@ -87,12 +83,6 @@ impl Widget for AppScreen<'_> {
         }
         .render(bottom_right[0], buf);
         ActivityPane { state: self.state }.render(bottom_right[1], buf);
-        PlanReviewPane {
-            plan: self.state.last_plan.as_ref(),
-            collection: self.state.collection_result.as_ref(),
-            state: self.state,
-        }
-        .render(bottom_right[2], buf);
         InfoBar {
             data: InfoBarData {
                 root_name: selected_root_name(self.selected_root, self.selected_temporary),
@@ -106,6 +96,10 @@ impl Widget for AppScreen<'_> {
         .render(vertical[3], buf);
         if let Some(modal) = decision_modal(self.state) {
             render_decision_modal(modal, area, buf);
+        } else if self.state.focus == FocusPane::Plan
+            && (self.state.last_plan.is_some() || self.state.collection_result.is_some())
+        {
+            render_plan_modal(self.state, area, buf);
         }
     }
 }
@@ -219,6 +213,17 @@ fn render_decision_modal(modal: DecisionModal, area: Rect, buf: &mut Buffer) {
                 .title_style(theme::active_title()),
         )
         .render(modal_area, buf);
+}
+
+fn render_plan_modal(state: &AppState, area: Rect, buf: &mut Buffer) {
+    let modal_area = centered_rect(116, 24, area);
+    Clear.render(modal_area, buf);
+    PlanReviewPane {
+        plan: state.last_plan.as_ref(),
+        collection: state.collection_result.as_ref(),
+        state,
+    }
+    .render(modal_area, buf);
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {

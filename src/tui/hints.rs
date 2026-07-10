@@ -82,20 +82,22 @@ pub(super) fn active_command_hint(state: &AppState, has_temporary_browse: bool) 
         return "choose destination root  Enter create transfer plan  Esc cancel source";
     }
     if state.collection_result.is_some() && state.focus == FocusPane::Plan {
-        return "collection compare result  PgUp/PgDn jump  p load transfer plan";
+        return "collection modal  arrows/PgUp/PgDn move  p load transfer plan  Esc close";
     }
     match state.focus {
         FocusPane::Roots if has_temporary_browse && state.selected_root == 0 => {
             "Tab files  i import browsed path  t copy from browsed path  PgUp/PgDn jump"
         }
-        FocusPane::Roots => "Enter load resume row  r run resume row  Space mark in Files  s scan  h hash  v verify  m compare  t source  p plan  x remove",
+        FocusPane::Roots => "Enter load resume row  r run resume row  Space mark in Files  s scan  h hash  v verify  m compare  t source  p open plan  x remove",
         FocusPane::Files if has_temporary_browse && state.selected_root == 0 => {
             "/ filter  PgUp/PgDn jump  Enter open dir  Backspace parent  i import  t copy"
         }
         FocusPane::Files => {
             "/ filter  PgUp/PgDn jump  Enter open dir  Backspace parent  Space mark  f fields"
         }
-        FocusPane::Plan => "r run copy entries  a accept review  d drop review  e retarget review",
+        FocusPane::Plan => {
+            "plan modal  arrows/PgUp/PgDn move  r run copies  a accept  d drop  e retarget  Esc close"
+        }
         FocusPane::Events => "c request cancel for selected job  Tab return to roots",
     }
 }
