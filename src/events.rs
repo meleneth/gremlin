@@ -107,6 +107,8 @@ pub enum EventPayload {
         modified_at: Option<String>,
         blake3: String,
         sha256: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        crc32: Option<String>,
     },
     HashFailed {
         relative_path: Option<String>,
@@ -172,6 +174,7 @@ mod tests {
                 modified_at: None,
                 blake3: "b3".to_string(),
                 sha256: "s256".to_string(),
+                crc32: Some("DEADBEEF".to_string()),
             },
         };
 

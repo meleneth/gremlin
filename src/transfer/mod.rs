@@ -86,6 +86,7 @@ struct CopyHashResult {
     bytes: u64,
     blake3: String,
     sha256: String,
+    crc32: String,
 }
 
 #[derive(Debug, Clone)]

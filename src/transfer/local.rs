@@ -28,11 +28,12 @@ pub(super) fn copy_local_to_local(
                 sync_for_paranoid_readback(dest_path, None)?;
                 let readback_hash = hash_existing_file(dest_path)?;
                 verify_copy_hash(ctx.conn, entry, &readback_hash)?;
-                Some(db::ensure_content_object(
+                Some(db::ensure_content_object_crc(
                     ctx.conn,
                     readback_hash.bytes,
                     &readback_hash.blake3,
                     &readback_hash.sha256,
+                    &readback_hash.crc32,
                 )?)
             } else {
                 None
@@ -92,11 +93,12 @@ pub(super) fn copy_local_to_local(
         }
     }
 
-    let content_id = db::ensure_content_object(
+    let content_id = db::ensure_content_object_crc(
         ctx.conn,
         copy_hash.bytes,
         &copy_hash.blake3,
         &copy_hash.sha256,
+        &copy_hash.crc32,
     )?;
     insert_dest_observation(
         ctx.conn,

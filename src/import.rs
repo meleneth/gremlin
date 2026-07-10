@@ -84,6 +84,7 @@ fn import_events_file_for_target_inner(
             modified_at,
             blake3,
             sha256,
+            crc32,
             ..
         } = &event.payload
         {
@@ -111,6 +112,7 @@ fn import_events_file_for_target_inner(
                     modified_at: modified_at.as_deref(),
                     blake3: Some(blake3),
                     sha256: Some(sha256),
+                    crc32: crc32.as_deref(),
                     metadata_json: serde_json::json!({
                         "import_event_job_id": event.job_id,
                         "import_event_sequence": event.sequence
@@ -118,7 +120,12 @@ fn import_events_file_for_target_inner(
                 },
             )?;
             if let Some(target) = target {
-                let content_id = db::ensure_content_object(conn, *size_bytes, blake3, sha256)?;
+                let content_id = match crc32.as_deref() {
+                    Some(crc32) => {
+                        db::ensure_content_object_crc(conn, *size_bytes, blake3, sha256, crc32)?
+                    }
+                    None => db::ensure_content_object(conn, *size_bytes, blake3, sha256)?,
+                };
                 db::insert_path_observation(
                     conn,
                     db::PathObservationInput {
@@ -248,6 +255,7 @@ pub fn import_manifest_file(conn: &Connection, input: &Path) -> anyhow::Result<(
                 modified_at: None,
                 blake3: None,
                 sha256: None,
+                crc32: Some(&entry.crc32),
                 metadata_json: serde_json::json!({
                     "format": format,
                     "crc32": entry.crc32,
@@ -353,6 +361,7 @@ fn import_par2_file_list(conn: &Connection, input: &Path) -> anyhow::Result<()> 
                 modified_at: None,
                 blake3: None,
                 sha256: None,
+                crc32: None,
                 metadata_json: serde_json::json!({
                     "format": "par2",
                     "parent_path": parent_path(&entry.relative_path),
@@ -567,6 +576,7 @@ mod tests {
                 modified_at: None,
                 blake3: "b".repeat(64),
                 sha256: "s".repeat(64),
+                crc32: None,
             },
         };
         std::fs::write(&jsonl, format!("{}\n", event.to_json_line().unwrap())).unwrap();
@@ -596,6 +606,7 @@ mod tests {
                 modified_at: Some("2026-07-07T00:00:00Z".to_string()),
                 blake3: "b".repeat(64),
                 sha256: "s".repeat(64),
+                crc32: None,
             },
         };
         std::fs::write(&jsonl, format!("{}\n", event.to_json_line().unwrap())).unwrap();
@@ -646,6 +657,7 @@ mod tests {
                 modified_at: None,
                 blake3: "b".repeat(64),
                 sha256: "s".repeat(64),
+                crc32: None,
             },
         };
         std::fs::write(&jsonl, format!("{}\n", event.to_json_line().unwrap())).unwrap();

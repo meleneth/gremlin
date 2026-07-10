@@ -846,6 +846,7 @@ fn verifies_latest_checksum_collection_for_selected_root() {
             modified_at: None,
             blake3: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
             sha256: Some("ssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssssss"),
+            crc32: Some("DEADBEEF"),
             metadata_json: serde_json::json!({}),
         },
     )
@@ -860,6 +861,7 @@ fn verifies_latest_checksum_collection_for_selected_root() {
             modified_at: None,
             blake3: None,
             sha256: None,
+            crc32: None,
             metadata_json: serde_json::json!({}),
         },
     )
@@ -2017,6 +2019,7 @@ fn detail_pane_renders_selected_file_hashes() {
         size_bytes: 10,
         blake3: Some("blake3-hash-value".to_string()),
         sha256: Some("sha256-hash-value".to_string()),
+        crc32: Some("DEADBEEF".to_string()),
     };
     let appearances = vec![db::FileAppearanceRow {
         root_id: "root_1".to_string(),

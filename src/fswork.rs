@@ -189,6 +189,7 @@ pub struct HashResult {
     modified_at: Option<String>,
     blake3: String,
     sha256: String,
+    crc32: String,
 }
 
 struct ChunkHashResult {
@@ -1150,6 +1151,7 @@ pub fn worker_hash_jsonl(path: &Path, out: Option<&Path>) -> anyhow::Result<()> 
                             modified_at: result.modified_at,
                             blake3: result.blake3,
                             sha256: result.sha256,
+                            crc32: Some(result.crc32),
                         },
                     )?;
                     files_seen += 1;
@@ -1213,6 +1215,7 @@ pub fn hash_file(root: &Path, path: &Path) -> anyhow::Result<HashResult> {
     let mut reader = BufReader::new(file);
     let mut blake3_hasher = blake3::Hasher::new();
     let mut sha256_hasher = Sha256::new();
+    let mut crc32_hasher = crate::crc32::Hasher::new();
     let mut buf = [0_u8; 64 * 1024];
 
     loop {
@@ -1224,6 +1227,7 @@ pub fn hash_file(root: &Path, path: &Path) -> anyhow::Result<HashResult> {
         }
         blake3_hasher.update(&buf[..read]);
         sha256_hasher.update(&buf[..read]);
+        crc32_hasher.update(&buf[..read]);
     }
 
     Ok(HashResult {
@@ -1234,6 +1238,7 @@ pub fn hash_file(root: &Path, path: &Path) -> anyhow::Result<HashResult> {
         modified_at: meta.modified_at,
         blake3: blake3_hasher.finalize().to_hex().to_string(),
         sha256: bytes_to_hex(sha256_hasher.finalize()),
+        crc32: format!("{:08X}", crc32_hasher.finalize()),
     })
 }
 
@@ -1434,8 +1439,13 @@ fn accept_hash_result(
     root_id: &str,
     result: &HashResult,
 ) -> anyhow::Result<()> {
-    let content_id =
-        db::ensure_content_object(conn, result.size_bytes, &result.blake3, &result.sha256)?;
+    let content_id = db::ensure_content_object_crc(
+        conn,
+        result.size_bytes,
+        &result.blake3,
+        &result.sha256,
+        &result.crc32,
+    )?;
     db::insert_path_observation(
         conn,
         db::PathObservationInput {
@@ -1522,6 +1532,7 @@ fn persist_hash_completed(
             modified_at: result.modified_at.clone(),
             blake3: result.blake3.clone(),
             sha256: result.sha256.clone(),
+            crc32: Some(result.crc32.clone()),
         },
     )
 }

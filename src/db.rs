@@ -195,6 +195,7 @@ pub struct RootExportObservationRow {
     pub status: String,
     pub blake3: Option<String>,
     pub sha256: Option<String>,
+    pub crc32: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -218,6 +219,7 @@ pub struct ContentObjectRow {
     pub size_bytes: u64,
     pub blake3: Option<String>,
     pub sha256: Option<String>,
+    pub crc32: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -241,6 +243,7 @@ pub struct ChecksumEntryRow {
     pub size_bytes: u64,
     pub blake3: Option<String>,
     pub sha256: Option<String>,
+    pub crc32: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -249,6 +252,13 @@ pub struct ChecksumObservationRow {
     pub size_bytes: u64,
     pub blake3: Option<String>,
     pub sha256: Option<String>,
+    pub crc32: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SfvExportEntry {
+    pub relative_path: String,
+    pub crc32: String,
 }
 
 #[derive(Debug, Clone)]
@@ -354,6 +364,7 @@ pub struct ChecksumEntryInput<'a> {
     pub modified_at: Option<&'a str>,
     pub blake3: Option<&'a str>,
     pub sha256: Option<&'a str>,
+    pub crc32: Option<&'a str>,
     pub metadata_json: Value,
 }
 
@@ -421,6 +432,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             size_bytes INTEGER NOT NULL,
             blake3 TEXT,
             sha256 TEXT,
+            crc32 TEXT,
             first_seen_at TEXT NOT NULL
         );
 
@@ -516,6 +528,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             modified_at TEXT,
             blake3 TEXT,
             sha256 TEXT,
+            crc32 TEXT,
             metadata_json TEXT
         );
 
@@ -583,6 +596,18 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             UNIQUE(plan_id, relative_path, dest_relative_path, chunk_size_bytes, chunk_index, algorithm)
         );
         "#,
+    )?;
+    ensure_column(
+        conn,
+        "content_objects",
+        "crc32",
+        "ALTER TABLE content_objects ADD COLUMN crc32 TEXT",
+    )?;
+    ensure_column(
+        conn,
+        "checksum_entries",
+        "crc32",
+        "ALTER TABLE checksum_entries ADD COLUMN crc32 TEXT",
     )?;
     ensure_column(
         conn,
@@ -1203,7 +1228,17 @@ pub fn ensure_content_object(
     blake3: &str,
     sha256: &str,
 ) -> rusqlite::Result<String> {
-    ensure_content_object_with_hashes(conn, size_bytes, Some(blake3), Some(sha256))
+    ensure_content_object_with_hashes(conn, size_bytes, Some(blake3), Some(sha256), None)
+}
+
+pub fn ensure_content_object_crc(
+    conn: &Connection,
+    size_bytes: u64,
+    blake3: &str,
+    sha256: &str,
+    crc32: &str,
+) -> rusqlite::Result<String> {
+    ensure_content_object_with_hashes(conn, size_bytes, Some(blake3), Some(sha256), Some(crc32))
 }
 
 pub fn ensure_content_object_sha256(
@@ -1211,7 +1246,16 @@ pub fn ensure_content_object_sha256(
     size_bytes: u64,
     sha256: &str,
 ) -> rusqlite::Result<String> {
-    ensure_content_object_with_hashes(conn, size_bytes, None, Some(sha256))
+    ensure_content_object_with_hashes(conn, size_bytes, None, Some(sha256), None)
+}
+
+pub fn ensure_content_object_sha256_crc(
+    conn: &Connection,
+    size_bytes: u64,
+    sha256: &str,
+    crc32: &str,
+) -> rusqlite::Result<String> {
+    ensure_content_object_with_hashes(conn, size_bytes, None, Some(sha256), Some(crc32))
 }
 
 fn ensure_content_object_with_hashes(
@@ -1219,7 +1263,9 @@ fn ensure_content_object_with_hashes(
     size_bytes: u64,
     blake3: Option<&str>,
     sha256: Option<&str>,
+    crc32: Option<&str>,
 ) -> rusqlite::Result<String> {
+    let lookup_params = params![size_bytes as i64, blake3, sha256];
     if let Some(id) = conn
         .query_row(
             r#"
@@ -1229,18 +1275,24 @@ fn ensure_content_object_with_hashes(
               AND ((blake3 IS NULL AND ?2 IS NULL) OR blake3 = ?2)
               AND ((sha256 IS NULL AND ?3 IS NULL) OR sha256 = ?3)
             "#,
-            params![size_bytes as i64, blake3, sha256],
+            lookup_params,
             |row| row.get(0),
         )
         .optional()?
     {
+        if let Some(crc32) = crc32 {
+            conn.execute(
+                "UPDATE content_objects SET crc32 = COALESCE(crc32, ?1) WHERE id = ?2",
+                params![crc32, id],
+            )?;
+        }
         return Ok(id);
     }
 
     let id = new_id("content");
     conn.execute(
-        "INSERT INTO content_objects (id, size_bytes, blake3, sha256, first_seen_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![id, size_bytes as i64, blake3, sha256, now_rfc3339()],
+        "INSERT INTO content_objects (id, size_bytes, blake3, sha256, crc32, first_seen_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, size_bytes as i64, blake3, sha256, crc32, now_rfc3339()],
     )?;
     Ok(id)
 }
@@ -1251,7 +1303,7 @@ pub fn content_object_by_id(
 ) -> rusqlite::Result<Option<ContentObjectRow>> {
     conn.query_row(
         r#"
-        SELECT size_bytes, blake3, sha256
+        SELECT size_bytes, blake3, sha256, crc32
         FROM content_objects
         WHERE id = ?1
         "#,
@@ -1262,6 +1314,7 @@ pub fn content_object_by_id(
                 size_bytes: size as u64,
                 blake3: row.get(1)?,
                 sha256: row.get(2)?,
+                crc32: row.get(3)?,
             })
         },
     )
@@ -1438,7 +1491,7 @@ pub fn checksum_entries_for_collection(
 ) -> rusqlite::Result<Vec<ChecksumEntryRow>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT relative_path, size_bytes, blake3, sha256
+        SELECT relative_path, size_bytes, blake3, sha256, crc32
         FROM checksum_entries
         WHERE collection_id = ?1
         ORDER BY relative_path ASC
@@ -1451,6 +1504,7 @@ pub fn checksum_entries_for_collection(
             size_bytes: size as u64,
             blake3: row.get(2)?,
             sha256: row.get(3)?,
+            crc32: row.get(4)?,
         })
     })?;
     rows.collect()
@@ -1462,7 +1516,7 @@ pub fn checksum_observations_for_root(
 ) -> rusqlite::Result<BTreeMap<String, ChecksumObservationRow>> {
     let mut stmt = conn.prepare(
         r#"
-        SELECT p.relative_path, p.size_bytes, c.blake3, c.sha256
+        SELECT p.relative_path, p.size_bytes, c.blake3, c.sha256, c.crc32
         FROM path_observations p
         LEFT JOIN content_objects c ON c.id = p.content_id
         WHERE p.root_id = ?1
@@ -1477,6 +1531,7 @@ pub fn checksum_observations_for_root(
             size_bytes: size as u64,
             blake3: row.get(2)?,
             sha256: row.get(3)?,
+            crc32: row.get(4)?,
         })
     })?;
     let mut observations = BTreeMap::new();
@@ -1487,6 +1542,30 @@ pub fn checksum_observations_for_root(
     Ok(observations)
 }
 
+pub fn sfv_entries_for_root(
+    conn: &Connection,
+    root_id: &str,
+) -> rusqlite::Result<Vec<SfvExportEntry>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT p.relative_path, c.crc32
+        FROM path_observations p
+        JOIN content_objects c ON c.id = p.content_id
+        WHERE p.root_id = ?1
+          AND p.status = 'present'
+          AND c.crc32 IS NOT NULL
+        ORDER BY p.relative_path ASC
+        "#,
+    )?;
+    let rows = stmt.query_map(params![root_id], |row| {
+        Ok(SfvExportEntry {
+            relative_path: row.get(0)?,
+            crc32: row.get(1)?,
+        })
+    })?;
+    rows.collect()
+}
+
 pub fn insert_checksum_entry(
     conn: &Connection,
     input: ChecksumEntryInput<'_>,
@@ -1494,8 +1573,8 @@ pub fn insert_checksum_entry(
     conn.execute(
         r#"
         INSERT INTO checksum_entries
-            (id, collection_id, relative_path, basename, size_bytes, modified_at, blake3, sha256, metadata_json)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            (id, collection_id, relative_path, basename, size_bytes, modified_at, blake3, sha256, crc32, metadata_json)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
         "#,
         params![
             new_id("entry"),
@@ -1506,6 +1585,7 @@ pub fn insert_checksum_entry(
             input.modified_at,
             input.blake3,
             input.sha256,
+            input.crc32,
             serde_json::to_string(&input.metadata_json).unwrap_or_else(|_| "{}".to_string())
         ],
     )?;
@@ -2536,7 +2616,8 @@ pub fn export_observations_for_root(
             p.modified_at,
             p.status,
             c.blake3,
-            c.sha256
+            c.sha256,
+            c.crc32
         FROM path_observations p
         LEFT JOIN content_objects c ON c.id = p.content_id
         WHERE p.root_id = ?1
@@ -2554,6 +2635,7 @@ pub fn export_observations_for_root(
             status: row.get(5)?,
             blake3: row.get(6)?,
             sha256: row.get(7)?,
+            crc32: row.get(8)?,
         })
     })?;
     rows.collect()
@@ -3586,6 +3668,22 @@ mod tests {
             events_for_job(&conn, &job_id).unwrap()[0].event_kind,
             "job_created"
         );
+    }
+
+    #[test]
+    fn crc32_attaches_to_existing_sha256_content_identity() {
+        let conn = Connection::open_in_memory().unwrap();
+        configure(&conn).unwrap();
+        init_schema(&conn).unwrap();
+        let sha256 = "a".repeat(64);
+
+        let first = ensure_content_object_sha256(&conn, 10, &sha256).unwrap();
+        let second = ensure_content_object_sha256_crc(&conn, 10, &sha256, "CBF43926").unwrap();
+        let row = content_object_by_id(&conn, &first).unwrap().unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(row.sha256.as_deref(), Some(sha256.as_str()));
+        assert_eq!(row.crc32.as_deref(), Some("CBF43926"));
     }
 
     #[test]

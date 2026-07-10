@@ -43,6 +43,8 @@ pub struct SnapshotFile {
     pub status: String,
     pub blake3: Option<String>,
     pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crc32: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -122,12 +124,12 @@ pub fn import_snapshot(conn: &Connection, snapshot: &RootSnapshot) -> anyhow::Re
     db::attach_checksum_collection_target(conn, &collection_id, &machine_id, &root_id)?;
     for file in &snapshot.files {
         let content_id = match (file.blake3.as_deref(), file.sha256.as_deref()) {
-            (Some(blake3), Some(sha256)) => Some(db::ensure_content_object(
-                conn,
-                file.size_bytes,
-                blake3,
-                sha256,
-            )?),
+            (Some(blake3), Some(sha256)) => Some(match file.crc32.as_deref() {
+                Some(crc32) => {
+                    db::ensure_content_object_crc(conn, file.size_bytes, blake3, sha256, crc32)?
+                }
+                None => db::ensure_content_object(conn, file.size_bytes, blake3, sha256)?,
+            }),
             (None, Some(sha256)) => Some(db::ensure_content_object_sha256(
                 conn,
                 file.size_bytes,
@@ -148,7 +150,7 @@ pub fn import_snapshot(conn: &Connection, snapshot: &RootSnapshot) -> anyhow::Re
                 content_id: content_id.as_deref(),
             },
         )?;
-        if file.blake3.is_some() || file.sha256.is_some() {
+        if file.blake3.is_some() || file.sha256.is_some() || file.crc32.is_some() {
             db::insert_checksum_entry(
                 conn,
                 db::ChecksumEntryInput {
@@ -159,6 +161,7 @@ pub fn import_snapshot(conn: &Connection, snapshot: &RootSnapshot) -> anyhow::Re
                     modified_at: file.modified_at.as_deref(),
                     blake3: file.blake3.as_deref(),
                     sha256: file.sha256.as_deref(),
+                    crc32: file.crc32.as_deref(),
                     metadata_json: serde_json::json!({
                         "source": "root_snapshot",
                         "root_path": snapshot.root.path,
@@ -188,6 +191,7 @@ fn build_snapshot(conn: &Connection, root: &db::RootRow) -> anyhow::Result<RootS
             status: row.status,
             blake3: row.blake3,
             sha256: row.sha256,
+            crc32: row.crc32,
         })
         .collect();
     Ok(RootSnapshot {

@@ -143,9 +143,10 @@ fn file_hash_lines(content: Option<&db::ContentObjectRow>) -> String {
         return "Hashes: -\n".to_string();
     };
     format!(
-        "BLAKE3: {}\nSHA-256: {}\n",
+        "BLAKE3: {}\nSHA-256: {}\nCRC32: {}\n",
         content.blake3.as_deref().unwrap_or("-"),
-        content.sha256.as_deref().unwrap_or("-")
+        content.sha256.as_deref().unwrap_or("-"),
+        content.crc32.as_deref().unwrap_or("-")
     )
 }
 

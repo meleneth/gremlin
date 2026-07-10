@@ -14,23 +14,23 @@ Gremlin is a standard Rust binary crate. From the repository root:
 cargo run -- --help
 cargo run -- tui
 
-cargo build
+cargo build --bins
 cargo build --release
 
 cargo install --path .
 gremlin --help
 ```
 
-`cargo install --path .` installs the `gremlin` binary into Cargo's bin directory, usually `~/.cargo/bin`. Make sure that directory is on `PATH` if `gremlin` is not found after install.
+`cargo install --path .` installs the `gremlin` binary into Cargo's bin directory, usually `~/.cargo/bin`. The package also builds `gremlin-remote-helper`, a small JSONL hashing helper that Gremlin can stream over SSH and execute from an anonymous Linux memfd without installing it on the remote host. Make sure Cargo's bin directory is on `PATH` if `gremlin` is not found after install.
 
 For a one-off release binary without installing it:
 
 ```bash
-cargo build --release
+cargo build --release --bins
 ./target/release/gremlin --help
 ```
 
-Manual SSH checksum imports can still use `gremlin worker hash --jsonl` if a compatible `gremlin` binary is available on the remote host. The TUI's SSH hash import path uses standard remote shell tools instead. SSH hash import fast-scans first, preserves existing hash evidence during the stat refresh, then asks the remote host to hash only files with missing or stale hash evidence, prioritizing changed size/mtime entries before never-hashed entries.
+Manual SSH checksum imports can still use `gremlin worker hash --jsonl` if a compatible `gremlin` binary is available on the remote host. The TUI's SSH hash import path now prefers the streamed `gremlin-remote-helper`: Gremlin sends a u64 big-endian helper frame plus JSONL hash requests over SSH, the remote side runs the helper from a Linux memfd through Python 3, and each file is read once while computing SHA-256 and SFV-compatible CRC32. If the helper executable or remote Python memfd support is unavailable, Gremlin reports that in import progress and falls back to the older SHA-256-only `sha256sum` path. SSH hash import fast-scans first, preserves existing hash evidence during the stat refresh, then asks the remote host to hash only files with missing or stale hash evidence, prioritizing changed size/mtime entries before never-hashed entries.
 
 ## Development Checks
 
@@ -111,6 +111,7 @@ gremlin target remove TARGET --yes --db ./gremlin.db
 gremlin target ls nas01: --db ./gremlin.db
 gremlin target ls nas01: --path folder --db ./gremlin.db
 gremlin root export TARGET --db ./gremlin.db
+gremlin root export-sfv TARGET --output files.sfv --db ./gremlin.db
 gremlin root import root.json --db ./gremlin.db
 gremlin root.json --db ./gremlin.db
 gremlin status TARGET --db ./gremlin.db
@@ -166,27 +167,27 @@ gremlin --machine-label laptop scan ~/archive
 
 Roots maintain `current_size_bytes`, the projected total size of currently indexed `present` file observations for that root.
 
-`hash` walks a directory tree, computes BLAKE3 and SHA-256 for files that look new or changed from stat data, stores content objects, updates path observations, and persists hash events. Use `--all` to hash every regular file.
+`hash` walks a directory tree, computes BLAKE3, SHA-256, and SFV-compatible CRC32 for files that look new or changed from stat data, stores content objects, updates path observations, and persists hash events. CRC32 is additive evidence: existing BLAKE3/SHA-256 content identity remains usable when CRC32 is missing, and later CRC32 collection attaches to the existing content row instead of blocking normal scan, verify, plan, or copy flows. Use `--all` to hash every regular file.
 
 `chunk-hash` is explicit opt-in evidence collection for local roots. It computes MD5 chunks for each file, stores them on the current path observation, and does not run as part of normal scan/hash/copy. The default chunk size is 64 MiB; use `--chunk-size-mib` to change it. This is separate from transfer copy checkpoints: one-sided SSH copies also use 64 MiB MD5 chunks while copying, but those checkpoints are stored per transfer plan so interrupted copies can resume and identify the failed chunk.
 
 `verify` re-hashes current files and compares them to the latest stored per-path hashes. It reports `ok`, `changed`, `new`, `missing`, and `error`. By default it records history only; `--accept` promotes changed and new hashes into projected current truth.
 
-`verify-collection COLLECTION_ID TARGET` compares an imported checksum collection to a known root's current projected observations. It does not read or hash filesystem files; run `scan`, `hash --all`, SSH hash import, or a transfer first when the root needs fresher evidence. Results distinguish hash `ok`, `missing`, `size_mismatch`, `hash_mismatch`, `unverified` when the root lacks comparable hash evidence, `size_only` when only sizes can be compared, and extra root files that are not present in the collection.
+`verify-collection COLLECTION_ID TARGET` compares an imported checksum collection to a known root's current projected observations. It does not read or hash filesystem files; run `scan`, `hash --all`, SSH hash import, or a transfer first when the root needs fresher evidence. Results distinguish hash `ok`, `missing`, `size_mismatch`, `hash_mismatch`, `unverified` when the root lacks comparable hash evidence, `size_only` when only sizes can be compared, and extra root files that are not present in the collection. Comparable evidence can be BLAKE3, SHA-256, or CRC32 depending on what the collection and root both have.
 
 `worker hash --jsonl` does not require a database. It emits JSONL events suitable for manual or future automated remote execution over SSH.
 
 `import-events` reads JSONL events, preserves imported history in `job_events`, and creates checksum collection entries for completed hash events. With `--target TARGET`, completed hash events are also projected into that target root as current file observations and content objects. This is the current bridge for remote hashes: run or collect worker JSONL elsewhere, then import it into `nas01:/path` or `nas01:`.
 
-`import-manifest` reads SFV/CFV-style CRC manifests and PAR2 file-description packets into checksum collections. PAR2 parity repair/verification and CRC verification against files are not implemented yet.
+`import-manifest` reads SFV/CFV-style CRC manifests and PAR2 file-description packets into checksum collections. SFV CRC32 values are compared case-insensitively by `verify-collection` when the target root has CRC32 evidence. PAR2 parity repair is not implemented yet.
 
 `job create` records an intended scan or hash job without executing file work. This is the same seam used by the TUI: UI actions create jobs, start them through the job runner, display projected progress, and can request cooperative cancellation between files.
 
-In the TUI, Space marks/unmarks the selected file in a persisted default selection set for the current root. Directory marks include currently indexed descendant files. The Roots and Files panes support `/` filtering; Esc clears the active filter. File filtering applies across persisted and temporary browse lists, `u` refreshes the current temporary remote browse listing, and PageUp/PageDown jump through long lists. File evidence glyphs are shown in the Files pane legend: `◇` remote-only, `◌` indexed fast/stat evidence, `◆` hash evidence, `◉` available in a local indexed root, `!` live remote metadata changed from the indexed row, `×` indexed row missing from the live remote listing, and `▸` directory. When marks exist, `s`, `h`, and `v` ask whether to scan, hash, or verify the whole root or only marked paths; marked-directory scope covers the indexed file set, not yet an open-ended subtree discovery scan. Temporary SSH browse targets opened with `gremlin host:` appear as browse-only roots; Enter on a temporary directory navigates into it and Backspace returns toward the temporary root without persisting anything. Press `i` on a temporary SSH browse root to import the selected remote file or navigated directory: `n` persists only the root, `f` recursively imports fast stat observations, and `h` first imports fast stat observations, then streams native SSH `find`/`sha256sum` output and updates checksum/content evidence as each remote file hash completes. Imported temporary SSH roots are persisted as `host:/absolute/remote/path`, resolved from the path the user actually browsed to, not merely the original positional target.
+In the TUI, Space marks/unmarks the selected file in a persisted default selection set for the current root. Directory marks include currently indexed descendant files. The Roots and Files panes support `/` filtering; Esc clears the active filter. File filtering applies across persisted and temporary browse lists, `u` refreshes the current temporary remote browse listing, and PageUp/PageDown jump through long lists. File evidence glyphs are shown in the Files pane legend: `◇` remote-only, `◌` indexed fast/stat evidence, `◆` hash evidence, `◉` available in a local indexed root, `!` live remote metadata changed from the indexed row, `×` indexed row missing from the live remote listing, and `▸` directory. When marks exist, `s`, `h`, and `v` ask whether to scan, hash, or verify the whole root or only marked paths; marked-directory scope covers the indexed file set, not yet an open-ended subtree discovery scan. Temporary SSH browse targets opened with `gremlin host:` appear as browse-only roots; Enter on a temporary directory navigates into it and Backspace returns toward the temporary root without persisting anything. Press `i` on a temporary SSH browse root to import the selected remote file or navigated directory: `n` persists only the root, `f` recursively imports fast stat observations, and `h` first imports fast stat observations, then prefers the streamed remote helper to collect SHA-256 plus CRC32 from one remote read per file, falling back to SHA-256-only `sha256sum` if the helper path is unavailable. Imported temporary SSH roots are persisted as `host:/absolute/remote/path`, resolved from the path the user actually browsed to, not merely the original positional target.
 
 The TUI's Gremlin command pane shows the active command hints, including modal choices such as import mode, retarget editing, delete confirmation, and scoped job choices. Press `s`, `h`, or `v` to start scan, hash, or verify jobs for a persisted root, `m` to compare the selected root against the newest attached or unattached checksum collection, `x` to remove a persisted root after a `y` confirmation, `c` to request cancellation, `f` to rotate file fields, `t` on a source root, move to a destination root, and press Enter to create a dry-run transfer plan from those marks. Esc cancels the destination selection. The Jobs pane supports `/` filtering by job id, kind, status, event, target, progress, or payload text. Created plans appear in the Plan pane with `copy`, `review`, `conflict`, and other actions visible next to the affected paths; `review` rows include collision counts so duplicate content or filename/size/date matches are visible before anything is copied. Collection comparisons also appear in the Plan pane with `ok`, `missing`, `size_mismatch`, `hash_mismatch`, `unverified`, `size_only`, and `extra` rows.
 
-Root snapshots are portable JSON metadata dumps for one root. `gremlin root export TARGET` writes `SHORT_ROOT_NAME.json` in the current directory with root identity, machine identity, path observations, sizes, mtimes, and content hashes when available. `gremlin root import FILE.json` imports a valid Gremlin root snapshot, and passing the JSON file as the positional target does the same thing. Snapshot import replaces current file metadata for that root while leaving unrelated roots alone. In the TUI, press `w` on a persisted root to write the same snapshot file. To import one from the TUI, open the directory containing the snapshot, highlight the JSON file in Files, and press `i`.
+Root snapshots are portable JSON metadata dumps for one root. `gremlin root export TARGET` writes `SHORT_ROOT_NAME.json` in the current directory with root identity, machine identity, path observations, sizes, mtimes, and content hashes when available. `gremlin root export-sfv TARGET` writes an SFV manifest from stored CRC32 metadata without re-reading files. `gremlin root import FILE.json` imports a valid Gremlin root snapshot, and passing the JSON file as the positional target does the same thing. Snapshot import replaces current file metadata for that root while leaving unrelated roots alone. In the TUI, press `w` on a persisted root to write the same snapshot file. To import one from the TUI, open the directory containing the snapshot, highlight the JSON file in Files, and press `i`.
 
 Press `p` on a root to load its most recent persisted transfer plan. Canceled, queued, and running transfer plans appear at the bottom of the Roots pane under `Resume` as `R` rows. Press Enter on a resume row to load that plan into the Plan pane, or press `r` on a resume row to load and queue it immediately. On a queued resume row, press `d` and confirm with `y` to drop it from the run queue while keeping the plan history. On a running resume row, press `c` to request cancellation for that transfer job. With the Plan pane focused, press `a` to accept the selected `review` row as `copy`, `d` to drop it as `skip`, `e` to type a new destination path and retarget it as `copy`, or `r` to queue the current plan's `copy` entries. The TUI runs only one transfer at a time; additional transfer plans are marked `queued` and start automatically in creation order when the active transfer finishes. The Activity Log shows durable job events and includes a target column for transfer source-to-destination display, so repeated rows with the same job id are events for the same job rather than parallel jobs.
 
@@ -219,9 +220,9 @@ Most scan/hash/verify commands print a compact summary plus capped highlights. U
 
 Future seams deliberately left open:
 
-- SSH remote scan/hash dispatch: TUI import can hash through native remote `find`/`sha256sum` with streamed progress; next steps are resumable remote worker state and richer failure recovery.
+- SSH remote scan/hash dispatch: TUI import can hash through the streamed `gremlin-remote-helper` for SHA-256 plus SFV CRC32 in one remote read per file, with an explicit SHA-only fallback when helper capability is missing; next steps are persisting remote chunk-hash imports and richer failure recovery.
 - Remote browsing: live temporary SSH listings can be navigated in the TUI and imported as roots; next steps are richer cached directory observations and more deliberate refresh controls.
-- Manifest reconciliation: checksum collections can now be compared to root observations by path, size, and comparable BLAKE3/SHA-256 hashes from the CLI and TUI; next steps are CRC/PAR2-specific verification and richer collection selection.
+- Manifest reconciliation: checksum collections can now be compared to root observations by path, size, and comparable BLAKE3/SHA-256/CRC32 hashes from the CLI and TUI; next steps are PAR2-specific verification and richer collection selection.
 - SMB path mapping: add machine/root mapping without changing content identity.
 - Transfer planning/copying: persisted dry-run root-to-root plans, job events, CLI inspection, TUI persisted-plan loading, queueing, resume rows, queued-plan drop controls, running-plan cancellation, TUI plan browsing/run/review/retarget controls, detailed transfer progress, streamed hash-checked local copy execution, checkpointed chunk-verified one-sided SSH copies, optional local root chunk hashes, optional local paranoid readback, and checksum collection comparison exist for TUI selections; next slices should add SSH resume summaries and queue reordering.
 - Seamless resume: make interrupted remote browsing, hashing, importing, and future copy jobs restart from durable job/event state instead of requiring manual cleanup.
@@ -231,5 +232,5 @@ Future seams deliberately left open:
 ## Known v0 Limits
 
 - Path storage uses UTF-8 lossy display strings; raw non-UTF-8 Unix path support should be added later.
-- Import preserves evidence and checksum entries. Target-aware worker imports can update projected root state for completed hash events. `verify-collection` can compare imported collections against projected root state, but CRC/PAR2 repair and verification are not implemented.
-- No daemon, remote-to-remote transfer, queued-transfer reordering, streamed SSH copy supervision, or metadata extraction is implemented. Transfer execution supports local-to-local and one-sided SSH copies through `ssh`; remote import supports fast stat observations and streamed native SSH SHA-256 hashing.
+- Import preserves evidence and checksum entries. Target-aware worker imports can update projected root state for completed hash events. `verify-collection` can compare imported collections against projected root state, including CRC32 when both sides have it, but PAR2 repair is not implemented.
+- No daemon, remote-to-remote transfer, queued-transfer reordering, streamed SSH copy supervision, or metadata extraction is implemented. Transfer execution supports local-to-local and one-sided SSH copies through `ssh`; remote import supports fast stat observations and streamed helper-based SSH SHA-256/CRC32 hashing with SHA-only fallback.

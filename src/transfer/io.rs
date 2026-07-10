@@ -147,6 +147,7 @@ pub(super) fn hash_stream_to_writer(
 
     let mut blake3_hasher = blake3::Hasher::new();
     let mut sha256_hasher = Sha256::new();
+    let mut crc32_hasher = crate::crc32::Hasher::new();
     let mut bytes = 0_u64;
     let mut buf = [0_u8; 64 * 1024];
     let started_at = Instant::now();
@@ -161,6 +162,7 @@ pub(super) fn hash_stream_to_writer(
         let chunk = &buf[..read];
         blake3_hasher.update(chunk);
         sha256_hasher.update(chunk);
+        crc32_hasher.update(chunk);
         if let Some(writer) = writer.as_deref_mut() {
             writer
                 .write_all(chunk)
@@ -181,6 +183,7 @@ pub(super) fn hash_stream_to_writer(
         bytes,
         blake3: blake3_hasher.finalize().to_hex().to_string(),
         sha256: bytes_to_hex(sha256_hasher.finalize()),
+        crc32: format!("{:08X}", crc32_hasher.finalize()),
     })
 }
 

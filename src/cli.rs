@@ -190,6 +190,13 @@ pub enum RootCommands {
         #[arg(long, value_enum)]
         kind: Option<TargetKind>,
     },
+    ExportSfv {
+        target: String,
+        #[arg(long, value_enum)]
+        kind: Option<TargetKind>,
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
     Import {
         input: PathBuf,
     },

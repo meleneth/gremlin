@@ -1,11 +1,13 @@
 mod cli;
 mod collections;
 mod config;
+mod crc32;
 mod db;
 mod error;
 mod events;
 mod fswork;
 mod import;
+mod remote_helper;
 mod root_snapshot;
 mod targets;
 mod transfer;
@@ -429,6 +431,16 @@ async fn main() -> anyhow::Result<()> {
                 println!("exported_root:\t{}\t{}", root.id, root.path);
                 println!("file:\t{}", result.path.display());
                 println!("files:\t{}", result.file_count);
+            }
+            RootCommands::ExportSfv {
+                target,
+                kind,
+                output,
+            } => {
+                let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
+                let conn = db::open_existing(&db)?;
+                let root = resolve_registered_root(&conn, &target, kind, machine_label.as_deref())?;
+                export_root_sfv(&conn, &root, output.as_deref())?;
             }
             RootCommands::Import { input } => {
                 let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
@@ -1368,6 +1380,7 @@ struct RemoteHashEntry {
     size_bytes: u64,
     modified_at: Option<String>,
     sha256: String,
+    crc32: Option<String>,
 }
 
 fn import_ssh_native_hash(
@@ -1434,42 +1447,111 @@ fn import_ssh_native_hash(
             .iter()
             .map(|entry| remote_parent(&entry.relative_path)),
     );
-    stream_native_hash_ssh_entries(host, remote_path, &hash_entries, |entry| {
-        db::insert_checksum_entry(
-            conn,
-            db::ChecksumEntryInput {
-                collection_id: &collection_id,
-                relative_path: &entry.relative_path,
-                basename: &entry.basename,
-                size_bytes: entry.size_bytes,
-                modified_at: entry.modified_at.as_deref(),
-                blake3: None,
-                sha256: Some(&entry.sha256),
-                metadata_json: serde_json::json!({
-                    "source": "ssh_native_hash",
-                    "root_path": root_path,
-                }),
-            },
-        )?;
-        let content_id = db::ensure_content_object_sha256(conn, entry.size_bytes, &entry.sha256)?;
-        db::insert_path_observation(
-            conn,
-            db::PathObservationInput {
+    let helper_result = stream_helper_hash_ssh_entries(
+        host,
+        remote_path,
+        &hash_entries,
+        |message| {
+            emit_import_progress(
+                progress,
+                root_id,
+                root_path,
+                message,
+                0,
+                hash_entries.len() as u64,
+                None,
+            );
+            Ok(())
+        },
+        |entry| {
+            persist_remote_hash_entry(
+                conn,
                 machine_id,
                 root_id,
-                relative_path: &entry.relative_path,
-                basename: &entry.basename,
-                parent_path: &entry.parent_path,
-                size_bytes: entry.size_bytes,
-                modified_at: entry.modified_at.as_deref(),
-                content_id: Some(&content_id),
-            },
-        )?;
-        reporter.record_path(&entry.relative_path, &entry.parent_path);
-        Ok(())
-    })?;
+                root_path,
+                &collection_id,
+                entry,
+                &mut reporter,
+            )
+        },
+    );
+    match helper_result {
+        Ok(()) => {}
+        Err(remote_helper::ssh::SshHelperError::Unavailable(message)) => {
+            emit_import_progress(
+                progress,
+                root_id,
+                root_path,
+                &format!("remote helper unavailable; falling back to SHA-256 only: {message}"),
+                reporter.files_imported,
+                reporter.total_files.saturating_sub(reporter.files_imported),
+                reporter.current_path.clone(),
+            );
+            stream_native_hash_ssh_entries(host, remote_path, &hash_entries, |entry| {
+                persist_remote_hash_entry(
+                    conn,
+                    machine_id,
+                    root_id,
+                    root_path,
+                    &collection_id,
+                    entry,
+                    &mut reporter,
+                )
+            })?;
+        }
+        Err(remote_helper::ssh::SshHelperError::Session(err)) => return Err(err),
+    }
     reporter.finish();
     Ok(reporter.files_imported)
+}
+
+fn persist_remote_hash_entry(
+    conn: &rusqlite::Connection,
+    machine_id: &str,
+    root_id: &str,
+    root_path: &str,
+    collection_id: &str,
+    entry: RemoteHashEntry,
+    reporter: &mut ImportProgressReporter<'_>,
+) -> anyhow::Result<()> {
+    db::insert_checksum_entry(
+        conn,
+        db::ChecksumEntryInput {
+            collection_id,
+            relative_path: &entry.relative_path,
+            basename: &entry.basename,
+            size_bytes: entry.size_bytes,
+            modified_at: entry.modified_at.as_deref(),
+            blake3: None,
+            sha256: Some(&entry.sha256),
+            crc32: entry.crc32.as_deref(),
+            metadata_json: serde_json::json!({
+                "source": "ssh_native_hash",
+                "root_path": root_path,
+            }),
+        },
+    )?;
+    let content_id = match entry.crc32.as_deref() {
+        Some(crc32) => {
+            db::ensure_content_object_sha256_crc(conn, entry.size_bytes, &entry.sha256, crc32)?
+        }
+        None => db::ensure_content_object_sha256(conn, entry.size_bytes, &entry.sha256)?,
+    };
+    db::insert_path_observation(
+        conn,
+        db::PathObservationInput {
+            machine_id,
+            root_id,
+            relative_path: &entry.relative_path,
+            basename: &entry.basename,
+            parent_path: &entry.parent_path,
+            size_bytes: entry.size_bytes,
+            modified_at: entry.modified_at.as_deref(),
+            content_id: Some(&content_id),
+        },
+    )?;
+    reporter.record_path(&entry.relative_path, &entry.parent_path);
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -1619,6 +1701,129 @@ fn emit_import_progress(
     });
 }
 
+fn stream_helper_hash_ssh_entries(
+    host: &str,
+    remote_path: &str,
+    entries: &[RemoteStatEntry],
+    mut on_error: impl FnMut(&str) -> anyhow::Result<()>,
+    mut on_entry: impl FnMut(RemoteHashEntry) -> anyhow::Result<()>,
+) -> Result<(), remote_helper::ssh::SshHelperError> {
+    let root_is_directory = ssh_path_is_directory(host, remote_path).map_err(|err| {
+        remote_helper::ssh::SshHelperError::Unavailable(format!(
+            "could not classify remote root path {host}:{remote_path}: {err}"
+        ))
+    })?;
+    let stat_by_id = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (index as u64, entry))
+        .collect::<BTreeMap<_, _>>();
+    let requests = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| remote_helper::protocol::HashRequest {
+            id: serde_json::json!(index as u64),
+            op: "hash".to_string(),
+            path: remote_hash_request_path(remote_path, entry, root_is_directory),
+            hashes: vec!["crc32".to_string(), "sha256".to_string()],
+            chunk_size: None,
+        })
+        .collect::<Vec<_>>();
+    remote_helper::ssh::stream_hash_requests(host, &requests, |event| {
+        match event {
+            remote_helper::protocol::HelperEvent::Result {
+                id,
+                path,
+                stable,
+                sha256,
+                crc32,
+                ..
+            } => {
+                let Some(index) = id.as_u64() else {
+                    on_error(&format!("remote helper returned non-numeric id for {path}"))?;
+                    return Ok(());
+                };
+                let Some(stat) = stat_by_id.get(&index) else {
+                    on_error(&format!(
+                        "remote helper returned unknown id {index} for {path}"
+                    ))?;
+                    return Ok(());
+                };
+                if !stable {
+                    on_error(&format!(
+                        "remote helper skipped unstable file {}",
+                        stat.relative_path
+                    ))?;
+                    return Ok(());
+                }
+                let Some(sha256) = sha256 else {
+                    on_error(&format!(
+                        "remote helper returned no SHA-256 for {}",
+                        stat.relative_path
+                    ))?;
+                    return Ok(());
+                };
+                on_entry(RemoteHashEntry {
+                    relative_path: stat.relative_path.clone(),
+                    basename: remote_basename(&stat.relative_path).to_string(),
+                    parent_path: remote_parent(&stat.relative_path),
+                    size_bytes: stat.size_bytes,
+                    modified_at: stat.modified_at.clone(),
+                    sha256,
+                    crc32,
+                })?;
+            }
+            remote_helper::protocol::HelperEvent::Error {
+                id,
+                path,
+                code,
+                message,
+            } => {
+                let relative = id
+                    .as_u64()
+                    .and_then(|index| stat_by_id.get(&index))
+                    .map(|entry| entry.relative_path.as_str())
+                    .or(path.as_deref())
+                    .unwrap_or("-");
+                on_error(&format!(
+                    "remote helper skipped {relative}: {code}: {message}"
+                ))?;
+            }
+            remote_helper::protocol::HelperEvent::Progress { .. }
+            | remote_helper::protocol::HelperEvent::Hello { .. } => {}
+        }
+        Ok(())
+    })
+}
+
+fn remote_hash_request_path(
+    remote_path: &str,
+    entry: &RemoteStatEntry,
+    root_is_directory: bool,
+) -> String {
+    if !root_is_directory {
+        return remote_path.to_string();
+    }
+    if remote_path.ends_with('/') {
+        format!("{remote_path}{}", entry.relative_path)
+    } else {
+        format!("{remote_path}/{}", entry.relative_path)
+    }
+}
+
+fn ssh_path_is_directory(host: &str, remote_path: &str) -> anyhow::Result<bool> {
+    let status = Command::new("ssh")
+        .arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("ConnectTimeout=2")
+        .arg(host)
+        .arg(format!("test -d {}", remote_shell_path(remote_path)))
+        .status()
+        .with_context(|| format!("classifying SSH path {host}:{remote_path}"))?;
+    Ok(status.success())
+}
+
 fn stream_native_hash_ssh_entries(
     host: &str,
     remote_path: &str,
@@ -1756,6 +1961,7 @@ fn parse_native_hash_line(remote_path: &str, line: &str) -> Option<RemoteHashEnt
         size_bytes: parts[1].parse::<u64>().unwrap_or(0),
         modified_at: Some(parts[2].to_string()),
         sha256: sha256.to_string(),
+        crc32: None,
     })
 }
 
@@ -1779,6 +1985,7 @@ fn parse_native_hash_batch_line(
         size_bytes: stat.size_bytes,
         modified_at: stat.modified_at.clone(),
         sha256: sha256.to_string(),
+        crc32: None,
     })
 }
 
@@ -2000,6 +2207,38 @@ fn print_transfer_entry(entry: &db::TransferPlanEntryRow) {
         entry.dest_content_id.as_deref().unwrap_or("-"),
         entry.metadata_json
     );
+}
+
+fn export_root_sfv(
+    conn: &rusqlite::Connection,
+    root: &db::RootRow,
+    output: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    let entries = db::sfv_entries_for_root(conn, &root.id)?;
+    if entries.is_empty() {
+        anyhow::bail!(
+            "root {} has no stored CRC32 metadata to export as SFV",
+            root.path
+        );
+    }
+    let file_count = entries.len();
+    let mut text = String::new();
+    text.push_str(&format!(
+        "; Generated by gremlin from metadata for {}\n",
+        root.path
+    ));
+    for entry in entries {
+        text.push_str(&format!("{} {}\n", entry.relative_path, entry.crc32));
+    }
+    if let Some(output) = output {
+        std::fs::write(output, text)
+            .with_context(|| format!("writing SFV {}", output.display()))?;
+        println!("exported_sfv:\t{}\t{}", root.id, output.display());
+        println!("files:\t{file_count}");
+    } else {
+        print!("{text}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]

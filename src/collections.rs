@@ -40,6 +40,8 @@ pub struct CollectionVerifyFinding {
     pub actual_blake3: Option<String>,
     pub expected_sha256: Option<String>,
     pub actual_sha256: Option<String>,
+    pub expected_crc32: Option<String>,
+    pub actual_crc32: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -112,6 +114,8 @@ pub fn verify_collection_against_root(
                 actual_blake3: None,
                 expected_sha256: entry.sha256,
                 actual_sha256: None,
+                expected_crc32: entry.crc32,
+                actual_crc32: None,
             },
             Some(observation) => classify_entry(&entry, observation),
         };
@@ -135,7 +139,7 @@ fn classify_entry(
     entry: &db::ChecksumEntryRow,
     observation: &db::ChecksumObservationRow,
 ) -> CollectionVerifyFinding {
-    let kind = if entry.size_bytes != observation.size_bytes {
+    let kind = if entry.size_bytes != 0 && entry.size_bytes != observation.size_bytes {
         CollectionVerifyKind::SizeMismatch
     } else if let Some(expected) = entry.blake3.as_deref() {
         match observation.blake3.as_deref() {
@@ -146,6 +150,12 @@ fn classify_entry(
     } else if let Some(expected) = entry.sha256.as_deref() {
         match observation.sha256.as_deref() {
             Some(actual) if actual == expected => CollectionVerifyKind::Ok,
+            Some(_) => CollectionVerifyKind::HashMismatch,
+            None => CollectionVerifyKind::Unverified,
+        }
+    } else if let Some(expected) = entry.crc32.as_deref() {
+        match observation.crc32.as_deref() {
+            Some(actual) if actual.eq_ignore_ascii_case(expected) => CollectionVerifyKind::Ok,
             Some(_) => CollectionVerifyKind::HashMismatch,
             None => CollectionVerifyKind::Unverified,
         }
@@ -162,6 +172,8 @@ fn classify_entry(
         actual_blake3: observation.blake3.clone(),
         expected_sha256: entry.sha256.clone(),
         actual_sha256: observation.sha256.clone(),
+        expected_crc32: entry.crc32.clone(),
+        actual_crc32: observation.crc32.clone(),
     }
 }
 

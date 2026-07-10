@@ -49,11 +49,12 @@ pub(super) fn copy_ssh_to_local(
     let source_modified_at = source_modified_at(entry)?;
     set_local_file_mtime(dest_path, source_modified_at.as_deref())?;
     sync_for_paranoid_readback(dest_path, parent)?;
-    let content_id = db::ensure_content_object(
+    let content_id = db::ensure_content_object_crc(
         ctx.conn,
         copy_hash.bytes,
         &copy_hash.blake3,
         &copy_hash.sha256,
+        &copy_hash.crc32,
     )?;
     insert_dest_observation(
         ctx.conn,
@@ -143,11 +144,12 @@ pub(super) fn copy_local_to_ssh(
         )
     })?;
     set_remote_file_mtime(host, path, source_modified_at.as_deref())?;
-    let content_id = db::ensure_content_object(
+    let content_id = db::ensure_content_object_crc(
         ctx.conn,
         source_hash.bytes,
         &source_hash.blake3,
         &source_hash.sha256,
+        &source_hash.crc32,
     )?;
     insert_dest_observation(
         ctx.conn,
@@ -198,6 +200,7 @@ pub(super) fn copy_ssh_to_local_chunked(
         .with_context(|| format!("sizing {}", temp_path.display()))?;
     let mut blake3_hasher = blake3::Hasher::new();
     let mut sha256_hasher = Sha256::new();
+    let mut crc32_hasher = crate::crc32::Hasher::new();
     let mut copied = 0_u64;
     let started_at = Instant::now();
     let chunks = transfer_chunks(entry.size_bytes);
@@ -239,6 +242,7 @@ pub(super) fn copy_ssh_to_local_chunked(
         persist_copy_chunk_checkpoint(conn, job_id, plan_id, entry, chunk, &local_md5)?;
         blake3_hasher.update(&bytes);
         sha256_hasher.update(&bytes);
+        crc32_hasher.update(&bytes);
         copied += bytes.len() as u64;
         confidence.chunks_done += 1;
         confidence.chunks_verified += 1;
@@ -264,6 +268,7 @@ pub(super) fn copy_ssh_to_local_chunked(
         bytes: copied,
         blake3: blake3_hasher.finalize().to_hex().to_string(),
         sha256: bytes_to_hex(sha256_hasher.finalize()),
+        crc32: format!("{:08X}", crc32_hasher.finalize()),
     })
 }
 
