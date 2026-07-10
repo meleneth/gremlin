@@ -169,7 +169,7 @@ Roots maintain `current_size_bytes`, the projected total size of currently index
 
 `hash` walks a directory tree, computes BLAKE3, SHA-256, and SFV-compatible CRC32 for files that look new or changed from stat data, stores content objects, updates path observations, and persists hash events. CRC32 is additive evidence: existing BLAKE3/SHA-256 content identity remains usable when CRC32 is missing, and later CRC32 collection attaches to the existing content row instead of blocking normal scan, verify, plan, or copy flows. Use `--all` to hash every regular file.
 
-`chunk-hash` is explicit opt-in evidence collection for local roots. It computes MD5 chunks for each file, stores them on the current path observation, and does not run as part of normal scan/hash/copy. The default chunk size is 64 MiB; use `--chunk-size-mib` to change it. This is separate from transfer copy checkpoints: one-sided SSH copies also use 64 MiB MD5 chunks while copying, but those checkpoints are stored per transfer plan so interrupted copies can resume and identify the failed chunk.
+`chunk-hash` is explicit opt-in evidence collection for local and SSH roots. It computes MD5 chunks for each file, stores them on the current path observation, and does not run as part of normal scan/hash/copy. For SSH targets, Gremlin uses the streamed remote helper and asks it to compute SHA-256, CRC32, and MD5 chunks in one remote read per file, then persists the chunk rows against the imported root observations. The default chunk size is 64 MiB; use `--chunk-size-mib` to change it. This is separate from transfer copy checkpoints: one-sided SSH copies also use 64 MiB MD5 chunks while copying, but those checkpoints are stored per transfer plan so interrupted copies can resume and identify the failed chunk.
 
 `verify` re-hashes current files and compares them to the latest stored per-path hashes. It reports `ok`, `changed`, `new`, `missing`, and `error`. By default it records history only; `--accept` promotes changed and new hashes into projected current truth.
 
@@ -220,7 +220,7 @@ Most scan/hash/verify commands print a compact summary plus capped highlights. U
 
 Future seams deliberately left open:
 
-- SSH remote scan/hash dispatch: TUI import can hash through the streamed `gremlin-remote-helper` for SHA-256 plus SFV CRC32 in one remote read per file, with an explicit SHA-only fallback when helper capability is missing; next steps are persisting remote chunk-hash imports and richer failure recovery.
+- SSH remote scan/hash dispatch: TUI import can hash through the streamed `gremlin-remote-helper` for SHA-256 plus SFV CRC32 in one remote read per file, with an explicit SHA-only fallback when helper capability is missing. `gremlin chunk-hash host:/path` uses the same helper to persist opt-in 64 MiB MD5 chunk evidence for SSH roots; next steps are TUI controls for remote chunk collection and richer failure recovery.
 - Remote browsing: live temporary SSH listings can be navigated in the TUI and imported as roots; next steps are richer cached directory observations and more deliberate refresh controls.
 - Manifest reconciliation: checksum collections can now be compared to root observations by path, size, and comparable BLAKE3/SHA-256/CRC32 hashes from the CLI and TUI; next steps are PAR2-specific verification and richer collection selection.
 - SMB path mapping: add machine/root mapping without changing content identity.

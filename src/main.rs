@@ -20,6 +20,7 @@ use cli::{
     Cli, Commands, ConfigCommands, DbCommands, JobCommands, RootCommands, TargetCommands,
     TransferCommands, WorkerCommands,
 };
+use events::{EventEnvelope, EventKind, EventPayload};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -113,23 +114,34 @@ async fn main() -> anyhow::Result<()> {
             let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
             let conn = db::open_existing(&db)?;
             let parsed = targets::parse_target(&target, kind)?;
-            if !matches!(parsed.kind, TargetKind::LocalPath | TargetKind::FileUrl) {
-                anyhow::bail!("chunk-hash currently supports local path and file:// targets only");
-            }
-            let local_path = parsed
-                .local_path()
-                .ok_or_else(|| anyhow::anyhow!("chunk-hash target is not local file-like"))?;
             let chunk_size_bytes = chunk_size_mib
                 .checked_mul(1024 * 1024)
                 .ok_or_else(|| anyhow::anyhow!("chunk size is too large"))?;
-            fswork::chunk_hash_to_db(
-                &conn,
-                &local_path,
-                &db,
-                machine_label.as_deref(),
-                chunk_size_bytes,
-                output,
-            )?;
+            match parsed.kind {
+                TargetKind::LocalPath | TargetKind::FileUrl => {
+                    let local_path = parsed.local_path().ok_or_else(|| {
+                        anyhow::anyhow!("chunk-hash target is not local file-like")
+                    })?;
+                    fswork::chunk_hash_to_db(
+                        &conn,
+                        &local_path,
+                        &db,
+                        machine_label.as_deref(),
+                        chunk_size_bytes,
+                        output,
+                    )?;
+                }
+                TargetKind::Ssh => {
+                    remote_chunk_hash_to_db(
+                        &conn,
+                        &parsed,
+                        machine_label.as_deref(),
+                        chunk_size_bytes,
+                        output,
+                    )?;
+                }
+                TargetKind::Url => anyhow::bail!("chunk-hash does not support URL targets yet"),
+            }
         }
         Some(Commands::Verify {
             target,
@@ -1381,6 +1393,27 @@ struct RemoteHashEntry {
     modified_at: Option<String>,
     sha256: String,
     crc32: Option<String>,
+    chunks: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RemoteChunkHashSummary {
+    job_id: String,
+    root_id: String,
+    root_path: String,
+    chunk_size_bytes: u64,
+    files_seen: u64,
+    chunks_hashed: u64,
+    bytes_hashed: u64,
+    errors: u64,
+    hashed_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RemoteRootContext<'a> {
+    machine_id: &'a str,
+    root_id: &'a str,
+    root_path: &'a str,
 }
 
 fn import_ssh_native_hash(
@@ -1451,6 +1484,8 @@ fn import_ssh_native_hash(
         host,
         remote_path,
         &hash_entries,
+        false,
+        None,
         |message| {
             emit_import_progress(
                 progress,
@@ -1466,12 +1501,15 @@ fn import_ssh_native_hash(
         |entry| {
             persist_remote_hash_entry(
                 conn,
-                machine_id,
-                root_id,
-                root_path,
-                &collection_id,
+                RemoteRootContext {
+                    machine_id,
+                    root_id,
+                    root_path,
+                },
+                Some(&collection_id),
                 entry,
-                &mut reporter,
+                Some(&mut reporter),
+                None,
             )
         },
     );
@@ -1490,12 +1528,15 @@ fn import_ssh_native_hash(
             stream_native_hash_ssh_entries(host, remote_path, &hash_entries, |entry| {
                 persist_remote_hash_entry(
                     conn,
-                    machine_id,
-                    root_id,
-                    root_path,
-                    &collection_id,
+                    RemoteRootContext {
+                        machine_id,
+                        root_id,
+                        root_path,
+                    },
+                    Some(&collection_id),
                     entry,
-                    &mut reporter,
+                    Some(&mut reporter),
+                    None,
                 )
             })?;
         }
@@ -1505,32 +1546,194 @@ fn import_ssh_native_hash(
     Ok(reporter.files_imported)
 }
 
-fn persist_remote_hash_entry(
+fn remote_chunk_hash_to_db(
     conn: &rusqlite::Connection,
-    machine_id: &str,
-    root_id: &str,
-    root_path: &str,
-    collection_id: &str,
-    entry: RemoteHashEntry,
-    reporter: &mut ImportProgressReporter<'_>,
-) -> anyhow::Result<()> {
-    db::insert_checksum_entry(
+    parsed: &ParsedTarget,
+    _machine_label: Option<&str>,
+    chunk_size_bytes: u64,
+    output: fswork::OutputOptions,
+) -> anyhow::Result<RemoteChunkHashSummary> {
+    if chunk_size_bytes == 0 {
+        anyhow::bail!("chunk size must be greater than zero");
+    }
+    db::init_schema(conn)?;
+    let host = parsed
+        .machine_hint
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("SSH target missing machine hint"))?;
+    let remote_path = parsed.path.as_str();
+    let execution_path = resolve_ssh_absolute_path(host, remote_path)?;
+    let machine_id = db::ensure_machine_hint(conn, host, Some("ssh"))?;
+    let root_path = ssh_root_display_path(host, &execution_path);
+    let root_id = db::ensure_root(conn, &machine_id, &root_path)?;
+    let job_id = db::create_job(
         conn,
-        db::ChecksumEntryInput {
-            collection_id,
-            relative_path: &entry.relative_path,
-            basename: &entry.basename,
-            size_bytes: entry.size_bytes,
-            modified_at: entry.modified_at.as_deref(),
-            blake3: None,
-            sha256: Some(&entry.sha256),
-            crc32: entry.crc32.as_deref(),
-            metadata_json: serde_json::json!({
-                "source": "ssh_native_hash",
-                "root_path": root_path,
-            }),
+        "chunk_hash",
+        Some(&machine_id),
+        Some(&root_id),
+        serde_json::json!({
+            "path": root_path,
+            "remote_path": execution_path,
+            "chunk_size_bytes": chunk_size_bytes,
+            "algorithm": "md5",
+            "source": "ssh_helper",
+        }),
+    )?;
+    db::start_job(conn, &job_id)?;
+    persist_simple_job_event(
+        conn,
+        &job_id,
+        1,
+        EventKind::JobStarted,
+        EventPayload::Job {
+            kind: "chunk_hash".to_string(),
+            path: Some(root_path.clone()),
+            message: Some(format!(
+                "remote helper md5 chunks of {} bytes",
+                chunk_size_bytes
+            )),
+            files_seen: None,
+            errors: None,
         },
     )?;
+
+    let entries = fast_scan_ssh_tree(parsed, &execution_path)?;
+    let progress: tui::ImportProgressCallback = Arc::new(|_| {});
+    import_remote_stat_entries(conn, &machine_id, &root_id, &root_path, &progress, &entries)?;
+
+    let files_seen = std::cell::Cell::new(0_u64);
+    let chunks_hashed = std::cell::Cell::new(0_u64);
+    let bytes_hashed = std::cell::Cell::new(0_u64);
+    let errors = std::cell::Cell::new(0_u64);
+    let hashed_paths = std::cell::RefCell::new(Vec::new());
+    let helper_result = stream_helper_hash_ssh_entries(
+        host,
+        &execution_path,
+        &entries,
+        true,
+        Some(chunk_size_bytes),
+        |message| {
+            errors.set(errors.get() + 1);
+            eprintln!("remote chunk hash:\t{message}");
+            Ok(())
+        },
+        |entry| {
+            let chunk_count = entry
+                .chunks
+                .as_ref()
+                .map_or(0_u64, |chunks| chunks.len() as u64);
+            let size_bytes = entry.size_bytes;
+            let relative_path = entry.relative_path.clone();
+            persist_remote_hash_entry(
+                conn,
+                RemoteRootContext {
+                    machine_id: &machine_id,
+                    root_id: &root_id,
+                    root_path: &root_path,
+                },
+                None,
+                entry,
+                None,
+                Some((&job_id, chunk_size_bytes)),
+            )?;
+            files_seen.set(files_seen.get() + 1);
+            chunks_hashed.set(chunks_hashed.get() + chunk_count);
+            bytes_hashed.set(bytes_hashed.get() + size_bytes);
+            hashed_paths.borrow_mut().push(relative_path);
+            db::update_job_progress(
+                conn,
+                &job_id,
+                db::JobProgressInput {
+                    phase: "processing",
+                    current_path: hashed_paths.borrow().last().map(String::as_str),
+                    files_total: Some(entries.len() as u64),
+                    files_seen: files_seen.get(),
+                    files_done: files_seen.get(),
+                    files_skipped: 0,
+                    errors: errors.get(),
+                },
+            )?;
+            Ok(())
+        },
+    );
+    if let Err(err) = helper_result {
+        db::complete_job(conn, &job_id, "failed")?;
+        return Err(anyhow::anyhow!("remote chunk hash failed: {err}"));
+    }
+    let status = if errors.get() == 0 {
+        "completed"
+    } else {
+        "completed_with_errors"
+    };
+    db::update_job_progress(
+        conn,
+        &job_id,
+        db::JobProgressInput {
+            phase: "finalizing",
+            current_path: None,
+            files_total: Some(entries.len() as u64),
+            files_seen: files_seen.get(),
+            files_done: files_seen.get(),
+            files_skipped: 0,
+            errors: errors.get(),
+        },
+    )?;
+    persist_simple_job_event(
+        conn,
+        &job_id,
+        2,
+        EventKind::JobCompleted,
+        EventPayload::Job {
+            kind: "chunk_hash".to_string(),
+            path: Some(root_path.clone()),
+            message: Some(status.to_string()),
+            files_seen: Some(files_seen.get()),
+            errors: Some(errors.get()),
+        },
+    )?;
+    db::complete_job(conn, &job_id, status)?;
+    let summary = RemoteChunkHashSummary {
+        job_id,
+        root_id,
+        root_path,
+        chunk_size_bytes,
+        files_seen: files_seen.get(),
+        chunks_hashed: chunks_hashed.get(),
+        bytes_hashed: bytes_hashed.get(),
+        errors: errors.get(),
+        hashed_paths: hashed_paths.into_inner(),
+    };
+    print_remote_chunk_hash_summary(&summary, output)?;
+    Ok(summary)
+}
+
+fn persist_remote_hash_entry(
+    conn: &rusqlite::Connection,
+    root: RemoteRootContext<'_>,
+    collection_id: Option<&str>,
+    entry: RemoteHashEntry,
+    reporter: Option<&mut ImportProgressReporter<'_>>,
+    chunk_job: Option<(&str, u64)>,
+) -> anyhow::Result<()> {
+    if let Some(collection_id) = collection_id {
+        db::insert_checksum_entry(
+            conn,
+            db::ChecksumEntryInput {
+                collection_id,
+                relative_path: &entry.relative_path,
+                basename: &entry.basename,
+                size_bytes: entry.size_bytes,
+                modified_at: entry.modified_at.as_deref(),
+                blake3: None,
+                sha256: Some(&entry.sha256),
+                crc32: entry.crc32.as_deref(),
+                metadata_json: serde_json::json!({
+                    "source": "ssh_native_hash",
+                    "root_path": root.root_path,
+                }),
+            },
+        )?;
+    }
     let content_id = match entry.crc32.as_deref() {
         Some(crc32) => {
             db::ensure_content_object_sha256_crc(conn, entry.size_bytes, &entry.sha256, crc32)?
@@ -1540,8 +1743,8 @@ fn persist_remote_hash_entry(
     db::insert_path_observation(
         conn,
         db::PathObservationInput {
-            machine_id,
-            root_id,
+            machine_id: root.machine_id,
+            root_id: root.root_id,
             relative_path: &entry.relative_path,
             basename: &entry.basename,
             parent_path: &entry.parent_path,
@@ -1550,7 +1753,118 @@ fn persist_remote_hash_entry(
             content_id: Some(&content_id),
         },
     )?;
-    reporter.record_path(&entry.relative_path, &entry.parent_path);
+    if let Some((job_id, chunk_size_bytes)) = chunk_job {
+        persist_remote_chunk_hashes(conn, root.root_id, &entry, job_id, chunk_size_bytes)?;
+    }
+    if let Some(reporter) = reporter {
+        reporter.record_path(&entry.relative_path, &entry.parent_path);
+    }
+    Ok(())
+}
+
+fn persist_remote_chunk_hashes(
+    conn: &rusqlite::Connection,
+    root_id: &str,
+    entry: &RemoteHashEntry,
+    job_id: &str,
+    chunk_size_bytes: u64,
+) -> anyhow::Result<()> {
+    let Some(chunks) = entry.chunks.as_deref() else {
+        anyhow::bail!(
+            "remote helper returned no chunk hashes for {}",
+            entry.relative_path
+        );
+    };
+    let Some(path_observation_id) = db::path_observation_id(conn, root_id, &entry.relative_path)?
+    else {
+        anyhow::bail!(
+            "path observation missing after remote chunk hash insert: {}",
+            entry.relative_path
+        );
+    };
+    let inputs = remote_chunk_hash_inputs(entry.size_bytes, chunk_size_bytes, chunks, job_id);
+    db::replace_observation_chunk_hashes(
+        conn,
+        &path_observation_id,
+        chunk_size_bytes,
+        "md5",
+        &inputs,
+    )?;
+    Ok(())
+}
+
+fn remote_chunk_hash_inputs<'a>(
+    file_size: u64,
+    chunk_size_bytes: u64,
+    chunks: &'a [String],
+    job_id: &'a str,
+) -> Vec<db::ObservationChunkHashInput<'a>> {
+    chunks
+        .iter()
+        .enumerate()
+        .map(|(index, digest)| {
+            let offset = index as u64 * chunk_size_bytes;
+            db::ObservationChunkHashInput {
+                chunk_size_bytes,
+                chunk_index: index as u64,
+                offset_bytes: offset,
+                size_bytes: file_size.saturating_sub(offset).min(chunk_size_bytes),
+                algorithm: "md5",
+                digest,
+                job_id: Some(job_id),
+            }
+        })
+        .collect()
+}
+
+fn persist_simple_job_event(
+    conn: &rusqlite::Connection,
+    job_id: &str,
+    sequence: i64,
+    event_kind: EventKind,
+    payload: EventPayload,
+) -> anyhow::Result<()> {
+    db::persist_event(
+        conn,
+        &EventEnvelope {
+            event_kind,
+            job_id: Some(job_id.to_string()),
+            sequence: Some(sequence),
+            created_at: util::now_rfc3339(),
+            payload,
+        },
+    )?;
+    Ok(())
+}
+
+fn print_remote_chunk_hash_summary(
+    summary: &RemoteChunkHashSummary,
+    options: fswork::OutputOptions,
+) -> anyhow::Result<()> {
+    if options.quiet {
+        return Ok(());
+    }
+    if options.json {
+        println!("{}", serde_json::to_string_pretty(summary)?);
+        return Ok(());
+    }
+    println!(
+        "chunk hash job {}: {} files, {} chunks, {}, {} errors, chunk_size={}",
+        summary.job_id,
+        summary.files_seen,
+        summary.chunks_hashed,
+        util::human_size(summary.bytes_hashed),
+        summary.errors,
+        util::human_size(summary.chunk_size_bytes)
+    );
+    let limit = if options.details {
+        summary.hashed_paths.len()
+    } else {
+        options.limit
+    };
+    for path in summary.hashed_paths.iter().take(limit) {
+        println!("chunked\t{path}");
+    }
     Ok(())
 }
 
@@ -1705,6 +2019,8 @@ fn stream_helper_hash_ssh_entries(
     host: &str,
     remote_path: &str,
     entries: &[RemoteStatEntry],
+    include_chunks: bool,
+    chunk_size_bytes: Option<u64>,
     mut on_error: impl FnMut(&str) -> anyhow::Result<()>,
     mut on_entry: impl FnMut(RemoteHashEntry) -> anyhow::Result<()>,
 ) -> Result<(), remote_helper::ssh::SshHelperError> {
@@ -1721,12 +2037,18 @@ fn stream_helper_hash_ssh_entries(
     let requests = entries
         .iter()
         .enumerate()
-        .map(|(index, entry)| remote_helper::protocol::HashRequest {
-            id: serde_json::json!(index as u64),
-            op: "hash".to_string(),
-            path: remote_hash_request_path(remote_path, entry, root_is_directory),
-            hashes: vec!["crc32".to_string(), "sha256".to_string()],
-            chunk_size: None,
+        .map(|(index, entry)| {
+            let mut hashes = vec!["crc32".to_string(), "sha256".to_string()];
+            if include_chunks {
+                hashes.push("chunks".to_string());
+            }
+            remote_helper::protocol::HashRequest {
+                id: serde_json::json!(index as u64),
+                op: "hash".to_string(),
+                path: remote_hash_request_path(remote_path, entry, root_is_directory),
+                hashes,
+                chunk_size: chunk_size_bytes,
+            }
         })
         .collect::<Vec<_>>();
     remote_helper::ssh::stream_hash_requests(host, &requests, |event| {
@@ -1737,6 +2059,7 @@ fn stream_helper_hash_ssh_entries(
                 stable,
                 sha256,
                 crc32,
+                chunks,
                 ..
             } => {
                 let Some(index) = id.as_u64() else {
@@ -1763,6 +2086,13 @@ fn stream_helper_hash_ssh_entries(
                     ))?;
                     return Ok(());
                 };
+                if include_chunks && chunks.is_none() {
+                    on_error(&format!(
+                        "remote helper returned no chunk hashes for {}",
+                        stat.relative_path
+                    ))?;
+                    return Ok(());
+                }
                 on_entry(RemoteHashEntry {
                     relative_path: stat.relative_path.clone(),
                     basename: remote_basename(&stat.relative_path).to_string(),
@@ -1771,6 +2101,7 @@ fn stream_helper_hash_ssh_entries(
                     modified_at: stat.modified_at.clone(),
                     sha256,
                     crc32,
+                    chunks,
                 })?;
             }
             remote_helper::protocol::HelperEvent::Error {
@@ -1962,6 +2293,7 @@ fn parse_native_hash_line(remote_path: &str, line: &str) -> Option<RemoteHashEnt
         modified_at: Some(parts[2].to_string()),
         sha256: sha256.to_string(),
         crc32: None,
+        chunks: None,
     })
 }
 
@@ -1986,6 +2318,7 @@ fn parse_native_hash_batch_line(
         modified_at: stat.modified_at.clone(),
         sha256: sha256.to_string(),
         crc32: None,
+        chunks: None,
     })
 }
 
@@ -2270,6 +2603,27 @@ mod tests {
         assert!(!is_yes(""));
         assert!(!is_yes("n"));
         assert!(!is_yes("sure"));
+    }
+
+    #[test]
+    fn remote_chunk_hash_inputs_preserve_offsets_and_final_partial_size() {
+        let digests = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+
+        let chunks = remote_chunk_hash_inputs(10, 4, &digests, "job_1");
+
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].chunk_index, 0);
+        assert_eq!(chunks[0].offset_bytes, 0);
+        assert_eq!(chunks[0].size_bytes, 4);
+        assert_eq!(chunks[0].digest, "a");
+        assert_eq!(chunks[1].chunk_index, 1);
+        assert_eq!(chunks[1].offset_bytes, 4);
+        assert_eq!(chunks[1].size_bytes, 4);
+        assert_eq!(chunks[2].chunk_index, 2);
+        assert_eq!(chunks[2].offset_bytes, 8);
+        assert_eq!(chunks[2].size_bytes, 2);
+        assert_eq!(chunks[2].algorithm, "md5");
+        assert_eq!(chunks[2].job_id, Some("job_1"));
     }
 
     #[test]
