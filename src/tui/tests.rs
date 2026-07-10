@@ -205,6 +205,39 @@ fn command_hints_explain_destination_selection() {
 }
 
 #[test]
+fn transfer_destination_modal_ignores_non_modal_keys() {
+    let conn = Connection::open_in_memory().unwrap();
+    let roots = vec![db::RootRow {
+        id: "root_1".to_string(),
+        machine_id: "machine_1".to_string(),
+        path: "/tmp/root".to_string(),
+        label: None,
+        current_size_bytes: 0,
+        latest_job_kind: None,
+        latest_job_status: None,
+        latest_job_phase: None,
+    }];
+    let mut state = AppState {
+        focus: FocusPane::Roots,
+        transfer_plan_draft: Some(TransferPlanDraft {
+            source_root_id: "source_root".to_string(),
+            source_name: "source".to_string(),
+            source_path: "/tmp/source".to_string(),
+            marked_count: 1,
+            marked_bytes: 10,
+        }),
+        ..AppState::default()
+    };
+
+    app::handle_transfer_destination_modal_key(&conn, &roots, KeyCode::Tab, 40, &mut state)
+        .unwrap();
+
+    assert_eq!(state.focus, FocusPane::Roots);
+    assert!(state.transfer_plan_draft.is_some());
+    assert!(state.status.contains("choose destination"));
+}
+
+#[test]
 fn command_hints_include_root_verify() {
     let state = AppState::default();
 
@@ -1137,6 +1170,31 @@ fn app_screen_renders_plan_as_modal_when_plan_focus_is_active() {
     assert!(text.contains("Plan *"));
     assert!(text.contains("incoming/foo.png"));
     assert!(text.contains("destination path is not indexed"));
+}
+
+#[test]
+fn plan_modal_ignores_non_modal_keys() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db_path = PathBuf::from("unused.db");
+    let (job_tx, _job_rx) = mpsc::unbounded_channel();
+    let mut state = AppState {
+        focus: FocusPane::Plan,
+        last_plan: Some(PlanSnapshot {
+            plan_id: "plan_1".to_string(),
+            source_root_id: "root_1".to_string(),
+            status: "planned".to_string(),
+            source_name: "source".to_string(),
+            dest_name: "dest".to_string(),
+            summary: Vec::new(),
+            entries: Vec::new(),
+        }),
+        ..AppState::default()
+    };
+
+    app::handle_plan_modal_key(&conn, &db_path, job_tx, KeyCode::Tab, 40, &mut state).unwrap();
+
+    assert_eq!(state.focus, FocusPane::Plan);
+    assert!(state.status.contains("plan modal"));
 }
 
 #[test]

@@ -358,6 +358,29 @@ pub(super) async fn run_loop(
                     )?;
                     continue;
                 }
+                if state.transfer_plan_draft.is_some() {
+                    handle_transfer_destination_modal_key(
+                        conn,
+                        &roots,
+                        key.code,
+                        terminal.size()?.height,
+                        &mut state,
+                    )?;
+                    continue;
+                }
+                if state.focus == FocusPane::Plan
+                    && (state.last_plan.is_some() || state.collection_result.is_some())
+                {
+                    handle_plan_modal_key(
+                        conn,
+                        db_path,
+                        job_tx.clone(),
+                        key.code,
+                        terminal.size()?.height,
+                        &mut state,
+                    )?;
+                    continue;
+                }
                 match key.code {
                     KeyCode::Char('q') => {
                         if state.active_background_jobs > 0 {
@@ -587,6 +610,91 @@ pub(super) async fn run_loop(
         }
     }
     Ok(TuiExit::Normal)
+}
+
+pub(super) fn handle_transfer_destination_modal_key(
+    conn: &Connection,
+    roots: &[db::RootRow],
+    code: KeyCode,
+    area_height: u16,
+    state: &mut AppState,
+) -> anyhow::Result<()> {
+    match code {
+        KeyCode::Esc => cancel_transfer_plan_selection(state),
+        KeyCode::Enter => create_transfer_plan_from_selection(conn, roots, state)?,
+        KeyCode::Down => move_down(state, visible_root_count(state, roots.len()), 0, 0, 0),
+        KeyCode::Up => move_up(state),
+        KeyCode::PageDown => {
+            move_page_down(
+                state,
+                visible_root_count(state, roots.len()),
+                0,
+                0,
+                0,
+                visible_file_page_len(area_height),
+            );
+        }
+        KeyCode::PageUp => move_page_up(state, visible_file_page_len(area_height)),
+        _ => {
+            state.status =
+                "choose destination with arrows/PgUp/PgDn, Enter create plan, Esc cancel"
+                    .to_string();
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn handle_plan_modal_key(
+    conn: &Connection,
+    db_path: &Path,
+    job_tx: mpsc::UnboundedSender<TuiMessage>,
+    code: KeyCode,
+    area_height: u16,
+    state: &mut AppState,
+) -> anyhow::Result<()> {
+    match code {
+        KeyCode::Esc => {
+            state.focus = FocusPane::Roots;
+            state.status = "plan closed".to_string();
+        }
+        KeyCode::Down => move_down(state, 0, 0, active_plan_row_count(state), 0),
+        KeyCode::Up => move_up(state),
+        KeyCode::PageDown => {
+            move_page_down(
+                state,
+                0,
+                0,
+                active_plan_row_count(state),
+                0,
+                visible_file_page_len(area_height),
+            );
+        }
+        KeyCode::PageUp => move_page_up(state, visible_file_page_len(area_height)),
+        KeyCode::Char('r') => run_current_transfer_plan(conn, db_path, job_tx, state)?,
+        KeyCode::Char('a') => {
+            decide_current_plan_entry(conn, state, "copy", "review accepted for copy")?;
+        }
+        KeyCode::Char('d') => {
+            decide_current_plan_entry(conn, state, "skip", "review dropped by user")?;
+        }
+        KeyCode::Char('e') => start_retarget_current_plan_entry(state),
+        KeyCode::Char('p') if state.collection_result.is_some() => {
+            let root_id = state
+                .collection_result
+                .as_ref()
+                .map(|collection| collection.root_id.clone());
+            if let Some(root_id) = root_id {
+                let root = db::root_by_id(conn, &root_id)?;
+                load_latest_transfer_plan(conn, root.as_ref(), state)?;
+            }
+        }
+        _ => {
+            state.status =
+                "plan modal: arrows/PgUp/PgDn move, r run, a accept, d drop, e retarget, Esc close"
+                    .to_string();
+        }
+    }
+    Ok(())
 }
 
 fn start_temporary_file_browse(
