@@ -586,6 +586,13 @@ pub(super) async fn run_loop(
                             &mut state,
                         )?;
                     }
+                    KeyCode::Char('w') => {
+                        export_selected_root_snapshot(
+                            conn,
+                            selected_persisted_root(&roots, &state),
+                            &mut state,
+                        )?;
+                    }
                     KeyCode::Char('x') => {
                         start_delete_root_confirmation(
                             selected_persisted_root(&roots, &state),

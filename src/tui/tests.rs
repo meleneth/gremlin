@@ -959,6 +959,52 @@ fn root_selection_can_target_resume_transfer_plan_rows() {
 }
 
 #[test]
+fn root_export_writes_snapshot_from_tui_action() {
+    static CURRENT_DIR_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _guard = CURRENT_DIR_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap();
+    let original_dir = std::env::current_dir().unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    std::env::set_current_dir(temp.path()).unwrap();
+
+    let conn = Connection::open_in_memory().unwrap();
+    db::init_schema(&conn).unwrap();
+    let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+    let root_path = temp.path().join("root");
+    let root_path = root_path.to_string_lossy().to_string();
+    let root_id = db::ensure_root(&conn, &machine_id, &root_path).unwrap();
+    db::insert_path_observation(
+        &conn,
+        db::PathObservationInput {
+            machine_id: &machine_id,
+            root_id: &root_id,
+            relative_path: "hello.txt",
+            basename: "hello.txt",
+            parent_path: ".",
+            size_bytes: 5,
+            modified_at: Some("2026-07-08T00:00:00Z"),
+            content_id: None,
+        },
+    )
+    .unwrap();
+    let root = db::root_by_id(&conn, &root_id).unwrap().unwrap();
+    let mut state = AppState::default();
+
+    export_selected_root_snapshot(&conn, Some(&root), &mut state).unwrap();
+
+    let snapshot_path = temp.path().join("root.json");
+    assert!(snapshot_path.exists());
+    let snapshot = crate::root_snapshot::read_snapshot(&snapshot_path).unwrap();
+    assert_eq!(snapshot.root.path, root_path);
+    assert_eq!(snapshot.files.len(), 1);
+    assert!(state.status.contains("exported root"));
+
+    std::env::set_current_dir(original_dir).unwrap();
+}
+
+#[test]
 fn drop_queued_transfer_confirmation_marks_plan_canceled() {
     let conn = Connection::open_in_memory().unwrap();
     db::init_schema(&conn).unwrap();

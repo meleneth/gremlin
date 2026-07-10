@@ -97,6 +97,10 @@ pub enum Commands {
         #[command(subcommand)]
         command: TargetCommands,
     },
+    Root {
+        #[command(subcommand)]
+        command: RootCommands,
+    },
     Transfer {
         #[command(subcommand)]
         command: TransferCommands,
@@ -176,6 +180,18 @@ pub enum TargetCommands {
         kind: Option<TargetKind>,
         #[arg(long, default_value = ".")]
         path: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RootCommands {
+    Export {
+        target: String,
+        #[arg(long, value_enum)]
+        kind: Option<TargetKind>,
+    },
+    Import {
+        input: PathBuf,
     },
 }
 

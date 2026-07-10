@@ -100,7 +100,7 @@ pub(super) fn active_command_hint(state: &AppState, has_temporary_browse: bool) 
         FocusPane::Roots if has_temporary_browse && state.selected_root == 0 => {
             "/ filter roots  Tab files  u refresh  i import browsed path  t copy from browsed path  PgUp/PgDn jump"
         }
-        FocusPane::Roots => "/ filter roots  Enter load resume row  r run resume row  d drop queued  c cancel running  s scan  h hash  v verify  m compare  t source  p open plan  x remove",
+        FocusPane::Roots => "/ filter roots  Enter load resume row  r run resume row  d drop queued  c cancel running  s scan  h hash  v verify  m compare  t source  p plan  w export  x remove",
         FocusPane::Files if has_temporary_browse && state.selected_root == 0 => {
             "/ filter  u refresh  PgUp/PgDn jump  Enter open dir  Backspace parent  i import  t copy"
         }

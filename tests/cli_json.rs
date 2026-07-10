@@ -176,6 +176,101 @@ fn target_remove_requires_yes_and_removes_root_records_only() {
 }
 
 #[test]
+fn root_snapshot_export_and_positional_import_replace_root_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("gremlin.db");
+    let replacement_db = dir.path().join("replacement.db");
+    let root = dir.path().join("root");
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join("hello.txt"), b"hello").unwrap();
+    std::fs::write(root.join("gone.txt"), b"gone").unwrap();
+
+    gremlin()
+        .current_dir(dir.path())
+        .args(["--no-config", "--db", db.to_str().unwrap(), "init"])
+        .assert()
+        .success();
+    command_json(&[
+        "--no-config",
+        "--db",
+        db.to_str().unwrap(),
+        "--json",
+        "hash",
+        root.to_str().unwrap(),
+        "--all",
+    ]);
+    gremlin()
+        .current_dir(dir.path())
+        .args([
+            "--no-config",
+            "--db",
+            db.to_str().unwrap(),
+            "root",
+            "export",
+            root.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let snapshot = dir.path().join("root.json");
+    assert!(snapshot.exists());
+
+    std::fs::remove_file(root.join("gone.txt")).unwrap();
+    std::fs::write(root.join("new.txt"), b"new").unwrap();
+    command_json(&[
+        "--no-config",
+        "--db",
+        db.to_str().unwrap(),
+        "--json",
+        "scan",
+        root.to_str().unwrap(),
+    ]);
+
+    gremlin()
+        .current_dir(dir.path())
+        .args([
+            "--no-config",
+            "--db",
+            db.to_str().unwrap(),
+            snapshot.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let files = gremlin()
+        .args(["--no-config", "--db", db.to_str().unwrap(), "files"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let files = String::from_utf8(files).unwrap();
+    assert!(files.contains("hello.txt"));
+    assert!(files.contains("gone.txt"));
+    assert!(!files.contains("new.txt"));
+
+    gremlin()
+        .current_dir(dir.path())
+        .args([
+            "--no-config",
+            "--db",
+            replacement_db.to_str().unwrap(),
+            snapshot.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+    let imported = command_json(&[
+        "--no-config",
+        "--db",
+        replacement_db.to_str().unwrap(),
+        "--json",
+        "status",
+        root.to_str().unwrap(),
+    ]);
+    assert_eq!(imported["known"], true);
+    assert_eq!(imported["files"], 2);
+    assert_eq!(imported["content_objects"], 2);
+}
+
+#[test]
 fn import_events_can_project_into_default_ssh_target() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("gremlin.db");

@@ -169,6 +169,31 @@ pub(super) fn request_selected_cancel(
     Ok(())
 }
 
+pub(super) fn export_selected_root_snapshot(
+    conn: &Connection,
+    selected_root: Option<&db::RootRow>,
+    state: &mut AppState,
+) -> anyhow::Result<()> {
+    let Some(root) = selected_root else {
+        state.set_status(
+            ActivityLevel::Warning,
+            "No persisted root selected to export",
+        );
+        return Ok(());
+    };
+    let result = crate::root_snapshot::export_root(conn, root)?;
+    state.set_status(
+        ActivityLevel::Success,
+        format!(
+            "exported root {} to {} ({} files)",
+            short_id(&root.id),
+            result.path.display(),
+            result.file_count
+        ),
+    );
+    Ok(())
+}
+
 pub(super) fn toggle_selected_file_mark(
     conn: &Connection,
     selected_root: Option<&db::RootRow>,

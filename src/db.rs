@@ -186,6 +186,18 @@ pub struct PathObservationRow {
 }
 
 #[derive(Debug, Clone)]
+pub struct RootExportObservationRow {
+    pub relative_path: String,
+    pub basename: String,
+    pub parent_path: String,
+    pub size_bytes: u64,
+    pub modified_at: Option<String>,
+    pub status: String,
+    pub blake3: Option<String>,
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct CollisionRow {
     pub relative_path: String,
     pub size_bytes: u64,
@@ -773,6 +785,10 @@ pub fn delete_root(
         params![root_id],
     )?;
     tx.execute(
+        "DELETE FROM selection_sets WHERE root_id = ?1",
+        params![root_id],
+    )?;
+    tx.execute(
         "DELETE FROM path_observation_chunk_hashes WHERE path_observation_id IN (SELECT id FROM path_observations WHERE root_id = ?1)",
         params![root_id],
     )?;
@@ -905,6 +921,27 @@ pub fn ensure_machine_hint(
         params![id, label, platform, now],
     )?;
     Ok(id)
+}
+
+pub fn ensure_machine_record(
+    conn: &Connection,
+    id: &str,
+    label: &str,
+    platform: Option<&str>,
+) -> rusqlite::Result<String> {
+    let now = now_rfc3339();
+    conn.execute(
+        r#"
+        INSERT INTO machines (id, label, hostname, platform, created_at, last_seen_at)
+        VALUES (?1, ?2, ?2, ?3, ?4, ?4)
+        ON CONFLICT(id) DO UPDATE SET
+            label = excluded.label,
+            platform = excluded.platform,
+            last_seen_at = excluded.last_seen_at
+        "#,
+        params![id, label, platform, now],
+    )?;
+    Ok(id.to_string())
 }
 
 pub fn machine_by_id(conn: &Connection, machine_id: &str) -> rusqlite::Result<Option<MachineRow>> {
@@ -2482,6 +2519,69 @@ pub fn path_observations_for_root(
         })
     })?;
     rows.collect()
+}
+
+pub fn export_observations_for_root(
+    conn: &Connection,
+    root_id: &str,
+) -> rusqlite::Result<Vec<RootExportObservationRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT
+            p.relative_path,
+            p.basename,
+            p.parent_path,
+            p.size_bytes,
+            p.modified_at,
+            p.status,
+            c.blake3,
+            c.sha256
+        FROM path_observations p
+        LEFT JOIN content_objects c ON c.id = p.content_id
+        WHERE p.root_id = ?1
+        ORDER BY p.relative_path
+        "#,
+    )?;
+    let rows = stmt.query_map(params![root_id], |row| {
+        let size: i64 = row.get(3)?;
+        Ok(RootExportObservationRow {
+            relative_path: row.get(0)?,
+            basename: row.get(1)?,
+            parent_path: row.get(2)?,
+            size_bytes: size as u64,
+            modified_at: row.get(4)?,
+            status: row.get(5)?,
+            blake3: row.get(6)?,
+            sha256: row.get(7)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn clear_root_file_metadata(conn: &Connection, root_id: &str) -> rusqlite::Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM path_observation_chunk_hashes WHERE path_observation_id IN (SELECT id FROM path_observations WHERE root_id = ?1)",
+        params![root_id],
+    )?;
+    tx.execute(
+        "DELETE FROM path_observations WHERE root_id = ?1",
+        params![root_id],
+    )?;
+    tx.execute(
+        "DELETE FROM checksum_entries WHERE collection_id IN (SELECT id FROM checksum_collections WHERE root_id = ?1)",
+        params![root_id],
+    )?;
+    tx.execute(
+        "DELETE FROM checksum_collections WHERE root_id = ?1",
+        params![root_id],
+    )?;
+    tx.execute(
+        "DELETE FROM selection_entries WHERE root_id = ?1 OR selection_set_id IN (SELECT id FROM selection_sets WHERE root_id = ?1)",
+        params![root_id],
+    )?;
+    refresh_root_current_size(&tx, root_id)?;
+    tx.commit()
 }
 
 pub fn content_collisions_for_root(

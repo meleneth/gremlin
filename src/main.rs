@@ -6,6 +6,7 @@ mod error;
 mod events;
 mod fswork;
 mod import;
+mod root_snapshot;
 mod targets;
 mod transfer;
 mod tui;
@@ -14,8 +15,8 @@ mod util;
 use anyhow::Context;
 use clap::Parser;
 use cli::{
-    Cli, Commands, ConfigCommands, DbCommands, JobCommands, TargetCommands, TransferCommands,
-    WorkerCommands,
+    Cli, Commands, ConfigCommands, DbCommands, JobCommands, RootCommands, TargetCommands,
+    TransferCommands, WorkerCommands,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -52,6 +53,17 @@ async fn main() -> anyhow::Result<()> {
                 tui::run_with_options(&conn, &db, machine_label, open_root_provider).await?;
                 return Ok(());
             };
+            let target_path = std::path::Path::new(target);
+            if root_snapshot::looks_like_snapshot_file(target_path) {
+                let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
+                let conn = db::open_or_create(&db)?;
+                db::init_schema(&conn)?;
+                let result = root_snapshot::import_snapshot_file(&conn, target_path)?;
+                println!("db:\t{}", db.display());
+                println!("imported_root:\t{}\t{}", result.root_id, result.root_path);
+                println!("files:\t{}", result.file_count);
+                return Ok(());
+            }
             let default_target = run_default_target(
                 &config_ctx,
                 cli.db.clone(),
@@ -406,6 +418,25 @@ async fn main() -> anyhow::Result<()> {
                 for entry in entries {
                     print_cached_directory_entry(&entry);
                 }
+            }
+        },
+        Some(Commands::Root { command }) => match command {
+            RootCommands::Export { target, kind } => {
+                let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
+                let conn = db::open_existing(&db)?;
+                let root = resolve_registered_root(&conn, &target, kind, machine_label.as_deref())?;
+                let result = root_snapshot::export_root(&conn, &root)?;
+                println!("exported_root:\t{}\t{}", root.id, root.path);
+                println!("file:\t{}", result.path.display());
+                println!("files:\t{}", result.file_count);
+            }
+            RootCommands::Import { input } => {
+                let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
+                let conn = db::open_or_create(&db)?;
+                db::init_schema(&conn)?;
+                let result = root_snapshot::import_snapshot_file(&conn, &input)?;
+                println!("imported_root:\t{}\t{}", result.root_id, result.root_path);
+                println!("files:\t{}", result.file_count);
             }
         },
         Some(Commands::Transfer { command }) => match command {
