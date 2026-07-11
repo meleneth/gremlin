@@ -7,7 +7,13 @@ pub(super) struct FilesPane<'a> {
 
 impl Widget for FilesPane<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let visible = self.files.iter().enumerate().skip(self.state.file_offset);
+        let visible_count = area.height.saturating_sub(4).max(1) as usize;
+        let visible = self
+            .files
+            .iter()
+            .enumerate()
+            .skip(self.state.file_offset)
+            .take(visible_count);
         let items = if self.files.is_empty() {
             let message = if !self.state.file_filter.is_empty() {
                 "No files match the active filter"

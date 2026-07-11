@@ -73,9 +73,14 @@ struct AppState {
     collection_result: Option<CollectionSnapshot>,
     temporary_browse: Option<TemporaryBrowse>,
     root_browse_dirs: BTreeMap<String, String>,
+    file_list_cache: Option<FileListCache>,
 }
 
 impl AppState {
+    fn clear_file_list_cache(&mut self) {
+        self.file_list_cache = None;
+    }
+
     fn sync_detail_selection(&mut self, selection_key: String, file_count: usize, now: Instant) {
         if self.detail_selection_key.as_deref() != Some(selection_key.as_str()) {
             self.detail_selection_key = Some(selection_key);
@@ -141,6 +146,23 @@ impl AppState {
         self.active_job_ids.remove(job_id);
         self.background_finished(level, message);
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileListCacheKey {
+    source: String,
+    filter: String,
+    selection_set_id: Option<String>,
+    marked_count: i64,
+    marked_bytes: i64,
+}
+
+#[derive(Debug, Clone)]
+struct FileListCache {
+    key: FileListCacheKey,
+    rows: Arc<Vec<FileViewRow>>,
+    selected_paths: Arc<BTreeSet<String>>,
+    detail_key: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

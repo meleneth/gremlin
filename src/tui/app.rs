@@ -98,6 +98,7 @@ pub(super) async fn run_loop(
                     state.background_finished(level, message);
                 }
                 TuiMessage::JobFinished { job_id, status } => {
+                    state.clear_file_list_cache();
                     let level = if status.contains("failed") || status.contains(" error") {
                         ActivityLevel::Error
                     } else {
@@ -114,6 +115,7 @@ pub(super) async fn run_loop(
                     canceled,
                     status,
                 } => {
+                    state.clear_file_list_cache();
                     if state.transfer_run_plan_id.as_deref() == Some(plan_id.as_str()) {
                         state.transfer_run_plan_id = None;
                     }
@@ -132,6 +134,7 @@ pub(super) async fn run_loop(
                     start_next_queued_transfer(conn, db_path, job_tx.clone(), &mut state)?;
                 }
                 TuiMessage::ImportFinished(status) => {
+                    state.clear_file_list_cache();
                     state.active_import_root_id = None;
                     state.active_import_progress = None;
                     let level = if status.contains("failed") {
@@ -172,12 +175,14 @@ pub(super) async fn run_loop(
                         state.active_background_jobs =
                             state.active_background_jobs.saturating_sub(1);
                         if let Some(browse) = result.initial_browse {
+                            state.clear_file_list_cache();
                             state.temporary_browse = Some(TemporaryBrowse::from(browse));
                             state.selected_root = 0;
                             state.focus = FocusPane::Files;
                             state.file_offset = 0;
                         }
                         if let Some(root_id) = result.selected_root_id {
+                            state.clear_file_list_cache();
                             state.active_import_root_id = Some(root_id);
                             state.temporary_browse = None;
                             state.focus = FocusPane::Files;
@@ -194,6 +199,7 @@ pub(super) async fn run_loop(
                 },
                 TuiMessage::TemporaryBrowseLoaded { path, result } => match result {
                     Ok(entries) => {
+                        state.clear_file_list_cache();
                         if let Some(browse) = state.temporary_browse.as_mut() {
                             browse.current_path = path.clone();
                             browse.entries = entries;
@@ -217,6 +223,7 @@ pub(super) async fn run_loop(
                     mark_all,
                     status,
                 } => {
+                    state.clear_file_list_cache();
                     mark_imported_transfer_source(
                         conn,
                         &root_id,
@@ -294,37 +301,6 @@ pub(super) async fn run_loop(
         let persisted_browse_dir = selected
             .map(|root| current_persisted_root_dir(&state, &root.id))
             .map(str::to_string);
-        let (all_files, detail_key) = {
-            let selected_temporary = selected_temporary_browse(&state);
-            let files = match (selected, selected_temporary) {
-                (Some(root), _) if state.file_pane_mode == FilePaneMode::Selection => {
-                    grouped_selected_file_rows(conn, &root.id)?
-                }
-                (Some(root), _) => db::cached_directory_entries(
-                    conn,
-                    &root.id,
-                    persisted_browse_dir.as_deref().unwrap_or("."),
-                )?
-                .iter()
-                .map(FileViewRow::from_cached_directory_entry)
-                .collect(),
-                (None, Some(browse)) => temporary_browse_rows(conn, &roots, browse)?,
-                (None, None) => Vec::new(),
-            };
-            (
-                files,
-                detail_selection_key(
-                    selected,
-                    selected_temporary,
-                    persisted_browse_dir.as_deref(),
-                    state.file_pane_mode,
-                ),
-            )
-        };
-        let files = filtered_file_rows(&all_files, &state.file_filter);
-        normalize_file_offset(&mut state, files.len());
-        append_visible_transfer_error_activities(&events, &mut state);
-        append_visible_failure_activities(&events, &mut state);
         let summary = match selected {
             Some(root) => Some(db::root_summary(conn, &root.id)?),
             None => None,
@@ -333,15 +309,63 @@ pub(super) async fn run_loop(
             Some(root) => Some(db::selection_summary_for_root(conn, &root.id)?),
             None => None,
         };
-        let selected_paths = match selected {
-            Some(root) => db::selected_paths_for_root(conn, &root.id)?,
-            None => BTreeSet::new(),
-        };
+        let file_list_key = current_file_list_cache_key(
+            &state,
+            selected,
+            selected_temporary_browse(&state),
+            persisted_browse_dir.as_deref(),
+            selection_summary.as_ref(),
+        );
+        if state
+            .file_list_cache
+            .as_ref()
+            .is_none_or(|cache| cache.key != file_list_key)
+        {
+            let selected_temporary = selected_temporary_browse(&state);
+            let (rows, selected_paths, detail_key) = current_file_snapshot(
+                conn,
+                &roots,
+                &state,
+                selected,
+                selected_temporary,
+                persisted_browse_dir.as_deref(),
+            )?;
+            state.file_list_cache = Some(FileListCache {
+                key: file_list_key,
+                rows: Arc::new(rows),
+                selected_paths: Arc::new(selected_paths),
+                detail_key,
+            });
+        }
+        let (file_count, detail_key) = state
+            .file_list_cache
+            .as_ref()
+            .map(|cache| (cache.rows.len(), cache.detail_key.clone()))
+            .expect("file cache loaded");
+        normalize_file_offset(&mut state, file_count);
+        append_visible_transfer_error_activities(&events, &mut state);
+        append_visible_failure_activities(&events, &mut state);
+        let selected_paths = state
+            .file_list_cache
+            .as_ref()
+            .expect("file cache loaded")
+            .selected_paths
+            .clone();
         let transfer_progress = latest_transfer_progress(&events);
-        state.sync_detail_selection(detail_key, files.len(), Instant::now());
-        let detail_file = files.get(state.detail_file_offset);
-        let detail_content = selected_file_content(conn, detail_file)?;
-        sync_file_appearances(db_path, job_tx.clone(), &mut state, detail_file);
+        state.sync_detail_selection(detail_key, file_count, Instant::now());
+        let detail_file = state
+            .file_list_cache
+            .as_ref()
+            .and_then(|cache| cache.rows.get(state.detail_file_offset))
+            .cloned();
+        let detail_content = selected_file_content(conn, detail_file.as_ref())?;
+        sync_file_appearances(db_path, job_tx.clone(), &mut state, detail_file.as_ref());
+        let files = state
+            .file_list_cache
+            .as_ref()
+            .expect("file cache loaded")
+            .rows
+            .clone();
         let selected_temporary = selected_temporary_browse(&state);
 
         terminal.draw(|frame| {
@@ -349,8 +373,8 @@ pub(super) async fn run_loop(
                 AppScreen {
                     state: &state,
                     roots: &roots,
-                    files: &files,
-                    selected_paths: &selected_paths,
+                    files: files.as_slice(),
+                    selected_paths: selected_paths.as_ref(),
                     selected_root: selected,
                     selected_temporary,
                     summary: summary.as_ref(),
@@ -523,6 +547,7 @@ pub(super) async fn run_loop(
                     }
                     KeyCode::Char('o') => {
                         state.file_pane_mode = state.file_pane_mode.toggle();
+                        state.clear_file_list_cache();
                         state.file_offset = 0;
                         state.detail_file_offset = 0;
                         state.status = format!("file mode: {}", state.file_pane_mode.label());
@@ -909,6 +934,7 @@ pub(super) fn refresh_current_file_listing(
     state: &mut AppState,
     job_tx: mpsc::UnboundedSender<TuiMessage>,
 ) {
+    state.clear_file_list_cache();
     if let Some(path) = state
         .temporary_browse
         .as_ref()
@@ -1009,6 +1035,85 @@ fn selected_file_content(
         return Ok(None);
     };
     Ok(db::content_object_by_id(conn, content_id)?)
+}
+
+fn current_file_list_cache_key(
+    state: &AppState,
+    selected: Option<&db::RootRow>,
+    selected_temporary: Option<&TemporaryBrowse>,
+    persisted_browse_dir: Option<&str>,
+    selection_summary: Option<&db::SelectionSummary>,
+) -> FileListCacheKey {
+    let source = if let Some(browse) = selected_temporary {
+        format!(
+            "temporary:{}:{}:{}:{}",
+            browse.machine_id,
+            browse.current_path,
+            browse.entries.len(),
+            state.file_pane_mode.label()
+        )
+    } else if let Some(root) = selected {
+        format!(
+            "root:{}:{}:{}:{}:{}:{}",
+            root.id,
+            persisted_browse_dir.unwrap_or("."),
+            root.latest_job_kind.as_deref().unwrap_or("-"),
+            root.latest_job_status.as_deref().unwrap_or("-"),
+            root.latest_job_phase.as_deref().unwrap_or("-"),
+            state.file_pane_mode.label()
+        )
+    } else {
+        "none".to_string()
+    };
+    FileListCacheKey {
+        source,
+        filter: state.file_filter.clone(),
+        selection_set_id: selection_summary.map(|summary| summary.set_id.clone()),
+        marked_count: selection_summary
+            .map(|summary| summary.marked_count)
+            .unwrap_or(0),
+        marked_bytes: selection_summary
+            .map(|summary| summary.marked_bytes)
+            .unwrap_or(0),
+    }
+}
+
+fn current_file_snapshot(
+    conn: &Connection,
+    roots: &[db::RootRow],
+    state: &AppState,
+    selected: Option<&db::RootRow>,
+    selected_temporary: Option<&TemporaryBrowse>,
+    persisted_browse_dir: Option<&str>,
+) -> anyhow::Result<(Vec<FileViewRow>, BTreeSet<String>, String)> {
+    let all_files = match (selected, selected_temporary) {
+        (Some(root), _) if state.file_pane_mode == FilePaneMode::Selection => {
+            grouped_selected_file_rows(conn, &root.id)?
+        }
+        (Some(root), _) => {
+            db::cached_directory_entries(conn, &root.id, persisted_browse_dir.unwrap_or("."))?
+                .iter()
+                .map(FileViewRow::from_cached_directory_entry)
+                .collect()
+        }
+        (None, Some(browse)) => temporary_browse_rows(conn, roots, browse)?,
+        (None, None) => Vec::new(),
+    };
+    let detail_key = detail_selection_key(
+        selected,
+        selected_temporary,
+        persisted_browse_dir,
+        state.file_pane_mode,
+    );
+    let selected_paths = match selected {
+        Some(root) => db::selected_paths_for_root(conn, &root.id)?,
+        None => BTreeSet::new(),
+    };
+    Ok((
+        filtered_file_rows(&all_files, &state.file_filter),
+        selected_paths,
+        detail_key,
+    ))
 }
 
 fn grouped_selected_file_rows(

@@ -247,6 +247,7 @@ pub(super) fn toggle_selected_file_mark(
     match file.kind {
         FileKind::Directory => {
             let change = db::toggle_selection_directory(conn, &root.id, &file.relative_path)?;
+            state.clear_file_list_cache();
             state.status = if change.files_changed == 0 {
                 format!("{} has no indexed files to mark", file.relative_path)
             } else if change.selected {
@@ -273,6 +274,7 @@ pub(super) fn toggle_selected_file_mark(
         FileKind::File => {}
     }
     let marked = db::toggle_selection_entry(conn, &root.id, &file.relative_path)?;
+    state.clear_file_list_cache();
     state.status = if marked {
         format!("marked {}", file.relative_path)
     } else {
