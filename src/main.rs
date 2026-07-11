@@ -182,6 +182,11 @@ async fn main() -> anyhow::Result<()> {
                 collections::verify_collection_against_root(&conn, &collection_id, &root)?;
             print_collection_verify_summary(summary, output)?;
         }
+        Some(Commands::VerifyAccept { job_id }) => {
+            let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
+            let conn = db::open_existing(&db)?;
+            fswork::accept_verify_job(&conn, &job_id, output)?;
+        }
         Some(Commands::Worker { command }) => match command {
             WorkerCommands::Hash { path, jsonl, out } => {
                 if !jsonl {

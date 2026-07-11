@@ -115,6 +115,27 @@ RSpec.describe "Gremlin local file CLI integration" do
     )
   end
 
+  it "accepts a reviewed verify job without re-running verify with --accept" do
+    build_fixture_tree
+    gremlin!("init")
+    gremlin_json!("hash", fixture_root, "--all")
+
+    write_fixture("alpha/one.txt", "alpha one reviewed change\n", mtime: base_time + 120)
+
+    reviewed = gremlin_json!("verify", fixture_root)
+    expect(reviewed.fetch("changed")).to eq(1)
+    expect(reviewed.fetch("accepted")).to eq(0)
+
+    accepted = gremlin_json!("verify-accept", reviewed.fetch("job_id"))
+    expect(accepted.fetch("accepted")).to eq(1)
+    expect(accepted.fetch("errors")).to eq(0)
+
+    clean = gremlin_json!("verify", fixture_root)
+    expect(clean.fetch("ok")).to eq(3)
+    expect(clean.fetch("changed")).to eq(0)
+    expect(clean.fetch("errors")).to eq(0)
+  end
+
   it "copies local files through a planned transfer while preserving paths and mtimes" do
     build_fixture_tree
     gremlin!("init")

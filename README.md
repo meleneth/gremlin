@@ -85,6 +85,7 @@ gremlin hash PATH --all --db ./gremlin.db
 gremlin chunk-hash PATH --chunk-size-mib 64 --db ./gremlin.db
 gremlin verify PATH --db ./gremlin.db
 gremlin verify PATH --accept --db ./gremlin.db
+gremlin verify-accept JOB_ID --db ./gremlin.db
 gremlin verify-collection COLLECTION_ID TARGET --db ./gremlin.db
 gremlin --json status PATH --db ./gremlin.db
 
@@ -171,7 +172,7 @@ Roots maintain `current_size_bytes`, the projected total size of currently index
 
 `chunk-hash` is explicit opt-in evidence collection for local and SSH roots. It computes MD5 chunks for each file, stores them on the current path observation, and does not run as part of normal scan/hash/copy. For SSH targets, Gremlin uses the streamed remote helper and asks it to compute SHA-256, CRC32, and MD5 chunks in one remote read per file, then persists the chunk rows against the imported root observations. The default chunk size is 64 MiB; use `--chunk-size-mib` to change it. This is separate from transfer copy checkpoints: one-sided SSH copies also use 64 MiB MD5 chunks while copying, but those checkpoints are stored per transfer plan so interrupted copies can resume and identify the failed chunk.
 
-`verify` re-hashes current files and compares them to the latest stored per-path hashes. It reports `ok`, `changed`, `new`, `missing`, and `error`. By default it records history only; `--accept` promotes changed and new hashes into projected current truth.
+`verify` re-hashes current files and compares them to the latest stored per-path hashes. It reports `ok`, `changed`, `new`, `missing`, and `error`. By default it records history only; `--accept` promotes changed and new hashes into projected current truth. After reviewing a previous verify job, `verify-accept JOB_ID` can promote that completed job's stored `changed` and `new` findings without re-reading the files; the replay creates its own `verify_accept` job so the projection change is visible in job history.
 
 `verify-collection COLLECTION_ID TARGET` compares an imported checksum collection to a known root's current projected observations. It does not read or hash filesystem files; run `scan`, `hash --all`, SSH hash import, or a transfer first when the root needs fresher evidence. Results distinguish hash `ok`, `missing`, `size_mismatch`, `hash_mismatch`, `unverified` when the root lacks comparable hash evidence, `size_only` when only sizes can be compared, and extra root files that are not present in the collection. Comparable evidence can be BLAKE3, SHA-256, or CRC32 depending on what the collection and root both have.
 

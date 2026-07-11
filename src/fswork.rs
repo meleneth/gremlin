@@ -146,6 +146,16 @@ pub struct VerifySummary {
     pub findings: Vec<VerifyFinding>,
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct VerifyAcceptSummary {
+    pub job_id: String,
+    pub accept_job_id: String,
+    pub root_id: String,
+    pub accepted: usize,
+    pub skipped: usize,
+    pub errors: usize,
+}
+
 #[derive(Debug, Clone)]
 struct FileMeta {
     relative_path: String,
@@ -356,6 +366,129 @@ pub fn verify_to_db(
         accept,
     )?;
     print_verify_summary(&summary, options);
+    Ok(summary)
+}
+
+pub fn accept_verify_job(
+    conn: &Connection,
+    job_id: &str,
+    options: OutputOptions,
+) -> anyhow::Result<VerifyAcceptSummary> {
+    db::init_schema(conn)?;
+    let job = db::job_by_id(conn, job_id)?
+        .ok_or_else(|| anyhow::anyhow!("verify job not found: {job_id}"))?;
+    if job.kind != "verify" {
+        anyhow::bail!("job {job_id} is {}, not verify", job.kind);
+    }
+    if matches!(job.status.as_str(), "created" | "running") {
+        anyhow::bail!("verify job {job_id} is still {}", job.status);
+    }
+    let machine_id = job
+        .machine_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("verify job {job_id} has no machine id"))?;
+    let root_id = job
+        .root_id
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("verify job {job_id} has no root id"))?;
+    if db::root_by_id(conn, root_id)?.is_none() {
+        anyhow::bail!("verify job {job_id} root is no longer registered: {root_id}");
+    }
+
+    let accept_job_id = db::create_job(
+        conn,
+        "verify_accept",
+        Some(machine_id),
+        Some(root_id),
+        serde_json::json!({ "verify_job_id": job_id }),
+    )?;
+    db::start_job(conn, &accept_job_id)?;
+    let mut sequence = db::next_sequence(conn, &accept_job_id)?;
+    persist_db_event(
+        conn,
+        &accept_job_id,
+        &mut sequence,
+        EventKind::JobStarted,
+        EventPayload::Job {
+            kind: "verify_accept".to_string(),
+            path: None,
+            message: Some(format!("accepting verify job {job_id}")),
+            files_seen: None,
+            errors: None,
+        },
+    )?;
+
+    let mut summary = VerifyAcceptSummary {
+        job_id: job_id.to_string(),
+        accept_job_id: accept_job_id.clone(),
+        root_id: root_id.to_string(),
+        ..VerifyAcceptSummary::default()
+    };
+    for event in db::events_for_job(conn, job_id)? {
+        if event.event_kind != EventKind::VerifyFinding.as_str() {
+            continue;
+        }
+        match serde_json::from_str::<EventPayload>(&event.payload_json) {
+            Ok(EventPayload::VerifyFinding {
+                result,
+                relative_path,
+                basename,
+                parent_path,
+                size_bytes,
+                modified_at,
+                actual_blake3,
+                actual_sha256,
+                ..
+            }) if matches!(result.as_str(), "changed" | "new") => {
+                let (Some(blake3), Some(sha256)) = (actual_blake3, actual_sha256) else {
+                    summary.errors += 1;
+                    continue;
+                };
+                let content_id =
+                    db::ensure_content_object_blake3_sha256(conn, size_bytes, &blake3, &sha256)?;
+                db::insert_path_observation(
+                    conn,
+                    db::PathObservationInput {
+                        machine_id,
+                        root_id,
+                        relative_path: &relative_path,
+                        basename: &basename,
+                        parent_path: &parent_path,
+                        size_bytes,
+                        modified_at: modified_at.as_deref(),
+                        content_id: Some(&content_id),
+                    },
+                )?;
+                summary.accepted += 1;
+            }
+            Ok(EventPayload::VerifyFinding { .. }) => summary.skipped += 1,
+            Ok(_) => summary.skipped += 1,
+            Err(_) => summary.errors += 1,
+        }
+    }
+    let status = if summary.errors == 0 {
+        "completed"
+    } else {
+        "completed_with_errors"
+    };
+    persist_db_event(
+        conn,
+        &accept_job_id,
+        &mut sequence,
+        EventKind::JobCompleted,
+        EventPayload::Job {
+            kind: "verify_accept".to_string(),
+            path: None,
+            message: Some(format!(
+                "source={} accepted={} skipped={} errors={}",
+                job_id, summary.accepted, summary.skipped, summary.errors
+            )),
+            files_seen: Some(summary.accepted as u64),
+            errors: Some(summary.errors as u64),
+        },
+    )?;
+    db::complete_job(conn, &accept_job_id, status)?;
+    print_verify_accept_summary(&summary, options);
     Ok(summary)
 }
 
@@ -1889,6 +2022,20 @@ fn print_verify_summary(summary: &VerifySummary, options: OutputOptions) {
     }
 }
 
+fn print_verify_accept_summary(summary: &VerifyAcceptSummary, options: OutputOptions) {
+    if options.quiet {
+        return;
+    }
+    if options.json {
+        print_json_summary(summary);
+        return;
+    }
+    println!(
+        "verify accept job {} from {}: {} accepted, {} skipped, {} errors",
+        summary.accept_job_id, summary.job_id, summary.accepted, summary.skipped, summary.errors
+    );
+}
+
 fn print_json_summary(summary: &impl Serialize) {
     println!(
         "{}",
@@ -2154,6 +2301,61 @@ mod tests {
         )
         .unwrap();
         assert_eq!(accepted.accepted, 1);
+        let clean = verify_to_db(
+            &conn,
+            dir.path(),
+            &db_path,
+            None,
+            false,
+            OutputOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(clean.ok, 1);
+        assert_eq!(clean.changed, 0);
+    }
+
+    #[test]
+    fn accepts_previous_verify_job_after_review() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hello.txt");
+        std::fs::write(&file, b"hello").unwrap();
+        let db_path = dir.path().join("gremlin.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+        db::init_schema(&conn).unwrap();
+        hash_to_db(
+            &conn,
+            dir.path(),
+            &db_path,
+            None,
+            true,
+            OutputOptions::default(),
+        )
+        .unwrap();
+
+        std::fs::write(&file, b"changed").unwrap();
+        let reviewed = verify_to_db(
+            &conn,
+            dir.path(),
+            &db_path,
+            None,
+            false,
+            OutputOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(reviewed.changed, 1);
+
+        let accepted =
+            accept_verify_job(&conn, &reviewed.job_id, OutputOptions::default()).unwrap();
+        assert_eq!(accepted.accepted, 1);
+        assert_eq!(accepted.errors, 0);
+        assert_eq!(
+            db::job_by_id(&conn, &accepted.accept_job_id)
+                .unwrap()
+                .unwrap()
+                .kind,
+            "verify_accept"
+        );
+
         let clean = verify_to_db(
             &conn,
             dir.path(),

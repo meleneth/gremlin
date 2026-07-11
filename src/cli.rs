@@ -64,6 +64,9 @@ pub enum Commands {
         #[arg(long, value_enum)]
         kind: Option<TargetKind>,
     },
+    VerifyAccept {
+        job_id: String,
+    },
     Worker {
         #[command(subcommand)]
         command: WorkerCommands,

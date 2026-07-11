@@ -1336,6 +1336,15 @@ pub fn ensure_content_object_crc(
     ensure_content_object_with_hashes(conn, size_bytes, Some(blake3), Some(sha256), Some(crc32))
 }
 
+pub fn ensure_content_object_blake3_sha256(
+    conn: &Connection,
+    size_bytes: u64,
+    blake3: &str,
+    sha256: &str,
+) -> rusqlite::Result<String> {
+    ensure_content_object_with_hashes(conn, size_bytes, Some(blake3), Some(sha256), None)
+}
+
 pub fn ensure_content_object_sha256(
     conn: &Connection,
     size_bytes: u64,

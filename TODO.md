@@ -12,7 +12,6 @@
 - Replace inline decision prompts with modal popups for import mode, transfer confirmation/review, scoped jobs, retargeting, and destructive confirmations.
 - Keep normal navigation centered on the root browser and files browser, with predictable Tab movement and decision modals only when a flow needs a choice.
 - Add richer job/event payload detail beyond the current one-line preview.
-- Add root filtering/search once large root lists are realistic.
 - Add richer TUI job progress state displays for long-running jobs.
 - Show detailed import progress in the Details pane: current path, processed files/directories, queued files/directories, and whether progress is remote discovery or local indexing.
 - Keep the Jobs pane to one row per queued/active/recent job; use the activity log for timing/event sequence details.
@@ -22,10 +21,8 @@
 ## Scan, Hash, Verify
 
 - Keep missing files report-only until the observation history model is richer.
-- Add a way to accept a previous verify job after review, not only `verify --accept`.
 - Add explicit hash baseline selection for verify.
 - Decide whether imported checksum collections can become verify baselines.
-- Add CRC verification against imported SFV/CFV checksum manifest entries.
 - Add PAR2 parity repair/verification; file-list import exists.
 - Add richer changed reporting: size-only, mtime-only, hash mismatch.
 - Add a compact integrity summary per root.
