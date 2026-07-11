@@ -10,6 +10,7 @@ mod import;
 mod remote_helper;
 mod root_snapshot;
 mod sfv;
+mod sfv_verify;
 mod targets;
 mod transfer;
 mod tui;

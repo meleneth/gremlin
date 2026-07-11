@@ -230,6 +230,135 @@ pub(super) fn export_selected_root_sfv(
     Ok(())
 }
 
+pub(super) fn export_current_directory_sfv(
+    conn: &Connection,
+    selected_root: Option<&db::RootRow>,
+    state: &mut AppState,
+) -> anyhow::Result<()> {
+    let Some(root) = selected_root else {
+        state.set_status(
+            ActivityLevel::Warning,
+            "No persisted root selected to export SFV",
+        );
+        return Ok(());
+    };
+    let relative_dir = current_persisted_root_dir(state, &root.id).to_string();
+    match crate::sfv::export_directory_default_path(conn, root, &relative_dir) {
+        Ok(result) => {
+            state.clear_file_list_cache();
+            let path = result
+                .path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "-".to_string());
+            state.set_status(
+                ActivityLevel::Success,
+                format!(
+                    "exported directory SFV {} to {} ({} files)",
+                    if relative_dir == "." {
+                        root_display_name(root)
+                    } else {
+                        relative_dir
+                    },
+                    path,
+                    result.file_count
+                ),
+            );
+        }
+        Err(err) => {
+            state.set_status(ActivityLevel::Warning, format!("SFV export failed: {err}"));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn queue_selected_sfv_verify(
+    conn: &Connection,
+    db_path: &Path,
+    selected_root: Option<&db::RootRow>,
+    selected_file: Option<&FileViewRow>,
+    job_tx: mpsc::UnboundedSender<TuiMessage>,
+    state: &mut AppState,
+) -> anyhow::Result<bool> {
+    let Some(root) = selected_root else {
+        return Ok(false);
+    };
+    let Some(file) = selected_file else {
+        return Ok(false);
+    };
+    if file.kind != FileKind::File || !file.relative_path.to_ascii_lowercase().ends_with(".sfv") {
+        return Ok(false);
+    }
+    let root_path = PathBuf::from(&root.path);
+    if !root_path.is_dir() {
+        state.set_status(
+            ActivityLevel::Warning,
+            format!("SFV verify needs a local directory root: {}", root.path),
+        );
+        return Ok(true);
+    }
+    let job_id = db::create_job(
+        conn,
+        "sfv_verify",
+        Some(&root.machine_id),
+        Some(&root.id),
+        serde_json::json!({
+            "path": root.path.clone(),
+            "sfv": file.relative_path.clone(),
+        }),
+    )?;
+    let event = crate::events::EventEnvelope {
+        event_kind: crate::events::EventKind::JobCreated,
+        job_id: Some(job_id.clone()),
+        sequence: Some(1),
+        created_at: crate::util::now_rfc3339(),
+        payload: crate::events::EventPayload::Job {
+            kind: "sfv_verify".to_string(),
+            path: Some(file.relative_path.clone()),
+            message: Some("queued".to_string()),
+            files_seen: None,
+            errors: None,
+        },
+    };
+    db::persist_event(conn, &event)?;
+    state.background_started_job(job_id.clone(), format!("started SFV verify job {job_id}"));
+    spawn_sfv_verify_runner(
+        db_path.to_path_buf(),
+        job_id,
+        root_path,
+        file.relative_path.clone(),
+        job_tx,
+    );
+    Ok(true)
+}
+
+fn spawn_sfv_verify_runner(
+    db_path: PathBuf,
+    job_id: String,
+    root_path: PathBuf,
+    sfv_relative_path: String,
+    job_tx: mpsc::UnboundedSender<TuiMessage>,
+) {
+    task::spawn_blocking(move || {
+        let status = match db::open_existing(&db_path).and_then(|conn| {
+            crate::sfv_verify::verify_job(&conn, &job_id, &root_path, &sfv_relative_path)
+        }) {
+            Ok(summary) if summary.canceled => {
+                format!("SFV verify canceled: {} entries", summary.entries)
+            }
+            Ok(summary) if summary.mismatched > 0 || summary.missing > 0 || summary.errors > 0 => {
+                format!(
+                    "SFV verify completed with errors: {} ok, {} mismatched, {} missing, {} errors",
+                    summary.ok, summary.mismatched, summary.missing, summary.errors
+                )
+            }
+            Ok(summary) => format!("SFV verify completed: {} ok", summary.ok),
+            Err(err) => format!("SFV verify failed: {err}"),
+        };
+        let _ = job_tx.send(TuiMessage::JobFinished { job_id, status });
+    });
+}
+
 pub(super) fn toggle_selected_file_mark(
     conn: &Connection,
     selected_root: Option<&db::RootRow>,

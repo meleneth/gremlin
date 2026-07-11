@@ -237,8 +237,8 @@ pub fn import_manifest_file(conn: &Connection, input: &Path) -> anyhow::Result<(
     let mut skipped = 0_u64;
     for (idx, line) in reader.lines().enumerate() {
         let line = line.with_context(|| format!("reading line {} from {}", idx + 1, source))?;
-        let Some(entry) = parse_sfv_line(&line) else {
-            if !line.trim().is_empty() && !is_manifest_comment(&line) {
+        let Some(entry) = crate::sfv::parse_line(&line) else {
+            if !line.trim().is_empty() && !crate::sfv::is_comment(&line) {
                 skipped += 1;
             }
             continue;
@@ -424,12 +424,6 @@ fn import_par2_file_list(conn: &Connection, input: &Path) -> anyhow::Result<()> 
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SfvEntry {
-    relative_path: String,
-    crc32: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 struct Par2FileEntry {
     relative_path: String,
     size_bytes: u64,
@@ -450,31 +444,6 @@ fn manifest_format(path: &Path) -> anyhow::Result<&'static str> {
         Some("par2") => Ok("par2"),
         _ => anyhow::bail!("unsupported manifest format; expected .sfv, .cfv, or .par2"),
     }
-}
-
-fn parse_sfv_line(line: &str) -> Option<SfvEntry> {
-    let trimmed = line.trim();
-    if trimmed.is_empty() || is_manifest_comment(trimmed) {
-        return None;
-    }
-    let (path, crc) = trimmed.rsplit_once(char::is_whitespace)?;
-    let crc = crc.trim();
-    if crc.len() != 8 || !crc.chars().all(|ch| ch.is_ascii_hexdigit()) {
-        return None;
-    }
-    let relative_path = path.trim().trim_start_matches('*').to_string();
-    if relative_path.is_empty() {
-        return None;
-    }
-    Some(SfvEntry {
-        relative_path,
-        crc32: crc.to_ascii_uppercase(),
-    })
-}
-
-fn is_manifest_comment(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    trimmed.starts_with(';') || trimmed.starts_with('#')
 }
 
 fn parse_par2_file_descriptions(bytes: &[u8]) -> Vec<Par2FileEntry> {
@@ -704,14 +673,14 @@ mod tests {
     #[test]
     fn parses_sfv_lines() {
         assert_eq!(
-            parse_sfv_line("dir/file.bin deadbeef"),
-            Some(SfvEntry {
+            crate::sfv::parse_line("dir/file.bin deadbeef"),
+            Some(crate::sfv::Entry {
                 relative_path: "dir/file.bin".to_string(),
                 crc32: "DEADBEEF".to_string()
             })
         );
-        assert_eq!(parse_sfv_line("; comment"), None);
-        assert_eq!(parse_sfv_line("not a checksum"), None);
+        assert_eq!(crate::sfv::parse_line("; comment"), None);
+        assert_eq!(crate::sfv::parse_line("not a checksum"), None);
     }
 
     #[test]

@@ -610,15 +610,29 @@ pub(super) async fn run_loop(
                         )?;
                     }
                     KeyCode::Char('v') => {
-                        queue_or_prompt_selected_root(
-                            conn,
-                            db_path,
-                            selected_persisted_root(&roots, &state),
-                            "verify",
-                            &selected_paths,
-                            job_tx.clone(),
-                            &mut state,
-                        )?;
+                        let handled_sfv = if state.focus == FocusPane::Files {
+                            queue_selected_sfv_verify(
+                                conn,
+                                db_path,
+                                selected_persisted_root(&roots, &state),
+                                files.get(state.file_offset),
+                                job_tx.clone(),
+                                &mut state,
+                            )?
+                        } else {
+                            false
+                        };
+                        if !handled_sfv {
+                            queue_or_prompt_selected_root(
+                                conn,
+                                db_path,
+                                selected_persisted_root(&roots, &state),
+                                "verify",
+                                &selected_paths,
+                                job_tx.clone(),
+                                &mut state,
+                            )?;
+                        }
                     }
                     KeyCode::Char('c') => {
                         let selected_resume = selected_resume_plan(&state, roots.len()).cloned();
@@ -665,11 +679,19 @@ pub(super) async fn run_loop(
                         )?;
                     }
                     KeyCode::Char('y') => {
-                        export_selected_root_sfv(
-                            conn,
-                            selected_persisted_root(&roots, &state),
-                            &mut state,
-                        )?;
+                        if state.focus == FocusPane::Files {
+                            export_current_directory_sfv(
+                                conn,
+                                selected_persisted_root(&roots, &state),
+                                &mut state,
+                            )?;
+                        } else {
+                            export_selected_root_sfv(
+                                conn,
+                                selected_persisted_root(&roots, &state),
+                                &mut state,
+                            )?;
+                        }
                     }
                     KeyCode::Char('x') => {
                         start_delete_root_confirmation(

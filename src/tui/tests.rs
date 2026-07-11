@@ -1211,6 +1211,55 @@ fn root_export_writes_sfv_from_tui_action() {
 }
 
 #[test]
+fn file_browser_export_writes_directory_named_sfv() {
+    let temp = tempfile::tempdir().unwrap();
+    let conn = Connection::open_in_memory().unwrap();
+    db::init_schema(&conn).unwrap();
+    let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+    let root_path = temp.path().join("root");
+    let dir_path = root_path.join("season one");
+    std::fs::create_dir_all(&dir_path).unwrap();
+    let root_path = root_path.to_string_lossy().to_string();
+    let root_id = db::ensure_root(&conn, &machine_id, &root_path).unwrap();
+    let content_id = db::ensure_content_object_sha256_crc(&conn, 5, "sha256", "a17c9e42").unwrap();
+    db::insert_path_observation(
+        &conn,
+        db::PathObservationInput {
+            machine_id: &machine_id,
+            root_id: &root_id,
+            relative_path: "season one/hello world.txt",
+            basename: "hello world.txt",
+            parent_path: "season one",
+            size_bytes: 5,
+            modified_at: Some("2026-07-08T00:00:00Z"),
+            content_id: Some(&content_id),
+        },
+    )
+    .unwrap();
+    let root = db::root_by_id(&conn, &root_id).unwrap().unwrap();
+    let mut state = AppState::default();
+    state
+        .root_browse_dirs
+        .insert(root_id.clone(), "season one".to_string());
+
+    export_current_directory_sfv(&conn, Some(&root), &mut state).unwrap();
+
+    let sfv_path = temp
+        .path()
+        .join("root")
+        .join("season one")
+        .join("season_one.sfv");
+    let sfv = std::fs::read_to_string(&sfv_path).unwrap();
+    assert!(sfv.contains("hello world.txt a17c9e42"));
+    assert!(!sfv.contains("season one/hello world.txt"));
+    assert!(db::cached_directory_entries(&conn, &root_id, "season one")
+        .unwrap()
+        .iter()
+        .any(|entry| entry.relative_path == "season one/season_one.sfv"));
+    assert!(state.status.contains("exported directory SFV"));
+}
+
+#[test]
 fn drop_queued_transfer_confirmation_marks_plan_canceled() {
     let conn = Connection::open_in_memory().unwrap();
     db::init_schema(&conn).unwrap();
