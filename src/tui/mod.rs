@@ -46,6 +46,7 @@ struct AppState {
     detail_selection_changed_at: Option<Instant>,
     plan_offset: usize,
     event_offset: usize,
+    follow_job_id: Option<String>,
     event_filter: String,
     event_filter_editing: bool,
     status: String,

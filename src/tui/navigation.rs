@@ -279,7 +279,7 @@ pub(super) fn open_persisted_parent(state: &mut AppState, root_id: Option<&str>)
     };
 }
 
-pub(super) fn open_job_current_path(
+pub(super) fn follow_job_current_path(
     conn: &Connection,
     roots: &[db::RootRow],
     selected_job: Option<&db::JobEventRow>,
@@ -315,8 +315,11 @@ pub(super) fn open_job_current_path(
         .iter()
         .position(|row| row.relative_path == current_path)
         .unwrap_or(0);
-    state.focus = FocusPane::Files;
-    state.status = format!("opened job {} at {}", short_id(&job.job_id), current_path);
+    state.status = format!(
+        "following job {} at {}",
+        short_id(&job.job_id),
+        current_path
+    );
     Ok(true)
 }
 
@@ -406,6 +409,7 @@ pub(super) fn move_down(
         FocusPane::Events => {
             if state.event_offset + 1 < event_count {
                 state.event_offset += 1;
+                state.follow_job_id = None;
             }
         }
     }
@@ -436,7 +440,11 @@ pub(super) fn move_up(state: &mut AppState) {
             state.plan_offset = state.plan_offset.saturating_sub(1);
         }
         FocusPane::Events => {
+            let old = state.event_offset;
             state.event_offset = state.event_offset.saturating_sub(1);
+            if state.event_offset != old {
+                state.follow_job_id = None;
+            }
         }
     }
 }
@@ -463,7 +471,11 @@ pub(super) fn move_page_down(
             state.plan_offset = page_target(state.plan_offset, plan_count, jump);
         }
         FocusPane::Events => {
+            let old = state.event_offset;
             state.event_offset = page_target(state.event_offset, event_count, jump);
+            if state.event_offset != old {
+                state.follow_job_id = None;
+            }
         }
     }
 }
@@ -483,7 +495,11 @@ pub(super) fn move_page_up(state: &mut AppState, page_len: usize) {
             state.plan_offset = state.plan_offset.saturating_sub(jump);
         }
         FocusPane::Events => {
+            let old = state.event_offset;
             state.event_offset = state.event_offset.saturating_sub(jump);
+            if state.event_offset != old {
+                state.follow_job_id = None;
+            }
         }
     }
 }

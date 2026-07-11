@@ -265,6 +265,29 @@ pub(super) async fn run_loop(
         state.resumable_transfer_plans = resumable_transfer_plans(conn)?;
         let root_count = visible_root_count(&state, roots.len());
         normalize_selection(&mut state, root_count);
+        if state.focus != FocusPane::Events {
+            state.follow_job_id = None;
+        }
+        let selected = selected_persisted_root(&roots, &state);
+        let event_root_id = state.last_plan.as_ref().and_then(|plan| {
+            (state.focus == FocusPane::Plan).then_some(plan.source_root_id.as_str())
+        });
+        let events = match event_root_id.or_else(|| selected.map(|root| root.id.as_str())) {
+            Some(root_id) => db::recent_jobs_and_events_for_root(conn, root_id, 300)?,
+            None => db::recent_jobs_and_events(conn, 100)?,
+        };
+        let all_job_rows = job_rows(&events);
+        let job_rows = filtered_job_rows(&all_job_rows, &state.event_filter);
+        if state.event_offset >= job_rows.len() {
+            state.event_offset = job_rows.len().saturating_sub(1);
+        }
+        if state.focus == FocusPane::Events {
+            if let Some(follow_job_id) = state.follow_job_id.clone() {
+                if let Some(job) = all_job_rows.iter().find(|job| job.job_id == follow_job_id) {
+                    follow_job_current_path(conn, &roots, Some(job), &mut state)?;
+                }
+            }
+        }
         let selected = selected_persisted_root(&roots, &state);
         let persisted_browse_dir = selected
             .map(|root| current_persisted_root_dir(&state, &root.id))
@@ -298,18 +321,6 @@ pub(super) async fn run_loop(
         };
         let files = filtered_file_rows(&all_files, &state.file_filter);
         normalize_file_offset(&mut state, files.len());
-        let event_root_id = state.last_plan.as_ref().and_then(|plan| {
-            (state.focus == FocusPane::Plan).then_some(plan.source_root_id.as_str())
-        });
-        let events = match event_root_id.or_else(|| selected.map(|root| root.id.as_str())) {
-            Some(root_id) => db::recent_jobs_and_events_for_root(conn, root_id, 300)?,
-            None => db::recent_jobs_and_events(conn, 100)?,
-        };
-        let all_job_rows = job_rows(&events);
-        let job_rows = filtered_job_rows(&all_job_rows, &state.event_filter);
-        if state.event_offset >= job_rows.len() {
-            state.event_offset = job_rows.len().saturating_sub(1);
-        }
         append_visible_transfer_error_activities(&events, &mut state);
         append_visible_failure_activities(&events, &mut state);
         let summary = match selected {
@@ -451,7 +462,10 @@ pub(super) async fn run_loop(
                         }
                         break;
                     }
-                    KeyCode::Tab => state.focus = state.focus.next(),
+                    KeyCode::Tab => {
+                        state.focus = state.focus.next();
+                        state.follow_job_id = None;
+                    }
                     KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         start_open_root_prompt(&mut state);
                     }
@@ -715,7 +729,10 @@ pub(super) async fn run_loop(
                                 create_transfer_plan_from_selection(conn, &roots, &mut state)?;
                             }
                         } else if state.focus == FocusPane::Events {
-                            open_job_current_path(
+                            state.follow_job_id = job_rows
+                                .get(state.event_offset)
+                                .map(|job| job.job_id.clone());
+                            follow_job_current_path(
                                 conn,
                                 &roots,
                                 job_rows.get(state.event_offset),

@@ -1861,7 +1861,7 @@ fn job_rows_keep_one_latest_row_per_job() {
 }
 
 #[test]
-fn enter_on_job_opens_current_file_under_job_root() {
+fn following_job_updates_file_pane_without_leaving_jobs() {
     let conn = Connection::open_in_memory().unwrap();
     db::init_schema(&conn).unwrap();
     let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
@@ -1921,15 +1921,31 @@ fn enter_on_job_opens_current_file_under_job_root() {
         ..AppState::default()
     };
 
-    open_job_current_path(&conn, &[root], Some(&job), &mut state).unwrap();
+    follow_job_current_path(&conn, std::slice::from_ref(&root), Some(&job), &mut state).unwrap();
 
-    assert_eq!(state.focus, FocusPane::Files);
+    assert_eq!(state.focus, FocusPane::Events);
     assert_eq!(
         state.root_browse_dirs.get(&root_id).map(String::as_str),
         Some("incoming/photos")
     );
     assert_eq!(state.file_offset, 1);
     assert!(state.status.contains("incoming/photos/foo.png"));
+
+    let next_job = db::JobEventRow {
+        current_path: Some("incoming/photos/bar.png".to_string()),
+        payload_json: serde_json::json!({
+            "type": "job_progress",
+            "current_path": "incoming/photos/bar.png"
+        })
+        .to_string(),
+        ..job
+    };
+
+    follow_job_current_path(&conn, &[root], Some(&next_job), &mut state).unwrap();
+
+    assert_eq!(state.focus, FocusPane::Events);
+    assert_eq!(state.file_offset, 0);
+    assert!(state.status.contains("incoming/photos/bar.png"));
 }
 
 #[test]
