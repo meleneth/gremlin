@@ -2486,6 +2486,58 @@ fn detail_pane_renders_selected_file_hashes() {
 }
 
 #[test]
+fn detail_pane_renders_root_integrity_summary() {
+    let selected_paths = BTreeSet::new();
+    let root = db::RootRow {
+        id: "root_1".to_string(),
+        machine_id: "machine_local".to_string(),
+        path: "/archive".to_string(),
+        label: Some("Archive".to_string()),
+        current_size_bytes: 4096,
+        latest_job_kind: None,
+        latest_job_status: None,
+        latest_job_phase: None,
+    };
+    let summary = db::RootSummary {
+        file_count: 5,
+        content_count: 4,
+        hashed_file_count: 4,
+        sha256_file_count: 4,
+        crc32_file_count: 3,
+        chunk_hashed_file_count: 2,
+    };
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 120, 16));
+
+    DetailPane {
+        data: DetailData {
+            root: Some(&root),
+            temporary_browse: None,
+            persisted_browse_dir: Some("."),
+            summary: Some(&summary),
+            selection: None,
+            file: None,
+            content: None,
+            appearances: &[],
+            selected_paths: &selected_paths,
+            plan: None,
+            collection: None,
+            transfer_progress: None,
+            import_progress: None,
+        },
+    }
+    .render(buffer.area, &mut buffer);
+
+    let text = buffer
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+
+    assert!(text.contains("Files: 5 | Content IDs: 4 | Hashed: 4"));
+    assert!(text.contains("Integrity: sha256 4 | crc32 3 | chunks 2"));
+}
+
+#[test]
 fn detail_pane_renders_import_progress() {
     let selected_paths = BTreeSet::new();
     let progress = ImportProgress {

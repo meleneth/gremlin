@@ -26,15 +26,19 @@ impl Widget for DetailPane<'_> {
         } else {
             match (data.root, data.summary) {
             (Some(root), Some(summary)) => format!(
-                "Root: {}\nPath: {}\nBrowse: {}\nFiles: {} | Hashed: {} | Current: {} | Marked: {} ({})\nMachine: {} | Set: {}",
+                "Root: {}\nPath: {}\nBrowse: {}\nFiles: {} | Content IDs: {} | Hashed: {} | Current: {} | Marked: {} ({})\nIntegrity: sha256 {} | crc32 {} | chunks {}\nMachine: {} | Set: {}",
                 root_display_name(root),
                 root.path,
                 data.persisted_browse_dir.unwrap_or("."),
                 summary.file_count,
                 summary.content_count,
+                summary.hashed_file_count,
                 human_size(root.current_size_bytes as u64),
                 data.selection.map(|value| value.marked_count).unwrap_or(0),
                 human_size(data.selection.map(|value| value.marked_bytes).unwrap_or(0) as u64),
+                summary.sha256_file_count,
+                summary.crc32_file_count,
+                summary.chunk_hashed_file_count,
                 short_id(&root.machine_id),
                 data.selection
                     .map(|value| short_id(&value.set_id))

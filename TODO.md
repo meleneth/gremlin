@@ -24,7 +24,6 @@
 - Decide whether imported checksum collections can become verify baselines.
 - Add PAR2 parity repair/verification; file-list import exists.
 - Add richer changed reporting: size-only, mtime-only, hash mismatch.
-- Add a compact integrity summary per root.
 
 ## Data Model
 

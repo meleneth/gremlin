@@ -995,8 +995,17 @@ struct TargetStatusJson<'a> {
     files: i64,
     bytes: i64,
     content_objects: i64,
+    integrity: IntegrityStatusJson,
     latest_event: Option<&'a str>,
     latest_job: Option<JobStatusJson<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct IntegrityStatusJson {
+    hashed_files: i64,
+    sha256_files: i64,
+    crc32_files: i64,
+    chunk_hashed_files: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1034,6 +1043,12 @@ fn print_target_status(parsed: &ParsedTarget, status: db::TargetStatus, json: bo
             files: status.file_count,
             bytes: status.total_bytes,
             content_objects: status.content_count,
+            integrity: IntegrityStatusJson {
+                hashed_files: status.hashed_file_count,
+                sha256_files: status.sha256_file_count,
+                crc32_files: status.crc32_file_count,
+                chunk_hashed_files: status.chunk_hashed_file_count,
+            },
             latest_event,
             latest_job,
         };
@@ -1053,6 +1068,14 @@ fn print_target_status(parsed: &ParsedTarget, status: db::TargetStatus, json: bo
     println!("files:\t{}", status.file_count);
     println!("bytes:\t{}", status.total_bytes);
     println!("content_objects:\t{}", status.content_count);
+    println!(
+        "integrity:\thashed={}/{}\tsha256={}\tcrc32={}\tchunks={}",
+        status.hashed_file_count,
+        status.file_count,
+        status.sha256_file_count,
+        status.crc32_file_count,
+        status.chunk_hashed_file_count
+    );
     println!(
         "latest_event:\t{}",
         status.latest_event_at.unwrap_or_else(|| "-".to_string())

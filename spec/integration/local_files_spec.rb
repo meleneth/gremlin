@@ -83,6 +83,12 @@ RSpec.describe "Gremlin local file CLI integration" do
     status = gremlin_json!("status", fixture_root)
     expect(status.fetch("files")).to eq(3)
     expect(status.fetch("content_objects")).to eq(3)
+    expect(status.fetch("integrity")).to include(
+      "hashed_files" => 3,
+      "sha256_files" => 3,
+      "crc32_files" => 3,
+      "chunk_hashed_files" => 0
+    )
 
     rows = rows_by_path
     expect(rows.values.map { |row| row.fetch(:content_id) }).to all(match(/\Acontent_/))

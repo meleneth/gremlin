@@ -88,6 +88,10 @@ pub struct LocalFileCandidate<'a> {
 pub struct RootSummary {
     pub file_count: i64,
     pub content_count: i64,
+    pub hashed_file_count: i64,
+    pub sha256_file_count: i64,
+    pub crc32_file_count: i64,
+    pub chunk_hashed_file_count: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -353,6 +357,10 @@ pub struct TargetStatus {
     pub file_count: i64,
     pub total_bytes: i64,
     pub content_count: i64,
+    pub hashed_file_count: i64,
+    pub sha256_file_count: i64,
+    pub crc32_file_count: i64,
+    pub chunk_hashed_file_count: i64,
     pub latest_job: Option<JobRow>,
     pub latest_event_at: Option<String>,
 }
@@ -2744,10 +2752,56 @@ pub fn root_summary(conn: &Connection, root_id: &str) -> rusqlite::Result<RootSu
         params![root_id],
         |row| row.get(0),
     )?;
+    let evidence = root_integrity_summary(conn, root_id)?;
     Ok(RootSummary {
         file_count,
         content_count,
+        hashed_file_count: evidence.hashed_file_count,
+        sha256_file_count: evidence.sha256_file_count,
+        crc32_file_count: evidence.crc32_file_count,
+        chunk_hashed_file_count: evidence.chunk_hashed_file_count,
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RootIntegrityCounts {
+    hashed_file_count: i64,
+    sha256_file_count: i64,
+    crc32_file_count: i64,
+    chunk_hashed_file_count: i64,
+}
+
+fn root_integrity_summary(
+    conn: &Connection,
+    root_id: &str,
+) -> rusqlite::Result<RootIntegrityCounts> {
+    conn.query_row(
+        r#"
+        SELECT
+            SUM(CASE WHEN p.content_id IS NOT NULL THEN 1 ELSE 0 END),
+            SUM(CASE WHEN c.sha256 IS NOT NULL THEN 1 ELSE 0 END),
+            SUM(CASE WHEN c.crc32 IS NOT NULL THEN 1 ELSE 0 END),
+            SUM(CASE WHEN EXISTS (
+                SELECT 1
+                FROM path_observation_chunk_hashes h
+                WHERE h.path_observation_id = p.id
+                LIMIT 1
+            ) THEN 1 ELSE 0 END)
+        FROM path_observations p
+        LEFT JOIN content_objects c ON c.id = p.content_id
+        WHERE p.root_id = ?1
+          AND p.status = 'present'
+        "#,
+        params![root_id],
+        |row| {
+            Ok(RootIntegrityCounts {
+                hashed_file_count: row.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                sha256_file_count: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                crc32_file_count: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                chunk_hashed_file_count: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+            })
+        },
+    )
 }
 
 pub fn path_observations_for_root(
@@ -3257,6 +3311,7 @@ pub fn target_status(
         params![machine_id, root.id],
         |row| row.get(0),
     )?;
+    let evidence = root_integrity_summary(conn, &root.id)?;
     let latest_job = conn
         .query_row(
             r#"
@@ -3291,6 +3346,10 @@ pub fn target_status(
         file_count,
         total_bytes,
         content_count,
+        hashed_file_count: evidence.hashed_file_count,
+        sha256_file_count: evidence.sha256_file_count,
+        crc32_file_count: evidence.crc32_file_count,
+        chunk_hashed_file_count: evidence.chunk_hashed_file_count,
         latest_job,
         latest_event_at,
     }))

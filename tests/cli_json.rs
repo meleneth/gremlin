@@ -94,6 +94,10 @@ fn status_emits_json_for_known_and_unknown_targets() {
     assert_eq!(known["known"], true);
     assert_eq!(known["kind"], "local_path");
     assert_eq!(known["files"], 1);
+    assert_eq!(known["integrity"]["hashed_files"], 0);
+    assert_eq!(known["integrity"]["sha256_files"], 0);
+    assert_eq!(known["integrity"]["crc32_files"], 0);
+    assert_eq!(known["integrity"]["chunk_hashed_files"], 0);
     assert_eq!(known["latest_job"]["kind"], "scan");
 
     let unknown = command_json(&[
