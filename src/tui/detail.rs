@@ -355,7 +355,9 @@ fn active_execution_line(state: &AppState) -> Option<String> {
 fn active_job_progress_line(job: &db::JobEventRow) -> String {
     let phase = job.phase.as_deref().unwrap_or(&job.event_kind);
     let current = job.current_path.as_deref().unwrap_or("-");
-    let progress = if job.files_skipped > 0 || job.errors > 0 {
+    let progress = if let Some(byte_progress) = byte_progress_summary(&job.payload_json) {
+        byte_progress
+    } else if job.files_skipped > 0 || job.errors > 0 {
         format!(
             "{} done | {} seen | {} skipped | {} errors",
             job.files_done, job.files_seen, job.files_skipped, job.errors

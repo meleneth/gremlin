@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use rusqlite::Connection;
@@ -194,6 +195,9 @@ struct JobProgress {
     files_skipped: u64,
     bytes_done: u64,
     bytes_total: u64,
+    file_bytes_done: u64,
+    file_bytes_total: u64,
+    bytes_per_second: Option<f64>,
     errors: u64,
 }
 
@@ -208,6 +212,9 @@ impl JobProgress {
             files_skipped: 0,
             bytes_done: 0,
             bytes_total: 0,
+            file_bytes_done: 0,
+            file_bytes_total: 0,
+            bytes_per_second: None,
             errors: 0,
         }
     }
@@ -928,7 +935,11 @@ fn run_hash_job(ctx: RootJobContext<'_>, hash_all: bool) -> anyhow::Result<HashS
                     persist_progress(conn, job_id, &mut sequence, &progress, None)?;
                     continue;
                 }
+                let completed_bytes_before_file = progress.bytes_done;
                 progress.bytes_total = progress.bytes_total.saturating_add(meta.size_bytes);
+                progress.file_bytes_done = 0;
+                progress.file_bytes_total = meta.size_bytes;
+                progress.bytes_per_second = None;
                 progress.phase = "processing";
                 persist_progress(conn, job_id, &mut sequence, &progress, None)?;
                 persist_db_event(
@@ -940,14 +951,45 @@ fn run_hash_job(ctx: RootJobContext<'_>, hash_all: bool) -> anyhow::Result<HashS
                         relative_path: meta.relative_path.clone(),
                     },
                 )?;
-                match hash_file(root_path, path) {
+                let started_at = Instant::now();
+                let mut file_bytes_done = 0_u64;
+                let mut last_progress_at = Instant::now();
+                let mut last_progress_bytes = 0_u64;
+                match hash_file_with_progress(root_path, path, |bytes_read| {
+                    file_bytes_done = file_bytes_done.saturating_add(bytes_read);
+                    let elapsed = started_at.elapsed();
+                    let should_emit = file_bytes_done == meta.size_bytes
+                        || last_progress_at.elapsed() >= Duration::from_millis(250)
+                        || file_bytes_done.saturating_sub(last_progress_bytes) >= 64 * 1024 * 1024;
+                    if !should_emit {
+                        return Ok(());
+                    }
+                    progress.file_bytes_done = file_bytes_done;
+                    progress.bytes_done =
+                        completed_bytes_before_file.saturating_add(file_bytes_done);
+                    progress.bytes_per_second = (elapsed.as_secs_f64() > 0.0)
+                        .then_some(file_bytes_done as f64 / elapsed.as_secs_f64());
+                    persist_progress(
+                        conn,
+                        job_id,
+                        &mut sequence,
+                        &progress,
+                        Some("hashing file".to_string()),
+                    )?;
+                    last_progress_at = Instant::now();
+                    last_progress_bytes = file_bytes_done;
+                    Ok(())
+                }) {
                     Ok(result) => {
                         accept_hash_result(conn, machine_id, root_id, &result)?;
                         persist_hash_completed(conn, job_id, &mut sequence, &result)?;
                         hashed_paths.push(result.relative_path);
                         files_hashed += 1;
                         progress.files_done = files_hashed;
-                        progress.bytes_done = progress.bytes_done.saturating_add(result.size_bytes);
+                        progress.file_bytes_done = result.size_bytes;
+                        progress.file_bytes_total = result.size_bytes;
+                        progress.bytes_done =
+                            completed_bytes_before_file.saturating_add(result.size_bytes);
                         persist_progress(conn, job_id, &mut sequence, &progress, None)?;
                     }
                     Err(err) => {
@@ -967,6 +1009,9 @@ fn run_hash_job(ctx: RootJobContext<'_>, hash_all: bool) -> anyhow::Result<HashS
                         persist_progress(conn, job_id, &mut sequence, &progress, None)?;
                     }
                 }
+                progress.file_bytes_done = 0;
+                progress.file_bytes_total = 0;
+                progress.bytes_per_second = None;
                 progress.phase = "walking";
             }
             Ok(_) => {}
@@ -1430,6 +1475,14 @@ pub fn worker_hash_jsonl(path: &Path, out: Option<&Path>) -> anyhow::Result<()> 
 }
 
 pub fn hash_file(root: &Path, path: &Path) -> anyhow::Result<HashResult> {
+    hash_file_with_progress(root, path, |_| Ok(()))
+}
+
+fn hash_file_with_progress(
+    root: &Path,
+    path: &Path,
+    mut on_progress: impl FnMut(u64) -> anyhow::Result<()>,
+) -> anyhow::Result<HashResult> {
     let meta = file_meta(root, path)?;
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut reader = BufReader::new(file);
@@ -1448,6 +1501,7 @@ pub fn hash_file(root: &Path, path: &Path) -> anyhow::Result<HashResult> {
         blake3_hasher.update(&buf[..read]);
         sha256_hasher.update(&buf[..read]);
         crc32_hasher.update(&buf[..read]);
+        on_progress(read as u64)?;
     }
 
     Ok(HashResult {
@@ -1899,9 +1953,9 @@ fn persist_progress(
             errors: progress.errors,
             bytes_done: (progress.bytes_total > 0).then_some(progress.bytes_done),
             bytes_total: (progress.bytes_total > 0).then_some(progress.bytes_total),
-            file_bytes_done: None,
-            file_bytes_total: None,
-            bytes_per_second: None,
+            file_bytes_done: (progress.file_bytes_total > 0).then_some(progress.file_bytes_done),
+            file_bytes_total: (progress.file_bytes_total > 0).then_some(progress.file_bytes_total),
+            bytes_per_second: progress.bytes_per_second,
             message,
             chunk_confidence: None,
         },
@@ -2560,6 +2614,9 @@ mod tests {
             })
             .unwrap();
         assert_eq!(first_progress["bytes_done"], 5);
+        assert_eq!(first_progress["file_bytes_done"], 5);
+        assert_eq!(first_progress["file_bytes_total"], 5);
+        assert!(first_progress["bytes_per_second"].as_f64().unwrap() > 0.0);
         assert_eq!(first_progress["files_skipped"], 0);
         let second = hash_to_db(
             &conn,

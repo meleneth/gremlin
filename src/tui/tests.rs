@@ -1780,6 +1780,61 @@ fn info_bar_renders_selected_running_job_progress() {
 }
 
 #[test]
+fn info_bar_renders_hash_byte_progress_bar() {
+    let state = AppState::default();
+    let job = db::JobEventRow {
+        job_id: "job_hash_1".to_string(),
+        job_kind: "hash".to_string(),
+        root_id: Some("root_1".to_string()),
+        status: "running".to_string(),
+        phase: Some("processing".to_string()),
+        current_path: Some("photos/big-file.bin".to_string()),
+        files_seen: 1,
+        files_done: 0,
+        files_skipped: 0,
+        errors: 0,
+        cancel_requested: false,
+        sequence: 9,
+        event_kind: "job_progress".to_string(),
+        payload_json: serde_json::json!({
+            "type": "job_progress",
+            "bytes_done": 128,
+            "bytes_total": 256,
+            "file_bytes_done": 128,
+            "file_bytes_total": 256,
+            "bytes_per_second": 1048576.0
+        })
+        .to_string(),
+        params_json: None,
+    };
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 150, 6));
+
+    InfoBar {
+        data: InfoBarData {
+            root_name: Some("root".to_string()),
+            file: None,
+            selection: None,
+            event: Some(&job),
+            root_count: 1,
+            transfer_progress: None,
+            import_progress: None,
+        },
+        state: &state,
+    }
+    .render(buffer.area, &mut buffer);
+
+    let text = buffer
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+
+    assert!(text.contains("Job: hash processing"));
+    assert!(text.contains("50%"));
+    assert!(text.contains("@ 1.0 MiB/s"));
+}
+
+#[test]
 fn finds_latest_transfer_progress_event() {
     let complete = db::JobEventRow {
         job_id: "job_1".to_string(),
