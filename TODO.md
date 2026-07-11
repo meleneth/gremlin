@@ -3,7 +3,6 @@
 ## Try-it-now UX
 
 - Make default command output calmer and more polished after repeated scans.
-- Add a command to preview hash candidates before running incremental hashing.
 - Add clearer first-run messaging around the default XDG database path.
 - Make the default `gremlin TARGET` flow explain what it knows, what it checked, and what actions are available next.
 

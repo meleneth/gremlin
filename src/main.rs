@@ -110,6 +110,11 @@ async fn main() -> anyhow::Result<()> {
             let conn = db::open_existing(&db)?;
             fswork::hash_to_db(&conn, &path, &db, machine_label.as_deref(), all, output)?;
         }
+        Some(Commands::HashPreview { path, all }) => {
+            let db = config_ctx.resolve_db_or_default(cli.db.clone())?;
+            let conn = db::open_existing(&db)?;
+            fswork::hash_preview(&conn, &path, &db, all, output)?;
+        }
         Some(Commands::ChunkHash {
             target,
             kind,

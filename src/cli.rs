@@ -44,6 +44,11 @@ pub enum Commands {
         #[arg(long)]
         all: bool,
     },
+    HashPreview {
+        path: PathBuf,
+        #[arg(long)]
+        all: bool,
+    },
     ChunkHash {
         target: String,
         #[arg(long, value_enum)]

@@ -61,6 +61,15 @@ RSpec.describe "Gremlin local file CLI integration" do
     build_fixture_tree
     gremlin!("init")
 
+    preview = gremlin_json!("hash-preview", fixture_root)
+    expect(preview.fetch("candidates")).to eq(3)
+    expect(preview.fetch("skipped_unchanged")).to eq(0)
+    expect(preview.fetch("candidate_files").map { |row| row.fetch("relative_path") }).to contain_exactly(
+      "alpha/nested/two.bin",
+      "alpha/one.txt",
+      "root.txt"
+    )
+
     hash = gremlin_json!("hash", fixture_root, "--all")
     expect(hash.fetch("files_hashed")).to eq(3)
     expect(hash.fetch("skipped_unchanged")).to eq(0)
@@ -82,6 +91,10 @@ RSpec.describe "Gremlin local file CLI integration" do
     expect(unchanged.fetch("files_hashed")).to eq(0)
     expect(unchanged.fetch("skipped_unchanged")).to eq(3)
     expect(unchanged.fetch("errors")).to eq(0)
+
+    clean_preview = gremlin_json!("hash-preview", fixture_root)
+    expect(clean_preview.fetch("candidates")).to eq(0)
+    expect(clean_preview.fetch("skipped_unchanged")).to eq(3)
   end
 
   it "detects new, missing, content-changed, and mtime-only metadata changes" do

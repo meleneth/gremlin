@@ -80,6 +80,7 @@ gremlin db delete --yes --db ./gremlin.db
 gremlin config init --default-db ./gremlin.db --machine-label workstation
 
 gremlin scan PATH --db ./gremlin.db
+gremlin hash-preview PATH --db ./gremlin.db
 gremlin hash PATH --db ./gremlin.db
 gremlin hash PATH --all --db ./gremlin.db
 gremlin chunk-hash PATH --chunk-size-mib 64 --db ./gremlin.db
@@ -167,6 +168,8 @@ gremlin --machine-label laptop scan ~/archive
 `scan` walks a directory tree and records stat-level path observations. It reports new, changed, and missing paths. Missing paths are report-only in v0; no deletion or missing projection is performed.
 
 Roots maintain `current_size_bytes`, the projected total size of currently indexed `present` file observations for that root.
+
+`hash-preview` walks the tree and reports the files that incremental `hash` would read, without updating observations or content objects. Candidate reasons include `new`, `missing_hash`, `size_changed`, `mtime_changed`, `metadata_changed`, and `forced` when `--all` is used.
 
 `hash` walks a directory tree, computes BLAKE3, SHA-256, and SFV-compatible CRC32 for files that look new or changed from stat data, stores content objects, updates path observations, and persists hash events. CRC32 is additive evidence: existing BLAKE3/SHA-256 content identity remains usable when CRC32 is missing, and later CRC32 collection attaches to the existing content row instead of blocking normal scan, verify, plan, or copy flows. Use `--all` to hash every regular file.
 

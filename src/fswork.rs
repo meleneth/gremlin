@@ -86,6 +86,25 @@ pub struct HashSummary {
     pub hashed_paths: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct HashPreviewSummary {
+    pub root_known: bool,
+    pub files_seen: u64,
+    pub candidates: u64,
+    pub skipped_unchanged: u64,
+    pub errors: u64,
+    pub bytes_to_hash: u64,
+    pub candidate_files: Vec<HashPreviewCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HashPreviewCandidate {
+    pub relative_path: String,
+    pub size_bytes: u64,
+    pub modified_at: Option<String>,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ChunkHashSummary {
     pub job_id: String,
@@ -290,6 +309,68 @@ pub fn hash_to_db(
         hash_all,
     )?;
     print_hash_summary(&summary, options);
+    Ok(summary)
+}
+
+pub fn hash_preview(
+    conn: &Connection,
+    path: &Path,
+    db_path: &Path,
+    hash_all: bool,
+    options: OutputOptions,
+) -> anyhow::Result<HashPreviewSummary> {
+    db::init_schema(conn)?;
+    let root_path = absolute_path(path).with_context(|| format!("resolving {}", path.display()))?;
+    let skip_paths = db_sidecar_paths(db_path)?;
+    let machine_id = crate::util::local_machine_id();
+    let root = db::find_root_by_machine_path(conn, &machine_id, &lossy(&root_path))?;
+    let previous = match root.as_ref() {
+        Some(root) => previous_observations(conn, &machine_id, &root.id)?,
+        None => BTreeMap::new(),
+    };
+    let mut summary = HashPreviewSummary {
+        root_known: root.is_some(),
+        ..HashPreviewSummary::default()
+    };
+
+    for entry in WalkDir::new(&root_path) {
+        match entry {
+            Ok(entry) if entry.file_type().is_file() => {
+                let file_path = entry.path();
+                if should_skip(file_path, &skip_paths) {
+                    continue;
+                }
+                match file_meta(&root_path, file_path) {
+                    Ok(meta) => {
+                        summary.files_seen += 1;
+                        let reason = if hash_all {
+                            Some("forced".to_string())
+                        } else {
+                            hash_candidate_reason(&meta, previous.get(&meta.relative_path))
+                        };
+                        if let Some(reason) = reason {
+                            summary.candidates += 1;
+                            summary.bytes_to_hash =
+                                summary.bytes_to_hash.saturating_add(meta.size_bytes);
+                            summary.candidate_files.push(HashPreviewCandidate {
+                                relative_path: meta.relative_path,
+                                size_bytes: meta.size_bytes,
+                                modified_at: meta.modified_at,
+                                reason,
+                            });
+                        } else {
+                            summary.skipped_unchanged += 1;
+                        }
+                    }
+                    Err(_) => summary.errors += 1,
+                }
+            }
+            Ok(_) => {}
+            Err(_) => summary.errors += 1,
+        }
+    }
+
+    print_hash_preview_summary(&summary, options);
     Ok(summary)
 }
 
@@ -1493,13 +1574,26 @@ fn classify_scan_delta(meta: &FileMeta, previous: Option<&db::PathObservationRow
 }
 
 fn needs_hash(meta: &FileMeta, previous: Option<&db::PathObservationRow>) -> bool {
-    match previous {
-        None => true,
-        Some(previous) => {
-            previous.content_id.is_none()
-                || previous.size_bytes != meta.size_bytes
-                || previous.modified_at != meta.modified_at
-        }
+    hash_candidate_reason(meta, previous).is_some()
+}
+
+fn hash_candidate_reason(
+    meta: &FileMeta,
+    previous: Option<&db::PathObservationRow>,
+) -> Option<String> {
+    let Some(previous) = previous else {
+        return Some("new".to_string());
+    };
+    if previous.content_id.is_none() {
+        return Some("missing_hash".to_string());
+    }
+    let size_changed = previous.size_bytes != meta.size_bytes;
+    let mtime_changed = previous.modified_at != meta.modified_at;
+    match (size_changed, mtime_changed) {
+        (true, true) => Some("metadata_changed".to_string()),
+        (true, false) => Some("size_changed".to_string()),
+        (false, true) => Some("mtime_changed".to_string()),
+        (false, false) => None,
     }
 }
 
@@ -1959,6 +2053,40 @@ fn print_hash_summary(summary: &HashSummary, options: OutputOptions) {
     };
     for path in summary.hashed_paths.iter().take(limit) {
         println!("hashed\t{path}");
+    }
+}
+
+fn print_hash_preview_summary(summary: &HashPreviewSummary, options: OutputOptions) {
+    if options.quiet {
+        return;
+    }
+    if options.json {
+        print_json_summary(summary);
+        return;
+    }
+    println!(
+        "hash preview: {} candidates, {} skipped unchanged, {} files seen, {}, {} errors",
+        summary.candidates,
+        summary.skipped_unchanged,
+        summary.files_seen,
+        crate::util::human_size(summary.bytes_to_hash),
+        summary.errors
+    );
+    if !summary.root_known {
+        println!("root:\tunknown; all files are candidates until this root is hashed");
+    }
+    let limit = if options.details {
+        summary.candidate_files.len()
+    } else {
+        options.limit
+    };
+    for candidate in summary.candidate_files.iter().take(limit) {
+        println!(
+            "candidate\t{}\t{}\t{}",
+            candidate.reason,
+            crate::util::human_size(candidate.size_bytes),
+            candidate.relative_path
+        );
     }
 }
 
@@ -2456,6 +2584,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(changed.files_hashed, 1);
+    }
+
+    #[test]
+    fn hash_preview_reports_incremental_candidates_without_mutating_observations() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("hello.txt");
+        std::fs::write(&file, b"hello").unwrap();
+        let db_path = dir.path().join("gremlin.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+        db::init_schema(&conn).unwrap();
+
+        let first =
+            hash_preview(&conn, dir.path(), &db_path, false, OutputOptions::default()).unwrap();
+        assert!(!first.root_known);
+        assert_eq!(first.candidates, 1);
+        assert_eq!(first.candidate_files[0].reason, "new");
+        assert_eq!(db::table_count(&conn, "path_observations").unwrap(), 0);
+
+        hash_to_db(
+            &conn,
+            dir.path(),
+            &db_path,
+            None,
+            false,
+            OutputOptions::default(),
+        )
+        .unwrap();
+
+        let unchanged =
+            hash_preview(&conn, dir.path(), &db_path, false, OutputOptions::default()).unwrap();
+        assert!(unchanged.root_known);
+        assert_eq!(unchanged.candidates, 0);
+        assert_eq!(unchanged.skipped_unchanged, 1);
+
+        std::fs::write(&file, b"changed").unwrap();
+        let changed =
+            hash_preview(&conn, dir.path(), &db_path, false, OutputOptions::default()).unwrap();
+        assert_eq!(changed.candidates, 1);
+        assert!(matches!(
+            changed.candidate_files[0].reason.as_str(),
+            "size_changed" | "metadata_changed"
+        ));
     }
 
     #[test]
