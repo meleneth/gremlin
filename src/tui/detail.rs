@@ -301,7 +301,7 @@ impl Widget for InfoBar<'_> {
             }
             lines.push(Line::from(import_current_execution_line(progress)));
         }
-        if let Some(job) = self.data.event.filter(|job| job.status == "running") {
+        if let Some(job) = self.data.active_event.filter(|job| job.status == "running") {
             lines.push(Line::from(active_job_progress_line(job)));
         }
         let mut activity_lines = self

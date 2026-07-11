@@ -76,6 +76,7 @@ pub(super) async fn run_loop(
                 detail_content: None,
                 file_appearances: &[],
                 events: &loading_events,
+                active_event: None,
                 root_count: visible_root_count(&state, 0),
                 transfer_progress: None,
                 import_progress: state.active_import_progress.as_ref(),
@@ -278,6 +279,7 @@ pub(super) async fn run_loop(
         };
         let all_job_rows = job_rows(&events);
         let job_rows = filtered_job_rows(&all_job_rows, &state.event_filter);
+        let active_event = active_job_row(&all_job_rows);
         if state.event_offset >= job_rows.len() {
             state.event_offset = job_rows.len().saturating_sub(1);
         }
@@ -356,6 +358,7 @@ pub(super) async fn run_loop(
                     detail_content: detail_content.as_ref(),
                     file_appearances: &state.file_appearances,
                     events: &job_rows,
+                    active_event,
                     root_count,
                     transfer_progress,
                     import_progress: state.active_import_progress.as_ref(),
@@ -918,6 +921,13 @@ pub(super) fn refresh_current_file_listing(
             "indexed file views refresh from the database automatically; use s to rescan files",
         );
     }
+}
+
+pub(super) fn active_job_row(events: &[db::JobEventRow]) -> Option<&db::JobEventRow> {
+    events
+        .iter()
+        .find(|row| row.status == "running" && row.event_kind == "job_progress")
+        .or_else(|| events.iter().find(|row| row.status == "running"))
 }
 
 fn start_temporary_browse_load(

@@ -576,6 +576,7 @@ struct InfoBarData<'a> {
     file: Option<&'a FileViewRow>,
     selection: Option<&'a db::SelectionSummary>,
     event: Option<&'a db::JobEventRow>,
+    active_event: Option<&'a db::JobEventRow>,
     root_count: usize,
     transfer_progress: Option<TransferProgressSnapshot>,
     import_progress: Option<&'a ImportProgress>,

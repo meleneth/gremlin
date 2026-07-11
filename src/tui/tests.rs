@@ -1,4 +1,5 @@
 use super::*;
+use crate::tui::app::active_job_row;
 
 fn current_dir_lock() -> std::sync::MutexGuard<'static, ()> {
     static CURRENT_DIR_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -1661,6 +1662,7 @@ fn info_bar_renders_active_transfer_progress() {
             file: None,
             selection: None,
             event: None,
+            active_event: None,
             root_count: 1,
             transfer_progress: Some(progress),
             import_progress: None,
@@ -1708,6 +1710,7 @@ fn info_bar_renders_active_import_operation() {
             file: None,
             selection: None,
             event: None,
+            active_event: None,
             root_count: 1,
             transfer_progress: None,
             import_progress: Some(&progress),
@@ -1760,6 +1763,7 @@ fn info_bar_renders_selected_running_job_progress() {
             file: None,
             selection: None,
             event: Some(&job),
+            active_event: Some(&job),
             root_count: 1,
             transfer_progress: None,
             import_progress: None,
@@ -1815,6 +1819,7 @@ fn info_bar_renders_hash_byte_progress_bar() {
             file: None,
             selection: None,
             event: Some(&job),
+            active_event: Some(&job),
             root_count: 1,
             transfer_progress: None,
             import_progress: None,
@@ -1832,6 +1837,81 @@ fn info_bar_renders_hash_byte_progress_bar() {
     assert!(text.contains("Job: hash processing"));
     assert!(text.contains("50%"));
     assert!(text.contains("@ 1.0 MiB/s"));
+}
+
+#[test]
+fn info_bar_renders_active_job_progress_when_selected_event_is_stale() {
+    let state = AppState::default();
+    let selected = db::JobEventRow {
+        job_id: "job_scan_old".to_string(),
+        job_kind: "scan".to_string(),
+        root_id: Some("root_1".to_string()),
+        status: "completed".to_string(),
+        phase: Some("finalizing".to_string()),
+        current_path: None,
+        files_seen: 10,
+        files_done: 10,
+        files_skipped: 0,
+        errors: 0,
+        cancel_requested: false,
+        sequence: 3,
+        event_kind: "job_completed".to_string(),
+        payload_json: "{}".to_string(),
+        params_json: None,
+    };
+    let active = db::JobEventRow {
+        job_id: "job_hash_active".to_string(),
+        job_kind: "hash".to_string(),
+        root_id: Some("root_1".to_string()),
+        status: "running".to_string(),
+        phase: Some("processing".to_string()),
+        current_path: Some("photos/current.bin".to_string()),
+        files_seen: 1,
+        files_done: 0,
+        files_skipped: 0,
+        errors: 0,
+        cancel_requested: false,
+        sequence: 9,
+        event_kind: "job_progress".to_string(),
+        payload_json: serde_json::json!({
+            "type": "job_progress",
+            "bytes_done": 64,
+            "bytes_total": 256,
+            "file_bytes_done": 64,
+            "file_bytes_total": 256,
+            "bytes_per_second": 2097152.0
+        })
+        .to_string(),
+        params_json: None,
+    };
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 150, 6));
+
+    InfoBar {
+        data: InfoBarData {
+            root_name: Some("root".to_string()),
+            file: None,
+            selection: None,
+            event: Some(&selected),
+            active_event: Some(&active),
+            root_count: 1,
+            transfer_progress: None,
+            import_progress: None,
+        },
+        state: &state,
+    }
+    .render(buffer.area, &mut buffer);
+
+    let text = buffer
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+
+    assert!(text.contains("completed"));
+    assert!(text.contains("Job: hash processing"));
+    assert!(text.contains("25%"));
+    assert!(text.contains("@ 2.0 MiB/s"));
+    assert!(text.contains("photos/current.bin"));
 }
 
 #[test]
@@ -1913,6 +1993,47 @@ fn job_rows_keep_one_latest_row_per_job() {
     assert_eq!(rows[0].job_id, "job_1");
     assert_eq!(rows[0].current_path.as_deref(), Some("b.bin"));
     assert_eq!(rows[1].job_id, "job_2");
+}
+
+#[test]
+fn active_job_row_prefers_running_progress_event() {
+    let progress = db::JobEventRow {
+        job_id: "job_hash_active".to_string(),
+        job_kind: "hash".to_string(),
+        root_id: None,
+        status: "running".to_string(),
+        phase: Some("processing".to_string()),
+        current_path: Some("current.bin".to_string()),
+        files_seen: 2,
+        files_done: 1,
+        files_skipped: 0,
+        errors: 0,
+        cancel_requested: false,
+        sequence: 3,
+        event_kind: "job_progress".to_string(),
+        payload_json: "{}".to_string(),
+        params_json: None,
+    };
+    let running_start = db::JobEventRow {
+        job_id: "job_scan_active".to_string(),
+        job_kind: "scan".to_string(),
+        sequence: 4,
+        event_kind: "job_started".to_string(),
+        ..progress.clone()
+    };
+    let complete = db::JobEventRow {
+        job_id: "job_scan_old".to_string(),
+        status: "completed".to_string(),
+        sequence: 5,
+        event_kind: "job_completed".to_string(),
+        ..progress.clone()
+    };
+
+    let rows = [complete, running_start, progress];
+    let found = active_job_row(&rows).unwrap();
+
+    assert_eq!(found.job_id, "job_hash_active");
+    assert_eq!(found.event_kind, "job_progress");
 }
 
 #[test]
@@ -2320,6 +2441,7 @@ fn app_screen_renders_plan_as_modal_when_plan_focus_is_active() {
         detail_content: None,
         file_appearances: &[],
         events: &[],
+        active_event: None,
         root_count: 0,
         transfer_progress: None,
         import_progress: None,
@@ -2603,6 +2725,7 @@ fn app_screen_renders_empty_state_widgets() {
         detail_content: None,
         file_appearances: &[],
         events: &[],
+        active_event: None,
         root_count: 0,
         transfer_progress: None,
         import_progress: None,
@@ -2656,6 +2779,7 @@ fn app_screen_renders_import_progress_in_empty_file_pane() {
         detail_content: None,
         file_appearances: &[],
         events: &[],
+        active_event: None,
         root_count: 0,
         transfer_progress: None,
         import_progress: state.active_import_progress.as_ref(),
@@ -2697,6 +2821,7 @@ fn app_screen_renders_open_root_modal() {
         detail_content: None,
         file_appearances: &[],
         events: &[],
+        active_event: None,
         root_count: 0,
         transfer_progress: None,
         import_progress: None,
@@ -2737,6 +2862,7 @@ fn app_screen_renders_import_decision_modal() {
         detail_content: None,
         file_appearances: &[],
         events: &[],
+        active_event: None,
         root_count: 0,
         transfer_progress: None,
         import_progress: None,
@@ -2781,6 +2907,7 @@ fn app_screen_renders_transfer_destination_modal_with_source_context() {
         detail_content: None,
         file_appearances: &[],
         events: &[],
+        active_event: None,
         root_count: 0,
         transfer_progress: None,
         import_progress: None,
