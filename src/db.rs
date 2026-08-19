@@ -732,6 +732,15 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         "#,
         [],
     )?;
+    conn.execute_batch(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_path_observations_content
+            ON path_observations(content_id)
+            WHERE content_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_path_observations_stat_identity
+            ON path_observations(basename, size_bytes, modified_at);
+        "#,
+    )?;
     Ok(())
 }
 
@@ -1928,7 +1937,7 @@ pub fn selected_file_entries_for_root(
                     FROM path_observations x
                     WHERE x.basename = p.basename
                       AND x.size_bytes = p.size_bytes
-                      AND (x.modified_at = p.modified_at OR (x.modified_at IS NULL AND p.modified_at IS NULL))
+                      AND x.modified_at IS p.modified_at
                 )
                 ELSE NULL
             END AS occurrence_count
@@ -2697,7 +2706,7 @@ fn cached_child_files(
                         FROM path_observations x
                         WHERE x.basename = p.basename
                           AND x.size_bytes = p.size_bytes
-                          AND (x.modified_at = p.modified_at OR (x.modified_at IS NULL AND p.modified_at IS NULL))
+                          AND x.modified_at IS p.modified_at
                     )
                 END AS occurrence_count
             FROM path_observations p
@@ -2735,7 +2744,7 @@ fn cached_child_files(
                     FROM path_observations x
                     WHERE x.basename = p.basename
                       AND x.size_bytes = p.size_bytes
-                      AND (x.modified_at = p.modified_at OR (x.modified_at IS NULL AND p.modified_at IS NULL))
+                      AND x.modified_at IS p.modified_at
                 )
             END AS occurrence_count
         FROM path_observations p
@@ -3578,6 +3587,8 @@ mod tests {
                     'idx_job_events_recent',
                     'idx_job_events_job_recent',
                     'idx_jobs_root_recent',
+                    'idx_path_observations_content',
+                    'idx_path_observations_stat_identity',
                     'idx_transfer_plans_status_created',
                     'idx_transfer_plans_roots'
                   )
@@ -3596,10 +3607,56 @@ mod tests {
                 "idx_job_events_job_recent",
                 "idx_job_events_recent",
                 "idx_jobs_root_recent",
+                "idx_path_observations_content",
+                "idx_path_observations_stat_identity",
                 "idx_transfer_plans_roots",
                 "idx_transfer_plans_status_created"
             ]
         );
+    }
+
+    #[test]
+    fn appearance_count_lookups_use_indexes() {
+        let conn = Connection::open_in_memory().unwrap();
+        configure(&conn).unwrap();
+        init_schema(&conn).unwrap();
+
+        let plan = conn
+            .prepare(
+                r#"
+                EXPLAIN QUERY PLAN
+                SELECT
+                    CASE
+                        WHEN p.content_id IS NOT NULL THEN (
+                            SELECT COUNT(*)
+                            FROM path_observations x
+                            WHERE x.content_id = p.content_id
+                        )
+                        ELSE (
+                            SELECT COUNT(*)
+                            FROM path_observations x
+                            WHERE x.basename = p.basename
+                              AND x.size_bytes = p.size_bytes
+                              AND x.modified_at IS p.modified_at
+                        )
+                    END
+                FROM path_observations p
+                WHERE p.root_id = ?1
+                "#,
+            )
+            .unwrap()
+            .query_map(params!["root_test"], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join("\n");
+
+        assert!(plan.contains("idx_path_observations_content"), "{plan}");
+        assert!(
+            plan.contains("idx_path_observations_stat_identity"),
+            "{plan}"
+        );
+        assert!(!plan.contains("SCAN x"), "{plan}");
     }
 
     #[test]
