@@ -144,6 +144,22 @@ $XDG_CONFIG_HOME/gremlin/config.json
 ~/.config/gremlin/config.json
 ```
 
+Structured diagnostic logs are written as daily JSONL files under
+`$XDG_STATE_HOME/gremlin` or `~/.local/state/gremlin`. Set `GREMLIN_LOG_DIR`
+to choose another directory and `RUST_LOG` to control verbosity (the default is
+`gremlin=info`; use `RUST_LOG=gremlin=debug` for all operation timings). Slow
+TUI, database, and SSH operations are logged at warning level with elapsed time,
+so the default log captures input stalls without writing a line for every fast
+refresh.
+If the log directory cannot be created, Gremlin prints a warning and continues;
+diagnostics must never prevent file work or database access.
+
+For example, follow the current log with:
+
+```bash
+tail -f ~/.local/state/gremlin/gremlin.jsonl.*
+```
+
 Example config:
 
 ```json

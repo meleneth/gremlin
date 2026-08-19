@@ -424,7 +424,34 @@ fn configure(conn: &Connection) -> rusqlite::Result<()> {
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+    conn.trace_v2(
+        rusqlite::trace::TraceEventCodes::SQLITE_TRACE_PROFILE,
+        Some(trace_slow_sql),
+    );
     Ok(())
+}
+
+fn trace_slow_sql(event: rusqlite::trace::TraceEvent<'_>) {
+    let rusqlite::trace::TraceEvent::Profile(statement, elapsed) = event else {
+        return;
+    };
+    if elapsed < std::time::Duration::from_millis(100) {
+        return;
+    }
+    let sql = statement
+        .expanded_sql()
+        .unwrap_or_else(|| statement.sql().into_owned());
+    let sql = if sql.len() > 4_000 {
+        format!("{}...", &sql[..sql.floor_char_boundary(4_000)])
+    } else {
+        sql
+    };
+    tracing::warn!(
+        operation = "sqlite.statement",
+        elapsed_ms = elapsed.as_secs_f64() * 1_000.0,
+        sql,
+        "slow sqlite statement"
+    );
 }
 
 pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
@@ -2557,6 +2584,10 @@ fn cached_child_directories(
     root_id: &str,
     parent: &str,
 ) -> rusqlite::Result<Vec<CachedDirectoryEntry>> {
+    let timer = crate::diagnostics::OperationTimer::start(
+        "db.cached_child_directories",
+        std::time::Duration::from_millis(100),
+    );
     if parent == "." {
         let mut stmt = conn.prepare(
             r#"
@@ -2585,7 +2616,9 @@ fn cached_child_directories(
                 status: None,
             })
         })?;
-        return rows.collect();
+        let result = rows.collect();
+        timer.finish();
+        return result;
     }
 
     let prefix = format!("{parent}/");
@@ -2629,7 +2662,9 @@ fn cached_child_directories(
             status: None,
         })
     })?;
-    rows.collect()
+    let result = rows.collect();
+    timer.finish();
+    result
 }
 
 fn cached_child_files(
@@ -2637,6 +2672,10 @@ fn cached_child_files(
     root_id: &str,
     parent: &str,
 ) -> rusqlite::Result<Vec<CachedDirectoryEntry>> {
+    let timer = crate::diagnostics::OperationTimer::start(
+        "db.cached_child_files",
+        std::time::Duration::from_millis(100),
+    );
     if parent == "." {
         let mut stmt = conn.prepare(
             r#"
@@ -2668,7 +2707,9 @@ fn cached_child_files(
             "#,
         )?;
         let rows = stmt.query_map(params![root_id], cached_file_entry_from_row)?;
-        return rows.collect();
+        let result = rows.collect();
+        timer.finish();
+        return result;
     }
 
     let prefix = format!("{parent}/");
@@ -2709,7 +2750,9 @@ fn cached_child_files(
         params![root_id, like, start as i64],
         cached_file_entry_from_row,
     )?;
-    rows.collect()
+    let result = rows.collect();
+    timer.finish();
+    result
 }
 
 fn cached_file_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CachedDirectoryEntry> {

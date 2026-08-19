@@ -3,6 +3,7 @@ mod collections;
 mod config;
 mod crc32;
 mod db;
+mod diagnostics;
 mod error;
 mod events;
 mod fswork;
@@ -36,6 +37,21 @@ use targets::{ParsedTarget, TargetKind};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let _diagnostics_guard = match diagnostics::init() {
+        Ok((guard, log_directory)) => {
+            tracing::info!(
+                version = env!("CARGO_PKG_VERSION"),
+                pid = std::process::id(),
+                log_directory = %log_directory.display(),
+                "gremlin started"
+            );
+            Some(guard)
+        }
+        Err(err) => {
+            eprintln!("warning: diagnostics disabled: {err}");
+            None
+        }
+    };
     let config_ctx = config::load(cli.config.clone(), cli.no_config)?;
     let machine_label = config_ctx.machine_label(cli.machine_label.clone());
     let output = fswork::OutputOptions {
@@ -1287,6 +1303,8 @@ fn import_ssh_root(
     mode: tui::ImportMode,
     progress: tui::ImportProgressCallback,
 ) -> anyhow::Result<tui::ImportResult> {
+    let import_timer =
+        diagnostics::OperationTimer::start("ssh.import_root", Duration::from_secs(1));
     let conn = db::open_existing(db_path)?;
     db::init_schema(&conn)?;
     let host = parsed
@@ -1326,12 +1344,21 @@ fn import_ssh_root(
             &progress,
         )?,
     };
-    Ok(tui::ImportResult {
+    let result = tui::ImportResult {
         mode,
         root_id,
         root_path,
         files_imported,
-    })
+    };
+    tracing::info!(
+        mode = ?mode,
+        root_id = %result.root_id,
+        root_path = %result.root_path,
+        files_imported,
+        "ssh import committed"
+    );
+    import_timer.finish();
+    Ok(result)
 }
 
 fn resolve_ssh_absolute_path(host: &str, remote_path: &str) -> anyhow::Result<String> {
@@ -1406,6 +1433,14 @@ fn import_remote_stat_entries(
     progress: &tui::ImportProgressCallback,
     entries: &[RemoteStatEntry],
 ) -> anyhow::Result<()> {
+    tracing::info!(
+        root_id,
+        root_path,
+        files = entries.len(),
+        "remote stat indexing started"
+    );
+    let indexing_timer =
+        diagnostics::OperationTimer::start("ssh.index_remote_stat_entries", Duration::from_secs(1));
     let mut reporter = ImportProgressReporter::new(
         progress,
         root_id,
@@ -1432,6 +1467,13 @@ fn import_remote_stat_entries(
         reporter.record_path(&entry.relative_path, &remote_parent(&entry.relative_path));
     }
     reporter.finish();
+    indexing_timer.finish();
+    tracing::info!(
+        root_id,
+        root_path,
+        files = entries.len(),
+        "remote stat indexing finished"
+    );
     Ok(())
 }
 
@@ -2053,7 +2095,7 @@ impl<'a> ImportProgressReporter<'a> {
     }
 
     fn emit(&mut self) {
-        (self.callback)(tui::ImportProgress {
+        let progress = tui::ImportProgress {
             root_id: self.root_id.to_string(),
             root_path: self.root_path.to_string(),
             files_imported: self.files_imported,
@@ -2065,7 +2107,22 @@ impl<'a> ImportProgressReporter<'a> {
             directories_queued: self.queued_dir_file_counts.len() as u64,
             current_path: self.current_path.clone(),
             phase: self.phase.to_string(),
-        });
+        };
+        tracing::debug!(
+            root_id = %progress.root_id,
+            root_path = %progress.root_path,
+            phase = %progress.phase,
+            current_path = progress.current_path.as_deref(),
+            files_imported = progress.files_imported,
+            files_queued = progress.files_queued,
+            files_skipped = progress.files_skipped,
+            bytes_imported = progress.bytes_imported,
+            bytes_total = progress.bytes_total,
+            directories_processed = progress.directories_processed,
+            directories_queued = progress.directories_queued,
+            "remote import progress"
+        );
+        (self.callback)(progress);
         self.last_emit = Instant::now();
         self.dirty = false;
     }
@@ -2080,6 +2137,15 @@ fn emit_import_progress(
     files_queued: u64,
     current_path: Option<String>,
 ) {
+    tracing::info!(
+        root_id,
+        root_path,
+        phase,
+        files_imported,
+        files_queued,
+        current_path = current_path.as_deref(),
+        "remote import phase"
+    );
     callback(tui::ImportProgress {
         root_id: root_id.to_string(),
         root_path: root_path.to_string(),
@@ -2414,6 +2480,9 @@ fn fast_scan_ssh_tree(
         "find -L {} -type f -printf '%P\\t%s\\t%T+\\n'",
         remote_shell_path(remote_path)
     );
+    tracing::info!(host, remote_path, "ssh recursive stat scan started");
+    let scan_timer =
+        diagnostics::OperationTimer::start("ssh.recursive_stat_scan", Duration::from_secs(1));
     let output = Command::new("ssh")
         .arg("-o")
         .arg("BatchMode=yes")
@@ -2423,6 +2492,7 @@ fn fast_scan_ssh_tree(
         .arg(command)
         .output()
         .with_context(|| format!("fast importing SSH target {host}:{remote_path}"))?;
+    scan_timer.finish();
     if !output.status.success() {
         anyhow::bail!(
             "ssh fast import failed for {host}:{remote_path}: {}",
@@ -2448,6 +2518,12 @@ fn fast_scan_ssh_tree(
         });
     }
     entries.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    tracing::info!(
+        host,
+        remote_path,
+        files = entries.len(),
+        "ssh recursive stat scan finished"
+    );
     Ok(entries)
 }
 

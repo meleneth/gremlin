@@ -54,6 +54,7 @@ pub(super) async fn run_loop(
     initial_browse: Option<InitialBrowse>,
     open_root_provider: OpenRootProvider,
 ) -> anyhow::Result<TuiExit> {
+    tracing::info!(db_path = %db_path.display(), "tui started");
     let (job_tx, mut job_rx) = mpsc::unbounded_channel::<TuiMessage>();
     let mut state = AppState {
         status: "loading database...".to_string(),
@@ -87,6 +88,10 @@ pub(super) async fn run_loop(
     })?;
     state.status = "ready".to_string();
     loop {
+        let loop_timer = crate::diagnostics::OperationTimer::start(
+            "tui.loop_before_input",
+            Duration::from_millis(100),
+        );
         while let Ok(message) = job_rx.try_recv() {
             match message {
                 TuiMessage::Status(message) => {
@@ -134,6 +139,7 @@ pub(super) async fn run_loop(
                     start_next_queued_transfer(conn, db_path, job_tx.clone(), &mut state)?;
                 }
                 TuiMessage::ImportFinished(status) => {
+                    tracing::info!(status, "remote import finished");
                     state.clear_file_list_cache();
                     state.active_import_root_id = None;
                     state.active_import_progress = None;
@@ -264,7 +270,10 @@ pub(super) async fn run_loop(
                 }
             }
         }
+        let roots_timer =
+            crate::diagnostics::OperationTimer::start("tui.load_roots", Duration::from_millis(100));
         let all_roots = db::roots(conn)?;
+        roots_timer.finish();
         let roots = filtered_root_rows(&all_roots, &state.root_filter);
         select_active_import_root(&mut state, &roots);
         if state.active_background_jobs == 0 {
@@ -321,6 +330,17 @@ pub(super) async fn run_loop(
             .as_ref()
             .is_none_or(|cache| cache.key != file_list_key)
         {
+            tracing::info!(
+                root_id = selected.map(|root| root.id.as_str()),
+                directory = persisted_browse_dir.as_deref(),
+                pane_mode = state.file_pane_mode.label(),
+                filter = %state.file_filter,
+                "tui file snapshot load started"
+            );
+            let snapshot_timer = crate::diagnostics::OperationTimer::start(
+                "tui.load_file_snapshot",
+                Duration::from_millis(100),
+            );
             let selected_temporary = selected_temporary_browse(&state);
             let (rows, selected_paths, detail_key) = current_file_snapshot(
                 conn,
@@ -330,12 +350,21 @@ pub(super) async fn run_loop(
                 selected_temporary,
                 persisted_browse_dir.as_deref(),
             )?;
+            let row_count = rows.len();
             state.file_list_cache = Some(FileListCache {
                 key: file_list_key,
                 rows: Arc::new(rows),
                 selected_paths: Arc::new(selected_paths),
                 detail_key,
             });
+            let elapsed = snapshot_timer.finish();
+            tracing::info!(
+                root_id = selected.map(|root| root.id.as_str()),
+                directory = persisted_browse_dir.as_deref(),
+                rows = row_count,
+                elapsed_ms = elapsed.as_secs_f64() * 1_000.0,
+                "tui file snapshot load finished"
+            );
         }
         let (file_count, detail_key) = state
             .file_list_cache
@@ -368,6 +397,8 @@ pub(super) async fn run_loop(
             .clone();
         let selected_temporary = selected_temporary_browse(&state);
 
+        let render_timer =
+            crate::diagnostics::OperationTimer::start("tui.render", Duration::from_millis(100));
         terminal.draw(|frame| {
             frame.render_widget(
                 AppScreen {
@@ -391,6 +422,8 @@ pub(super) async fn run_loop(
                 frame.area(),
             );
         })?;
+        render_timer.finish();
+        loop_timer.finish();
 
         let poll_timeout = if state.active_background_jobs > 0 {
             Duration::from_millis(250)
@@ -400,6 +433,7 @@ pub(super) async fn run_loop(
         if event::poll(poll_timeout)? {
             if let Event::Key(key) = event::read()? {
                 if is_interrupt_key(key) {
+                    tracing::warn!(key = ?key.code, "tui immediate interrupt requested");
                     request_immediate_quit(conn, &mut state)?;
                     return Ok(TuiExit::QuitNow);
                 }
@@ -487,6 +521,7 @@ pub(super) async fn run_loop(
                             );
                             continue;
                         }
+                        tracing::info!("tui normal quit requested");
                         break;
                     }
                     KeyCode::Tab => {
