@@ -2477,7 +2477,7 @@ fn fast_scan_ssh_tree(
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("SSH target missing machine hint"))?;
     let command = format!(
-        "find -L {} -type f -printf '%P\\t%s\\t%T+\\n'",
+        "LC_ALL=C find -L {} -type f -printf '%P\\t%s\\t%T+\\n'",
         remote_shell_path(remote_path)
     );
     tracing::info!(host, remote_path, "ssh recursive stat scan started");
@@ -2493,10 +2493,21 @@ fn fast_scan_ssh_tree(
         .output()
         .with_context(|| format!("fast importing SSH target {host}:{remote_path}"))?;
     scan_timer.finish();
-    if !output.status.success() {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success()
+        && !find_failure_contains_only_filesystem_loops(output.status.code(), &stderr)
+    {
         anyhow::bail!(
             "ssh fast import failed for {host}:{remote_path}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            stderr.trim()
+        );
+    }
+    if !output.status.success() {
+        tracing::warn!(
+            host,
+            remote_path,
+            diagnostics = stderr.trim(),
+            "ssh recursive stat scan skipped filesystem loops"
         );
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2525,6 +2536,15 @@ fn fast_scan_ssh_tree(
         "ssh recursive stat scan finished"
     );
     Ok(entries)
+}
+
+fn find_failure_contains_only_filesystem_loops(exit_code: Option<i32>, stderr: &str) -> bool {
+    exit_code == Some(1)
+        && stderr.lines().any(|line| !line.trim().is_empty())
+        && stderr
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .all(|line| line.contains("File system loop detected;"))
 }
 
 fn remote_basename(relative_path: &str) -> &str {
@@ -2717,6 +2737,25 @@ mod tests {
             "foo.png"
         );
         assert_eq!(remote_path_basename("/srv/archive/foo.png"), "foo.png");
+    }
+
+    #[test]
+    fn remote_find_filesystem_loops_are_skippable() {
+        let stderr = "find: File system loop detected; '/pictures/loop' is part of the same file system loop as '/pictures'.\n";
+
+        assert!(find_failure_contains_only_filesystem_loops(Some(1), stderr));
+    }
+
+    #[test]
+    fn remote_find_mixed_or_fatal_failures_are_not_skippable() {
+        let mixed = "find: File system loop detected; '/pictures/loop' is part of the same file system loop as '/pictures'.\nfind: '/pictures/private': Permission denied\n";
+
+        assert!(!find_failure_contains_only_filesystem_loops(Some(1), mixed));
+        assert!(!find_failure_contains_only_filesystem_loops(
+            Some(255),
+            "find: File system loop detected; '/pictures/loop' is part of a loop.\n"
+        ));
+        assert!(!find_failure_contains_only_filesystem_loops(Some(1), ""));
     }
 
     #[test]
