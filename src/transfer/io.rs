@@ -73,6 +73,19 @@ pub(super) fn source_modified_at(
         .map(str::to_string))
 }
 
+pub(super) fn modified_times_match(actual: Option<&str>, expected: Option<&str>) -> bool {
+    let (Some(actual), Some(expected)) = (actual, expected) else {
+        return false;
+    };
+    match (
+        file_time_from_rfc3339(actual),
+        file_time_from_rfc3339(expected),
+    ) {
+        (Ok(actual), Ok(expected)) => actual == expected,
+        _ => actual == expected,
+    }
+}
+
 pub(super) fn set_local_file_mtime(path: &Path, modified_at: Option<&str>) -> anyhow::Result<()> {
     let Some(modified_at) = modified_at else {
         return Ok(());
@@ -101,6 +114,7 @@ pub(super) fn set_remote_file_mtime(
 pub(super) fn file_time_from_rfc3339(value: &str) -> anyhow::Result<FileTime> {
     let dt = DateTime::parse_from_rfc3339(value)
         .or_else(|_| parse_find_printf_timestamp(value))
+        .or_else(|_| DateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S%.f %z"))
         .with_context(|| format!("invalid RFC3339 or find %T+ timestamp: {value}"))?;
     Ok(FileTime::from_unix_time(
         dt.timestamp(),

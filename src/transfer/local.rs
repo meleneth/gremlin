@@ -23,7 +23,11 @@ pub(super) fn copy_local_to_local(
     let source_modified_at = source_meta.modified().ok().map(system_time_rfc3339);
 
     if let Ok(dest_meta) = std::fs::metadata(dest_path) {
-        if dest_meta.is_file() && dest_meta.len() == entry.size_bytes {
+        let dest_modified_at = dest_meta.modified().ok().map(system_time_rfc3339);
+        if dest_meta.is_file()
+            && dest_meta.len() == entry.size_bytes
+            && modified_times_match(dest_modified_at.as_deref(), source_modified_at.as_deref())
+        {
             let verified_content_id = if paranoid {
                 sync_for_paranoid_readback(dest_path, None)?;
                 let readback_hash = hash_existing_file(dest_path)?;
@@ -38,7 +42,6 @@ pub(super) fn copy_local_to_local(
             } else {
                 None
             };
-            let dest_modified_at = dest_meta.modified().ok().map(system_time_rfc3339);
             insert_dest_observation(
                 ctx.conn,
                 ctx.dest_root,
@@ -56,7 +59,7 @@ pub(super) fn copy_local_to_local(
                     dest_path: &dest_path.display().to_string(),
                     size_bytes: entry.size_bytes,
                     action: "skip",
-                    message: Some("destination already has planned size"),
+                    message: Some("destination already has planned size and modified time"),
                     error: None,
                 },
             )?;

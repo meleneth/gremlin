@@ -211,7 +211,7 @@ pub(super) fn probe_local_path(path: &Path) -> anyhow::Result<EndpointPathKind> 
 
 pub(super) fn probe_remote_path(host: &str, path: &str) -> anyhow::Result<EndpointPathKind> {
     let command = format!(
-        "if test ! -e {path}; then exit 3; elif test -d {path}; then printf 'dir\\n'; elif test -f {path}; then printf 'file '; stat -c '%s' {path}; else printf 'other '; stat -c '%s' {path}; fi",
+        "if test ! -e {path}; then exit 3; elif test -d {path}; then printf 'dir\\n'; elif test -f {path}; then printf 'file\\t'; stat -c '%s\\t%y' {path}; else printf 'other\\t'; stat -c '%s\\t%y' {path}; fi",
         path = remote_shell_path(path)
     );
     let output = Command::new("ssh")
@@ -230,16 +230,16 @@ pub(super) fn probe_remote_path(host: &str, path: &str) -> anyhow::Result<Endpoi
         );
     }
     let stdout = String::from_utf8(output.stdout).context("remote stat output was not UTF-8")?;
-    let mut fields = stdout.split_whitespace();
+    let mut fields = stdout.trim_end().splitn(3, '\t');
     match fields.next() {
         Some("dir") => Ok(EndpointPathKind::Directory),
         Some("file") => Ok(EndpointPathKind::File {
             size_bytes: parse_remote_stat_size(fields.next(), host, path)?,
-            modified_at: None,
+            modified_at: fields.next().map(str::to_string),
         }),
         Some("other") => Ok(EndpointPathKind::Other {
             size_bytes: parse_remote_stat_size(fields.next(), host, path)?,
-            modified_at: None,
+            modified_at: fields.next().map(str::to_string),
         }),
         _ => anyhow::bail!("remote stat produced invalid output for {host}:{path}"),
     }

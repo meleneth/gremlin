@@ -6,8 +6,39 @@ pub(super) fn copy_ssh_to_local(
     dest_path: &Path,
     on_progress: &mut TransferProgressCallback<'_>,
 ) -> anyhow::Result<CopyOutcome> {
-    if std::fs::metadata(dest_path).is_ok() {
-        anyhow::bail!("destination exists: {}", dest_path.display());
+    let source_modified_at = source_modified_at(entry)?;
+    if let Ok(dest_meta) = std::fs::metadata(dest_path) {
+        let dest_modified_at = dest_meta.modified().ok().map(system_time_rfc3339);
+        if dest_meta.is_file()
+            && dest_meta.len() == entry.size_bytes
+            && modified_times_match(dest_modified_at.as_deref(), source_modified_at.as_deref())
+        {
+            insert_dest_observation(
+                ctx.conn,
+                ctx.dest_root,
+                entry,
+                None,
+                dest_modified_at.as_deref(),
+            )?;
+            let source_display = source.display_path();
+            let dest_display = dest_path.display().to_string();
+            persist_transfer_file_event(
+                ctx.conn,
+                ctx.job_id,
+                TransferFileEventInput {
+                    event_kind: EventKind::TransferSkipped,
+                    relative_path: &entry.relative_path,
+                    source_path: &source_display,
+                    dest_path: &dest_display,
+                    size_bytes: entry.size_bytes,
+                    action: "skip",
+                    message: Some("destination already has planned size and modified time"),
+                    error: None,
+                },
+            )?;
+            return Ok(CopyOutcome::Skipped);
+        }
+        anyhow::bail!("destination exists and differs: {}", dest_path.display());
     }
     let parent = ensure_dest_parent(dest_path)?;
     let temp_path = transfer_temp_path(dest_path);
@@ -46,7 +77,6 @@ pub(super) fn copy_ssh_to_local(
     }
     std::fs::rename(&temp_path, dest_path)
         .with_context(|| format!("installing copy at {}", dest_path.display()))?;
-    let source_modified_at = source_modified_at(entry)?;
     set_local_file_mtime(dest_path, source_modified_at.as_deref())?;
     sync_for_paranoid_readback(dest_path, parent)?;
     let content_id = db::ensure_content_object_crc(
@@ -110,7 +140,33 @@ pub(super) fn copy_local_to_ssh(
         anyhow::bail!("destination is not SSH");
     };
     let parent = remote_parent(path);
-    if remote_path_exists(host, path)? {
+    if let EndpointPathKind::File {
+        size_bytes,
+        modified_at,
+    } = probe_remote_path(host, path)?
+    {
+        if size_bytes == entry.size_bytes
+            && modified_times_match(modified_at.as_deref(), source_modified_at.as_deref())
+        {
+            insert_dest_observation(ctx.conn, ctx.dest_root, entry, None, modified_at.as_deref())?;
+            let source_display = source_path.display().to_string();
+            let dest_display = dest.display_path();
+            persist_transfer_file_event(
+                ctx.conn,
+                ctx.job_id,
+                TransferFileEventInput {
+                    event_kind: EventKind::TransferSkipped,
+                    relative_path: &entry.relative_path,
+                    source_path: &source_display,
+                    dest_path: &dest_display,
+                    size_bytes: entry.size_bytes,
+                    action: "skip",
+                    message: Some("destination already has planned size and modified time"),
+                    error: None,
+                },
+            )?;
+            return Ok(CopyOutcome::Skipped);
+        }
         let checkpoint_count = db::transfer_copy_chunk_count_for_entry(
             ctx.conn,
             ctx.plan_id,
@@ -118,8 +174,10 @@ pub(super) fn copy_local_to_ssh(
             &entry.dest_relative_path,
         )?;
         if checkpoint_count == 0 {
-            anyhow::bail!("remote destination exists: {host}:{path}");
+            anyhow::bail!("remote destination exists and differs: {host}:{path}");
         }
+    } else if remote_path_exists(host, path)? {
+        anyhow::bail!("remote destination exists and is not a regular file: {host}:{path}");
     }
     run_command(Command::new("ssh").arg(host).arg(format!(
         "test -f {} || mkdir -p {}",

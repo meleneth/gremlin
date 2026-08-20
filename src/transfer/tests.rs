@@ -286,7 +286,6 @@ fn runs_copy_entries_and_updates_destination_projection() {
     let source = db::root_by_id(&conn, &source_id).unwrap().unwrap();
     let dest = db::root_by_id(&conn, &dest_id).unwrap().unwrap();
     let plan = plan_selected_files(&conn, &source, &dest).unwrap();
-
     let result = run_transfer_plan(&conn, &plan.plan_id, false).unwrap();
 
     assert_eq!(result.copied, 1);
@@ -320,6 +319,19 @@ fn parses_gnu_find_printf_timestamp_for_mtime_preservation() {
 
     assert_eq!(time.unix_seconds(), 1_783_514_096);
     assert_eq!(time.nanoseconds(), 123_456_789);
+}
+
+#[test]
+fn compares_equivalent_modified_time_formats() {
+    assert!(modified_times_match(
+        Some("2026-07-08 12:34:56.123456789 +0000"),
+        Some("2026-07-08T12:34:56.123456789Z"),
+    ));
+    assert!(!modified_times_match(
+        Some("2026-07-08T12:34:57Z"),
+        Some("2026-07-08T12:34:56Z"),
+    ));
+    assert!(!modified_times_match(None, None));
 }
 
 #[test]
@@ -502,6 +514,9 @@ fn transfer_progress_counts_skipped_entries_as_completed_work() {
     std::fs::write(source_dir.path().join("a.txt"), b"hello").unwrap();
     std::fs::write(source_dir.path().join("b.txt"), b"world!").unwrap();
     std::fs::write(dest_dir.path().join("a.txt"), b"hello").unwrap();
+    let completed_mtime = filetime::FileTime::from_unix_time(1_700_000_000, 123_000_000);
+    filetime::set_file_mtime(source_dir.path().join("a.txt"), completed_mtime).unwrap();
+    filetime::set_file_mtime(dest_dir.path().join("a.txt"), completed_mtime).unwrap();
 
     let conn = Connection::open_in_memory().unwrap();
     db::init_schema(&conn).unwrap();
@@ -577,6 +592,69 @@ fn transfer_progress_counts_skipped_entries_as_completed_work() {
         .unwrap();
     assert_eq!(progress.get("bytes_done").unwrap().as_u64(), Some(11));
     assert_eq!(progress.get("files_skipped").unwrap().as_u64(), Some(1));
+}
+
+#[test]
+fn resumed_copy_rejects_same_size_file_with_different_modified_time() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let dest_dir = tempfile::tempdir().unwrap();
+    std::fs::write(source_dir.path().join("a.txt"), b"hello").unwrap();
+    std::fs::write(dest_dir.path().join("a.txt"), b"other").unwrap();
+    filetime::set_file_mtime(
+        source_dir.path().join("a.txt"),
+        filetime::FileTime::from_unix_time(1_700_000_000, 0),
+    )
+    .unwrap();
+    filetime::set_file_mtime(
+        dest_dir.path().join("a.txt"),
+        filetime::FileTime::from_unix_time(1_700_000_001, 0),
+    )
+    .unwrap();
+
+    let conn = Connection::open_in_memory().unwrap();
+    db::init_schema(&conn).unwrap();
+    let machine_id = db::ensure_local_machine_with_label(&conn, None).unwrap();
+    let source_id = db::ensure_root(
+        &conn,
+        &machine_id,
+        source_dir.path().to_string_lossy().as_ref(),
+    )
+    .unwrap();
+    let dest_id = db::ensure_root(
+        &conn,
+        &machine_id,
+        dest_dir.path().to_string_lossy().as_ref(),
+    )
+    .unwrap();
+    observe(&conn, &machine_id, &source_id, "a.txt", 5, None);
+    db::toggle_selection_entry(&conn, &source_id, "a.txt").unwrap();
+    let source = db::root_by_id(&conn, &source_id).unwrap().unwrap();
+    let dest = db::root_by_id(&conn, &dest_id).unwrap().unwrap();
+    let plan = plan_selected_files(&conn, &source, &dest).unwrap();
+    db::insert_transfer_plan_entry(
+        &conn,
+        db::TransferPlanEntryInput {
+            plan_id: &plan.plan_id,
+            relative_path: "a.txt",
+            dest_relative_path: Some("a.txt"),
+            size_bytes: 5,
+            source_content_id: None,
+            dest_content_id: None,
+            action: "copy",
+            reason: "test forced resume",
+            metadata_json: serde_json::json!({}),
+        },
+    )
+    .unwrap();
+
+    let result = run_transfer_plan(&conn, &plan.plan_id, false).unwrap();
+
+    assert_eq!(result.skipped, 0);
+    assert_eq!(result.errors, 1);
+    assert_eq!(
+        std::fs::read(dest_dir.path().join("a.txt")).unwrap(),
+        b"other"
+    );
 }
 
 #[test]
